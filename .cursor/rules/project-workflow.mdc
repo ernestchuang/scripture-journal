@@ -1,0 +1,23 @@
+---
+description: Scripture Journal architecture, data safety, and resumable development
+alwaysApply: true
+---
+
+# Project workflow
+
+- Read AGENTS.md, docs/PRODUCT.md, and docs/ARCHITECTURE.md before implementation.
+- Confirmed requirements and proposed policies are distinct; do not silently
+  promote a proposal into a user-approved requirement.
+- Use a branch in a separate Git worktree for work. Keep the main checkout clean.
+- Use Beads for all task status and dependencies; documents describe design only.
+- Delegate bounded independent work when useful; assign disjoint files or use
+  separate worktrees for concurrent implementation. Integrate and review results.
+- Preserve every persisted writing revision unless explicitly deleted. A restored
+  version is a new revision. Never couple a draft's passage to reader scrolling.
+- The database owns entry relationships. Obsidian export is one-way, incremental,
+  and must preserve external edits as visible conflicts.
+- Never commit real journals, credentials, caches, or downloaded scripture text.
+- Do not build sync, accounts, sharing, or cryptography in the initial version.
+- Record decisions and issue handoffs throughout work, not only at session end.
+- Run appropriate checks, export the Beads snapshot, commit, push, and verify the
+  branch is up to date before declaring the work delivered.

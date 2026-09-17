@@ -1,40 +1,41 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
+Read README.md, docs/PRODUCT.md, docs/ARCHITECTURE.md, and the relevant data or
+portability contract before implementing. User-confirmed requirements and proposed
+policies must remain distinguishable. Current scope is a desktop rewrite; do not
+infer approval of proposed architecture from its presence in the repository.
 
-## Quick Reference
+Use Git worktrees for changes. Keep the main checkout clean. Run `git worktree list`
+before creating one; never reset/remove another session's branch, worktree, or stash.
+Bounded independent agent work is allowed with clear file ownership; use separate
+worktrees when implementations might overlap. Review and integrate every result.
+
+Use Beads for ALL task status, dependencies, acceptance criteria, and handoffs.
+Do not maintain task checklists in Markdown. Design documents describe contracts.
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --status in_progress  # Claim work
-bd close <id>         # Complete work
-bd sync               # Sync with git
+bd prime
+bd ready
+bd show <id>
+bd update <id> --status=in_progress
 ```
 
-## Landing the Plane (Session Completion)
+Create/claim the issue before writing code. Read docs/DEVELOPMENT.md for worktree
+database routing and new-clone recovery. This installation's `bd sync` is a no-op:
+explicitly export the issue snapshot in the worktree being committed.
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+At each meaningful checkpoint, update the issue with decisions, validation,
+limitations, and the next concrete step. At session end:
 
-**MANDATORY WORKFLOW:**
+1. Check `git status`; run checks appropriate to the change.
+2. Update issues; close only work actually delivered. Record remaining work.
+3. Run `bd sync`, then `bd export -o .beads/issues.jsonl` in this worktree.
+4. Stage exact intended files and commit; re-export if issue state changed.
+5. Pull/rebase where an upstream exists, resolve conflicts, and push.
+6. Verify the working tree is clean and the branch is up to date with its remote.
+7. Hand off branch, issue IDs, validation, and next step. Never claim a push succeeded
+   without checking it; report access failures and preserve the committed work.
 
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   bd sync
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
-
+No real journals, secrets, or downloaded scripture in source control. Never prune
+journal versions automatically. Revisions, entry links, and export safety are
+defined in docs/DATA-MODEL.md and docs/PORTABILITY.md.
