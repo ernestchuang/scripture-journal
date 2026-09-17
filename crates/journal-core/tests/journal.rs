@@ -273,3 +273,88 @@ fn database_prevents_revision_rewrite_and_cross_entry_heads() {
         .is_err());
     assert_eq!(store.list_entries().unwrap().len(), 2);
 }
+
+#[cfg(unix)]
+#[test]
+fn export_rejects_symlinked_managed_files_without_touching_external_bytes() {
+    use std::os::unix::fs::symlink;
+    for managed in ["lock", "manifest", "entry"] {
+        let dir = TempDir::new().unwrap();
+        let mut store = JournalStore::open(&dir.path().join("j.db")).unwrap();
+        let req = request("Synthetic published entry", true);
+        store.save_entry(req.clone()).unwrap();
+        let out = dir.path().canonicalize().unwrap().join("out");
+        fs::create_dir(&out).unwrap();
+        let external = dir.path().join("external.txt");
+        fs::write(&external, "External content must survive").unwrap();
+        let name = match managed {
+            "lock" => ".scripture-journal-export.lock".to_string(),
+            "manifest" => ".scripture-journal-export.json".to_string(),
+            _ => format!("{}.md", req.entry_id),
+        };
+        let link = out.join(name);
+        symlink(&external, &link).unwrap();
+        let result = store.export_journal(&out);
+        if managed == "entry" {
+            let report = result.unwrap();
+            assert_eq!(report.written, 0);
+            assert_eq!(report.conflicts.len(), 1);
+        } else {
+            assert!(result.is_err(), "{managed} symlink must reject export");
+        }
+        assert_eq!(
+            fs::read_to_string(&external).unwrap(),
+            "External content must survive"
+        );
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_recovery_directory_preserves_previous_export_and_can_retry() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new().unwrap();
+    let mut store = JournalStore::open(&dir.path().join("j.db")).unwrap();
+    let mut req = request("Synthetic published entry", true);
+    let first = store.save_entry(req.clone()).unwrap();
+    let out = dir.path().canonicalize().unwrap().join("out");
+    store.export_journal(&out).unwrap();
+    let target = out.join(format!("{}.md", req.entry_id));
+    let original = fs::read(&target).unwrap();
+    req.expected_revision_id = Some(first.working_revision_id);
+    req.content.body = "New finished synthetic text".into();
+    store.save_entry(req).unwrap();
+    let external = dir.path().join("external");
+    fs::create_dir(&external).unwrap();
+    let recovery = out.join(".scripture-journal-recovery");
+    symlink(&external, &recovery).unwrap();
+    let report = store.export_journal(&out).unwrap();
+    assert_eq!(report.written, 0);
+    assert_eq!(report.conflicts.len(), 1);
+    assert_eq!(fs::read(&target).unwrap(), original);
+    assert_eq!(fs::read_dir(&external).unwrap().count(), 0);
+    assert!(fs::symlink_metadata(&recovery)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    // Explicitly remove the test obstruction, then retry the pending export.
+    fs::remove_file(&recovery).unwrap();
+    let report = store.export_journal(&out).unwrap();
+    assert_eq!(report.written, 1);
+    assert!(report.conflicts.is_empty());
+    assert!(fs::read_to_string(&target)
+        .unwrap()
+        .contains("New finished synthetic text"));
+    let saved: Vec<_> = fs::read_dir(&recovery).unwrap().collect();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        fs::read(saved[0].as_ref().unwrap().path()).unwrap(),
+        original
+    );
+    assert_eq!(fs::read_dir(&external).unwrap().count(), 0);
+}
