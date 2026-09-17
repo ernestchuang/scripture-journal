@@ -32,7 +32,13 @@ offline scripture, the other translations, reading plans, full backup/restore,
 legacy import, deletion, and automatic incremental export are not implemented in
 this slice. See the [translation source investigation](docs/TRANSLATION-SOURCES.md).
 Manual export scans finished entries and preserves conflicting external files;
-it is not a complete backup of drafts and history. Keep the original app in use
+it is not a complete backup of drafts and history. Export retains displaced
+manifests as `.scripture-journal-manifest-recovery-*.json` files in the destination;
+these are not automatically deleted. An interruption between displacement and
+installation can leave the manifest missing. Export then requires explicit repair
+from retained recovery files instead of initializing a new manifest. Concurrent
+edits cannot be made atomic with unrelated editors; displaced files are retained
+for recovery. Keep the original app in use
 until the release and migration checks are complete.
 
 ```bash

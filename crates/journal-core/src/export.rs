@@ -10,6 +10,7 @@ use std::{
 use tempfile::NamedTempFile;
 
 const MANIFEST: &str = ".scripture-journal-export.json";
+const MANIFEST_RECOVERY: &str = ".scripture-journal-manifest-recovery-";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +58,15 @@ impl JournalStore {
             serde_json::from_slice::<Manifest>(bytes)
                 .context("Invalid export manifest; refusing overwrite")?
         } else {
+            ensure!(
+                !fs::read_dir(directory)?.any(|entry| entry
+                    .map(|e| e
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(MANIFEST_RECOVERY))
+                    .unwrap_or(true)),
+                "Export manifest is missing but recovery files exist; repair explicitly"
+            );
             Manifest {
                 version: 1,
                 journal_id: self.identity("journal_id")?,
@@ -274,12 +284,106 @@ fn write_manifest(
     let mut temp = NamedTempFile::new_in(directory)?;
     temp.write_all(&bytes)?;
     temp.as_file().sync_all()?;
-    if previous.is_none() {
-        temp.persist_noclobber(&path).map_err(|e| e.error)?;
-    } else {
-        temp.persist(&path).map_err(|e| e.error)?;
-    }
-    File::open(directory)?.sync_all()?;
+    ensure!(
+        read_optional(&path)? == *previous,
+        "Export manifest changed externally"
+    );
+    install_manifest(temp, directory, previous.as_deref())?;
     *previous = Some(bytes);
     Ok(())
+}
+
+// The caller has just checked the path, but an external writer can still race it.
+// Move (rather than copy) the displaced inode so even a late edit is retained.
+fn install_manifest(temp: NamedTempFile, directory: &Path, previous: Option<&[u8]>) -> Result<()> {
+    let path = directory.join(MANIFEST);
+    let mut recovery = None;
+    if let Some(expected) = previous {
+        let saved = directory.join(format!("{MANIFEST_RECOVERY}{}.json", Uuid::new_v4()));
+        fs::rename(&path, &saved)?;
+        File::open(directory)?.sync_all()?;
+        let displaced = read_optional(&saved);
+        if !matches!(&displaced, Ok(Some(bytes)) if bytes.as_slice() == expected) {
+            let _ = fs::hard_link(&saved, &path);
+            File::open(directory)?.sync_all()?;
+            bail!(
+                "Export manifest changed during replacement; displaced file preserved at {}",
+                saved.display()
+            );
+        }
+        recovery = Some(saved);
+    }
+    if let Err(error) = temp.persist_noclobber(&path) {
+        if let Some(saved) = &recovery {
+            // Restore only if the name is still vacant; never replace another writer.
+            let _ = fs::hard_link(saved, &path);
+        }
+        File::open(directory)?.sync_all()?;
+        return Err(error.error)
+            .context("Export manifest appeared during replacement; recovery files preserved");
+    }
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    fn staged(directory: &Path) -> NamedTempFile {
+        let mut temp = NamedTempFile::new_in(directory).unwrap();
+        temp.write_all(b"new manifest").unwrap();
+        temp.as_file().sync_all().unwrap();
+        temp
+    }
+
+    #[test]
+    fn late_manifest_edit_is_preserved_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MANIFEST);
+        fs::write(&path, b"checked manifest").unwrap();
+        let temp = staged(dir.path());
+        // Inject an external replacement after the caller's final precheck.
+        fs::write(&path, b"external edit").unwrap();
+        let error = install_manifest(temp, dir.path(), Some(b"checked manifest")).unwrap_err();
+        assert!(error.to_string().contains("changed during replacement"));
+        assert_eq!(fs::read(&path).unwrap(), b"external edit");
+        let saved = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(MANIFEST_RECOVERY)
+            })
+            .unwrap();
+        assert_eq!(fs::read(saved).unwrap(), b"external edit");
+    }
+
+    #[test]
+    fn first_manifest_creation_does_not_clobber_a_late_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = staged(dir.path());
+        let path = dir.path().join(MANIFEST);
+        fs::write(&path, b"external manifest").unwrap();
+        assert!(install_manifest(temp, dir.path(), None).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"external manifest");
+    }
+
+    #[test]
+    fn missing_manifest_with_displaced_recovery_requires_explicit_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().canonicalize().unwrap().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(
+            out.join(format!("{MANIFEST_RECOVERY}interrupted.json")),
+            b"retained manifest",
+        )
+        .unwrap();
+        let store = JournalStore::open(&dir.path().join("journal.db")).unwrap();
+        let error = store.export_journal(&out).unwrap_err();
+        assert!(error.to_string().contains("repair explicitly"));
+        assert!(!out.join(MANIFEST).exists());
+    }
 }
