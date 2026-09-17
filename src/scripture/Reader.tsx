@@ -59,6 +59,36 @@ export function Reader({ selection, onSelectionChange, onReflect }: ReaderProps)
   const anchor = useRef<{ key: string; top: number } | null>(null);
   const incomingKey = chapterKey(safeSelection);
   useEffect(() => {
+    const element = viewport.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    let width = element.clientWidth;
+    let height = element.clientHeight;
+    let saved: { verse: HTMLElement; top: number } | null = null;
+    const capture = () => {
+      // A resize may dispatch scroll before ResizeObserver. Keep the anchor from
+      // the old layout until the observer has compensated for the new one.
+      if (!element.clientWidth || element.clientWidth !== width || element.clientHeight !== height) return;
+      const top = element.getBoundingClientRect().top;
+      const verse = [...element.querySelectorAll<HTMLElement>('[data-verse]')]
+        .find(node => node.getBoundingClientRect().bottom > top + 1);
+      saved = verse ? { verse, top: verse.getBoundingClientRect().top - top } : null;
+    };
+    const observer = new ResizeObserver(() => {
+      if (!element.clientWidth || !element.clientHeight) return;
+      const changed = width !== element.clientWidth || height !== element.clientHeight;
+      width = element.clientWidth;
+      height = element.clientHeight;
+      if (changed && saved && element.contains(saved.verse)) {
+        element.scrollTop += saved.verse.getBoundingClientRect().top
+          - element.getBoundingClientRect().top - saved.top;
+      }
+      capture();
+    });
+    element.addEventListener('scroll', capture);
+    observer.observe(element);
+    return () => { observer.disconnect(); element.removeEventListener('scroll', capture); };
+  }, []);
+  useEffect(() => {
     if (incomingKey !== reported.current) {
       reported.current = incomingKey;
       setChapters([{ book: safeSelection.book, chapter: safeSelection.chapter }]);

@@ -103,3 +103,34 @@ test('prepending and loading a preceding chapter preserves the visible verse pos
   await expect(verse).toBeInViewport();
   await expect(page.getByRole('combobox', { name: 'Chapter', exact: true })).toHaveValue('3');
 });
+
+test('desktop width changes preserve the reading verse and active draft', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.route('https://bible-api.com/John%203?*', route => route.fulfill({ json: {
+    translation_id: 'kjv',
+    verses: Array.from({ length: 24 }, (_, index) => ({
+      book_name: 'John', chapter: 3, verse: index + 1,
+      text: `Synthetic verse ${index + 1}. ${'Long fixture text makes desktop width changes reflow the reading. '.repeat(4)}`,
+    })),
+  } }));
+  await page.getByRole('combobox', { name: 'Chapter', exact: true }).selectOption('3');
+  await page.getByRole('button', { name: 'Reflect on John 3', exact: true }).click();
+  const body = page.getByRole('textbox', { name: 'Reflection Markdown supported' });
+  await body.fill('Keep this draft while resizing.');
+  await page.evaluate(() => document.fonts.ready);
+  const verse = page.getByRole('region', { name: 'John 3', exact: true }).locator('[data-verse="10"]');
+  await verse.evaluate(node => {
+    const viewport = node.closest('.scripture-scroll')!;
+    viewport.scrollTop += node.getBoundingClientRect().top - viewport.getBoundingClientRect().top;
+  });
+  const top = () => verse.evaluate(node => node.getBoundingClientRect().top - node.closest('.scripture-scroll')!.getBoundingClientRect().top);
+  await expect.poll(async () => Math.abs(await top())).toBeLessThan(1);
+  const wideHeight = await verse.evaluate(node => node.getBoundingClientRect().height);
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await expect.poll(() => verse.evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThan(wideHeight);
+  await expect.poll(async () => Math.abs(await top())).toBeLessThan(1);
+  await expect(body).toHaveValue('Keep this draft while resizing.');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect.poll(async () => Math.abs(await top())).toBeLessThan(1);
+  await expect(body).toHaveValue('Keep this draft while resizing.');
+});
