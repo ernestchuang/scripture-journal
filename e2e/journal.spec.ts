@@ -111,3 +111,56 @@ test('connections survive renaming and restoring history without losing the inte
   await page.getByRole('button', { name: 'Source reflection', exact: true }).click();
   await expect(body).toHaveValue('Original connected content.');
 });
+
+test('Finish publishes the requested text while an older autosave is in flight', async ({ page }) => {
+  await page.route('https://bible-api.com/**', route => route.abort());
+  await page.goto('/');
+  await page.getByRole('button', { name: 'New blank entry' }).click();
+  await page.getByRole('textbox', { name: 'Title', exact: true }).fill('In-flight finish');
+  const body = page.getByRole('textbox', { name: 'Reflection Markdown supported' });
+  await body.fill('Initial draft.');
+  await expect(page.getByRole('status').filter({ hasText: /^Draft saved$/ })).toBeVisible();
+
+  // Delay exactly one real adapter call, without adding production timing hooks
+  // or replacing IndexedDB. The UI must wait for it before finishing newer text.
+  await page.evaluate(async () => {
+    const { browserJournal: api } = await import('/src/platform/browserJournal.ts');
+    const save = api.saveEntry;
+    api.saveEntry = async request => {
+      api.saveEntry = save;
+      await new Promise<void>(resolve => {
+        window.addEventListener('test:release-autosave', () => resolve(), { once: true });
+      });
+      return save(request);
+    };
+  });
+  await body.fill('Older autosave content.');
+  await expect(page.getByRole('status').filter({ hasText: /^Saving…$/ })).toBeVisible();
+  await body.fill('Exact text requested at Finish.');
+  const finish = page.getByRole('button', { name: 'Finish entry' });
+  await finish.click();
+  await expect(finish).toBeDisabled();
+  await expect(body).toBeDisabled();
+  await expect(page.getByRole('status').filter({ hasText: /^Finished$/ })).toHaveCount(0);
+  await page.evaluate(() => window.dispatchEvent(new Event('test:release-autosave')));
+  await expect(page.getByRole('status').filter({ hasText: /^Finished$/ })).toBeVisible();
+  await expect(body).toHaveValue('Exact text requested at Finish.');
+
+  await page.reload();
+  const entryButton = page.getByRole('navigation', { name: 'Journal entries' })
+    .getByRole('button', { name: /In-flight finish/ });
+  await entryButton.click();
+  await expect(entryButton).toContainText('Finished');
+  await expect(body).toHaveValue('Exact text requested at Finish.');
+  // Inspect durable heads as well as the UI: a Finished label alone cannot prove
+  // which revision is eligible for export or that the older write was retained.
+  const persisted = await page.evaluate(async () => {
+    const { browserJournal: api } = await import('/src/platform/browserJournal.ts');
+    const entry = (await api.listEntries()).find(item => item.content.title === 'In-flight finish')!;
+    return { entry, history: await api.getHistory(entry.id) };
+  });
+  expect(persisted.entry.publishedRevisionId).toBe(persisted.entry.workingRevisionId);
+  expect(persisted.history.find(revision => revision.id === persisted.entry.publishedRevisionId)?.content.body)
+    .toBe('Exact text requested at Finish.');
+  expect(persisted.history.some(revision => revision.content.body === 'Older autosave content.')).toBe(true);
+});
