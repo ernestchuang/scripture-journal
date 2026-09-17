@@ -44,3 +44,70 @@ test('a draft keeps its pinned passage and recovers explicitly added passages af
   await expect(page.getByRole('button', { name: 'Remove Romans 8', exact: true })).toBeVisible();
   await expect(savedEntry).toContainText('Draft');
 });
+
+test('connections survive renaming and restoring history without losing the intervening version', async ({ page }) => {
+  // This journal-only flow needs no live scripture service.
+  await page.route('https://bible-api.com/**', route => route.abort());
+  await page.goto('/');
+  const title = page.getByRole('textbox', { name: 'Title', exact: true });
+  const body = page.getByRole('textbox', { name: 'Reflection Markdown supported' });
+  const entries = page.getByRole('navigation', { name: 'Journal entries' });
+  const sourceEntry = entries.getByRole('button', { name: /Source reflection/ });
+  const targetEntry = entries.getByRole('button', { name: /Renamed target/ });
+  const history = page.getByRole('region', { name: 'Revision history' });
+  const versions = history.getByRole('button', { name: /^Version / });
+
+  await page.getByRole('button', { name: 'New blank entry' }).click();
+  await title.fill('Target reflection');
+  await body.fill('Synthetic target content.');
+  await page.getByRole('button', { name: 'Finish entry' }).click();
+  await page.getByRole('button', { name: 'New blank entry' }).click();
+  await title.fill('Source reflection');
+  await body.fill('Original connected content.');
+  await page.getByRole('combobox', { name: 'Connect another entry' }).selectOption({ label: 'Target reflection' });
+  await page.getByRole('button', { name: 'Connect', exact: true }).click();
+  await page.getByRole('button', { name: 'Finish entry' }).click();
+
+  // Follow the outgoing connection, rename its target, then follow the backlink.
+  await page.getByRole('button', { name: 'Target reflection', exact: true }).click();
+  await expect(body).toHaveValue('Synthetic target content.');
+  await title.fill('Renamed target');
+  await page.getByRole('button', { name: 'Source reflection', exact: true }).click();
+  await expect(body).toHaveValue('Original connected content.');
+  await expect(page.getByRole('button', { name: 'Renamed target', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'View revision history' }).click();
+  await expect(versions.first()).toBeVisible();
+  const linkedVersion = await versions.first().innerText();
+
+  await body.fill('Later content without a connection.');
+  await page.getByRole('button', { name: 'Remove connection to Renamed target', exact: true }).click();
+  await page.getByRole('button', { name: 'Finish entry' }).click();
+  await targetEntry.click();
+  await expect(page.getByText('No other entries link here yet.', { exact: true })).toBeVisible();
+  await sourceEntry.click();
+  await page.getByRole('button', { name: 'View revision history' }).click();
+  await expect(versions.first()).toBeVisible();
+  const removedVersion = await versions.first().innerText();
+  const countBeforeRestore = await versions.count();
+  await history.getByRole('button', { name: linkedVersion, exact: true }).click();
+  await expect(history.getByText('Connections: Renamed target', { exact: true })).toBeVisible();
+  await expect(history.locator('pre')).toHaveText('Original connected content.');
+  await history.getByRole('button', { name: 'Restore this version' }).click();
+  await expect(body).toHaveValue('Original connected content.');
+  await expect(sourceEntry).toContainText('Draft');
+
+  await page.reload();
+  await sourceEntry.click();
+  await expect(body).toHaveValue('Original connected content.');
+  await expect(sourceEntry).toContainText('Draft');
+  await page.getByRole('button', { name: 'View revision history' }).click();
+  await expect(versions).toHaveCount(countBeforeRestore + 1);
+  await history.getByRole('button', { name: removedVersion, exact: true }).click();
+  await expect(history.locator('pre')).toHaveText('Later content without a connection.');
+  await expect(history.getByText('Connections: None', { exact: true })).toBeVisible();
+  await expect(history.getByRole('button', { name: linkedVersion, exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Renamed target', exact: true }).click();
+  await expect(body).toHaveValue('Synthetic target content.');
+  await page.getByRole('button', { name: 'Source reflection', exact: true }).click();
+  await expect(body).toHaveValue('Original connected content.');
+});
