@@ -3,12 +3,49 @@
 A personal Bible reading and journaling application for a small household.
 Read freely, reflect with confidence, and revisit connected writing over time.
 
-**Status: design foundation. There is no runnable application yet.** The name is
-a working name. Product requirements are recorded; implementation choices remain
-proposals until reviewed. Development begins with Linux (Arch) and macOS (Apple
-Silicon). iPad/iPhone compatibility informs the architecture but is not a first
-release deliverable. Synchronization, accounts, sharing, and end-to-end encryption
-are deferred.
+**Status: early desktop prototype, not a complete release.** A Tauri/React shell
+connects continuous KJV reading, Markdown writing, retained SQLite revisions,
+entry connections, history restoration, and manual Markdown export. Product
+contracts describe the broader release. Linux builds locally; macOS runtime
+validation remains outstanding. iPad/iPhone compatibility informs the architecture
+but is not a first release deliverable. Synchronization, accounts, sharing, and
+end-to-end encryption are deferred.
+
+## Run the prototype
+
+Use Node 24 or newer, Rust stable, and the platform's Tauri development dependencies
+(WebKitGTK 4.1/GTK 3 development packages on Linux; Xcode command-line tools on macOS).
+
+```bash
+npm ci
+npm run desktop
+```
+
+`npm run dev` runs a browser preview with separate IndexedDB storage. The desktop
+app uses SQLite in its own application-data directory, identified by
+`com.ernestchuang.scripture-journal`; it does not open the original application's
+journal. Drafts autosave after 600 ms of inactivity. Finish makes the current
+version eligible for export. Restoring history creates a new unfinished revision.
+
+KJV loads online on demand and remains in memory for the session. Persistent
+offline scripture, the other translations, reading plans, full backup/restore,
+legacy import, deletion, and automatic incremental export are not implemented in
+this slice. See the [translation source investigation](docs/TRANSLATION-SOURCES.md).
+Manual export scans finished entries and preserves conflicting external files;
+it is not a complete backup of drafts and history. Keep the original app in use
+until the release and migration checks are complete.
+
+```bash
+npm run build
+npm test
+npm run test:native
+npx playwright install chromium
+npm run test:e2e
+python -m unittest discover -s scripts -p 'test_*.py'
+```
+
+The [quota-aware development runner](docs/QUOTA-RUNNER.md) can continue a bounded
+Beads issue across quota resets without invoking a model while waiting.
 
 ## Design
 

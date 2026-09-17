@@ -18,3 +18,5 @@ test-results/
 playwright-report/
 .DS_Store
 .worktrees/
+__pycache__/
+src-tauri/gen/
