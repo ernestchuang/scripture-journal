@@ -1026,6 +1026,126 @@ fn schema_three_progress_migration_preserves_history_and_adds_command_epoch() {
 }
 
 #[test]
+fn exhausted_schema_three_stream_can_undo_and_recomplete_after_migration() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Exhausted schema three"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let mut original_completions = Vec::new();
+    for _ in 0..2 {
+        let assignment = store
+            .active_plan_assignments(&enrollment.id)
+            .unwrap()
+            .into_iter()
+            .find(|value| value.stream_id == "old-testament")
+            .unwrap();
+        original_completions.push(
+            store
+                .complete_plan_stream(CompleteStreamRequest {
+                    enrollment_id: enrollment.id.clone(),
+                    stream_id: assignment.stream_id,
+                    expected_assignment_id: assignment.id,
+                    expected_progress_id: assignment.progress_id,
+                })
+                .unwrap(),
+        );
+    }
+    let unrelated_before_migration = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|value| value.stream_id == "new-testament")
+        .unwrap();
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TABLE plan_stream_progress_epochs;
+         DROP TRIGGER plan_assignments_immutable;
+         DROP TRIGGER plan_assignments_position_required;
+         ALTER TABLE plan_assignments DROP COLUMN stream_position;
+         CREATE TRIGGER plan_assignments_immutable BEFORE UPDATE ON plan_assignments BEGIN SELECT RAISE(ABORT,'Plan assignments are immutable'); END;",
+    )
+    .unwrap();
+    conn.pragma_update(None, "user_version", 3).unwrap();
+    drop(conn);
+
+    let mut migrated = JournalStore::open(&path).unwrap();
+    let active_after_migration = migrated.active_plan_assignments(&enrollment.id).unwrap();
+    assert!(active_after_migration
+        .iter()
+        .all(|value| value.stream_id != "old-testament"));
+    let unrelated_after_migration = active_after_migration
+        .iter()
+        .find(|value| value.stream_id == "new-testament")
+        .unwrap()
+        .clone();
+    assert_eq!(unrelated_after_migration.id, unrelated_before_migration.id);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM plan_stream_progress_epochs WHERE enrollment_id=?1 AND stream_id='old-testament'",
+            [&enrollment.id],
+            |row| row.get::<_, u32>(0),
+        )
+        .unwrap(),
+        0
+    );
+    drop(conn);
+
+    migrated
+        .undo_plan_completion(&original_completions[1].id)
+        .unwrap();
+    let restored = migrated
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|value| value.stream_id == "old-testament")
+        .unwrap();
+    assert_eq!((restored.ordinal, restored.passage.chapter), (2, 2));
+    assert!(Uuid::parse_str(&restored.progress_id).is_ok());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM plan_stream_progress_epochs WHERE enrollment_id=?1 AND stream_id='old-testament'",
+            [&enrollment.id],
+            |row| row.get::<_, u32>(0),
+        )
+        .unwrap(),
+        1
+    );
+    drop(conn);
+    let recompletion = migrated
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: restored.stream_id,
+            expected_assignment_id: restored.id,
+            expected_progress_id: restored.progress_id,
+        })
+        .unwrap();
+    let active_after_recompletion = migrated.active_plan_assignments(&enrollment.id).unwrap();
+    assert_eq!(active_after_recompletion, vec![unrelated_after_migration]);
+    let retained = progress_fingerprint(&path);
+    assert!(retained[3].contains(&original_completions[0].id));
+    assert!(retained[3].contains(&original_completions[1].id));
+    assert!(retained[3].contains(&recompletion.id));
+    assert!(!retained[4].is_empty());
+    drop(migrated);
+
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(progress_fingerprint(&path), retained);
+    assert_eq!(
+        reopened.active_plan_assignments(&enrollment.id).unwrap(),
+        active_after_recompletion
+    );
+}
+
+#[test]
 fn stale_completion_epoch_is_rejected_after_undo_reopen_and_recompletion() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
