@@ -5,6 +5,12 @@ use std::{
     io::{Cursor, Read},
     path::Path,
 };
+mod canonical_counts {
+    include!("../../crates/journal-core/src/verse_counts.rs");
+    pub fn get(index: usize) -> u16 {
+        VERSE_COUNTS[index]
+    }
+}
 
 const KJV_URL: &str = "https://ebible.org/Scriptures/eng-kjv2006_vpl.zip";
 const CHAPTERS: [u16; 66] = [
@@ -35,6 +41,12 @@ pub struct ScriptureStore {
 impl ScriptureStore {
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(|e| e.to_string())?;
+        Self::initialize(connection)
+    }
+    pub fn temporary() -> Result<Self, String> {
+        Self::initialize(Connection::open_in_memory().map_err(|e| e.to_string())?)
+    }
+    fn initialize(connection: Connection) -> Result<Self, String> {
         connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS verses(translation TEXT NOT NULL, book INTEGER NOT NULL, chapter INTEGER NOT NULL, verse INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(translation,book,chapter,verse)); CREATE TABLE IF NOT EXISTS translations(id TEXT PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL, complete INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS reader_state(id INTEGER PRIMARY KEY CHECK(id=1), translation TEXT NOT NULL, book INTEGER NOT NULL, chapter INTEGER NOT NULL, verse INTEGER);").map_err(|e| e.to_string())?;
         Ok(Self { connection })
     }
@@ -91,15 +103,33 @@ impl ScriptureStore {
 }
 
 pub fn download_kjv() -> Result<Vec<(u16, u16, u16, String)>, String> {
-    let response =
-        reqwest::blocking::get(KJV_URL).map_err(|e| format!("KJV download failed: {e}"))?;
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut response = client
+        .get(KJV_URL)
+        .send()
+        .map_err(|e| format!("KJV download failed: {e}"))?;
     if !response.status().is_success() {
         return Err(format!(
             "KJV download failed with HTTP {}.",
             response.status()
         ));
     }
-    let bytes = response.bytes().map_err(|e| e.to_string())?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > 32 * 1024 * 1024)
+    {
+        return Err("KJV package is unexpectedly large.".into());
+    }
+    let mut bytes = Vec::new();
+    response
+        .by_ref()
+        .take(32 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     if bytes.len() > 32 * 1024 * 1024 {
         return Err("KJV package is unexpectedly large.".into());
     }
@@ -112,13 +142,17 @@ pub fn download_kjv() -> Result<Vec<(u16, u16, u16, String)>, String> {
                 .is_some_and(|f| f.name().ends_with("_vpl.txt"))
         })
         .ok_or("KJV package has no VPL text.")?;
-    let mut file = archive.by_index(index).map_err(|e| e.to_string())?;
+    let file = archive.by_index(index).map_err(|e| e.to_string())?;
     if file.size() > 12 * 1024 * 1024 {
         return Err("KJV text is unexpectedly large.".into());
     }
     let mut source = String::new();
-    file.read_to_string(&mut source)
+    file.take(12 * 1024 * 1024 + 1)
+        .read_to_string(&mut source)
         .map_err(|e| e.to_string())?;
+    if source.len() > 12 * 1024 * 1024 {
+        return Err("KJV text is unexpectedly large.".into());
+    }
     parse_vpl(&source)
 }
 
@@ -155,6 +189,7 @@ fn validate(verses: &[(u16, u16, u16, String)]) -> Result<(), String> {
     for (book, chapter, verse, _) in verses {
         chapters.entry((*book, *chapter)).or_default().push(*verse);
     }
+    let mut chapter_index = 0usize;
     for (book_index, chapter_count) in CHAPTERS.iter().enumerate() {
         for chapter in 1..=*chapter_count {
             let key = (book_index as u16 + 1, chapter);
@@ -171,6 +206,13 @@ fn validate(verses: &[(u16, u16, u16, String)]) -> Result<(), String> {
                     key.0, key.1
                 ));
             }
+            if found.len() != canonical_counts::get(chapter_index) as usize {
+                return Err(format!(
+                    "KJV package has the wrong verse count in book {}, chapter {}.",
+                    key.0, key.1
+                ));
+            }
+            chapter_index += 1;
         }
     }
     if chapters.len() != 1189 {

@@ -1778,7 +1778,10 @@ pub fn run() {
             let root = app.path().app_data_dir()?;
             std::fs::create_dir_all(&root)?;
             let journal = JournalStore::open(&root.join("journal.sqlite3"))?;
+            // Scripture is a disposable cache. A damaged/unavailable cache must never
+            // prevent the authoritative journal from opening.
             let scripture = ScriptureStore::open(&root.join("scripture.sqlite3"))
+                .or_else(|_| ScriptureStore::temporary())
                 .map_err(std::io::Error::other)?;
             app.manage(AppState {
                 journal: Arc::new(Mutex::new(journal)),

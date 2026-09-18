@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Passage } from '../domain';
 import { adjacentChapter, BOOKS, chapterKey, formatPassage, validPassage } from './books';
-import { downloadKjv, kjvOfflineStatus, loadChapter, type Translation, type Verse } from './provider';
+import { downloadKjv, invalidateKjvCache, kjvOfflineStatus, loadChapter, type Translation, type Verse } from './provider';
 import { isDesktop } from '../platform/journal';
 import './reader.css';
 
@@ -70,11 +70,19 @@ export function Reader({ selection, onSelectionChange, onReflect }: ReaderProps)
   const incomingKey = chapterKey(safeSelection);
   useEffect(() => { void kjvOfflineStatus().then(setOffline).catch(() => setOffline(false)); }, []);
   function changeTranslation(value: Translation) {
+    const element = viewport.current;
+    const top = element?.getBoundingClientRect().top ?? 0;
+    const verse = element && [...element.querySelectorAll<HTMLElement>('[data-verse]')].find(node => node.getBoundingClientRect().bottom > top + 1);
+    const section = verse?.closest<HTMLElement>('[data-chapter]');
+    if (verse && section) {
+      const [book, chapter] = section.dataset.chapter!.split(':').map(Number);
+      onSelectionChange({ book, chapter, startVerse: Number(verse.dataset.verse) });
+    }
     setTranslation(value); try { window.localStorage?.setItem('scripture-journal.translation', value); } catch { /* Selection remains active for this session. */ }
   }
   async function installKjv() {
     setDownloading(true); setDownloadError('');
-    try { await downloadKjv(); setOffline(true); setChapters(current => [...current]); }
+    try { await downloadKjv(); invalidateKjvCache(); setOffline(true); setChapters(current => [...current]); }
     catch (error) { setDownloadError(error instanceof Error ? error.message : String(error)); }
     finally { setDownloading(false); }
   }

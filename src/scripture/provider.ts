@@ -45,3 +45,4 @@ export async function loadChapter(passage: Passage, signal: AbortSignal, transla
 
 export const kjvOfflineStatus = () => isDesktop ? invoke<boolean>('scripture_kjv_status') : Promise.resolve(false);
 export const downloadKjv = () => invoke<void>('download_kjv_library');
+export const invalidateKjvCache = () => { for (const key of cache.keys()) if (key.startsWith('KJV:')) cache.delete(key); };

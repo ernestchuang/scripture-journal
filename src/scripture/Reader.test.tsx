@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import Reader from './Reader';
 import { loadChapter, type Verse } from './provider';
-vi.mock('./provider', () => ({ loadChapter: vi.fn(), kjvOfflineStatus: vi.fn(async () => false), downloadKjv: vi.fn() }));
+vi.mock('./provider', () => ({ loadChapter: vi.fn(), kjvOfflineStatus: vi.fn(async () => false), downloadKjv: vi.fn(), invalidateKjvCache: vi.fn() }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 describe('reader isolation', () => {
   it('aborts old chapter work and ignores a late result after external navigation', async () => {
