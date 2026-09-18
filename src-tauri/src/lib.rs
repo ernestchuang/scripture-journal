@@ -661,14 +661,32 @@ mod plan_command_tests {
             let listed = list_plan_enrollments_for_store(store).await.unwrap();
             assert_eq!(listed, expected);
             for enrollment in listed {
-                let serialized = serde_json::to_value(enrollment.clone()).unwrap();
-                assert_eq!(serialized["id"], enrollment.id);
                 assert_eq!(
-                    serialized["definitionVersionId"],
-                    enrollment.definition_version_id
+                    serde_json::to_value(&enrollment).unwrap(),
+                    serde_json::json!({
+                        "id": enrollment.id,
+                        "definitionVersionId": enrollment.definition_version_id,
+                        "createdAt": enrollment.created_at,
+                    })
                 );
-                assert_eq!(serialized["createdAt"], enrollment.created_at);
             }
+        });
+    }
+
+    #[test]
+    fn enrollment_discovery_propagates_an_unavailable_store_error() {
+        tauri::async_runtime::block_on(async {
+            let (_directory, store) = test_store();
+            let poisoned = store.clone();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = poisoned.lock().unwrap();
+                panic!("poison the synthetic discovery store");
+            }));
+
+            assert_eq!(
+                list_plan_enrollments_for_store(store).await.unwrap_err(),
+                "Journal is unavailable; restart the app."
+            );
         });
     }
 }

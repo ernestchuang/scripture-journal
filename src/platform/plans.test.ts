@@ -113,6 +113,14 @@ describe('native plan-definition adapter', () => {
     expect(native.invoke).toHaveBeenCalledWith('list_plan_enrollments');
   });
 
+  it('returns an empty retained enrollment result unchanged', async () => {
+    native.invoke.mockResolvedValueOnce([]);
+
+    await expect(nativePlans.listPlanEnrollments()).resolves.toEqual([]);
+    expect(native.invoke).toHaveBeenCalledTimes(1);
+    expect(native.invoke).toHaveBeenCalledWith('list_plan_enrollments');
+  });
+
   it('propagates enrollment discovery errors without reporting results', async () => {
     const error = new Error('Journal is unavailable; restart the app.');
     native.invoke.mockRejectedValueOnce(error);
