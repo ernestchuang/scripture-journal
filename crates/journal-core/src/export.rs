@@ -25,6 +25,8 @@ pub struct ExportReport {
     pub unchanged: usize,
     pub conflicts: Vec<String>,
     pub directory: String,
+    pub pending: usize,
+    pub cursor: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,6 +36,8 @@ struct Manifest {
     journal_id: String,
     installation_id: String,
     receipts: BTreeMap<String, Receipt>,
+    #[serde(default)]
+    cursor: i64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -94,6 +98,7 @@ impl JournalStore {
                 journal_id: self.identity("journal_id")?,
                 installation_id: self.identity("installation_id")?,
                 receipts: BTreeMap::new(),
+                cursor: 0,
             }
         };
         ensure!(manifest.version == 1 && manifest.journal_id == self.identity("journal_id")? && manifest.installation_id == self.identity("installation_id")?, "Export belongs to another journal/device or unsupported format; choose a new destination");
@@ -103,26 +108,93 @@ impl JournalStore {
         let manifest_directory = directory;
         let mut manifest_bytes = initial;
         write_manifest(manifest_directory, &manifest, &mut manifest_bytes)?;
-        // One SELECT pins the published snapshot set, including link eligibility.
-        let mut stmt = self.conn.prepare("SELECT r.id,r.entry_id,r.parent_id,r.restored_from_id,r.created_at,r.content FROM entries e JOIN revisions r ON e.published_revision_id=r.id WHERE e.trashed_at IS NULL ORDER BY e.id")?;
-        let revisions = stmt
-            .query_map([], revision_row)?
+        // Pin a bounded, contiguous change-log window. Link sources are included
+        // only when a changed target can alter their published-link eligibility.
+        let batch_end: i64 = self.conn.query_row("SELECT coalesce(max(sequence),0) FROM (SELECT sequence FROM changes WHERE sequence>?1 ORDER BY sequence LIMIT 100)", [manifest.cursor], |r| r.get(0))?;
+        let query_values = [manifest.cursor, batch_end];
+        let mut revisions = affected_revisions(&self.conn, manifest.cursor, batch_end)?;
+        for entry_id in manifest
+            .receipts
+            .iter()
+            .filter_map(|(id, receipt)| receipt.pending_hash.as_ref().map(|_| id))
+        {
+            if revisions
+                .iter()
+                .any(|revision| &revision.entry_id == entry_id)
+            {
+                continue;
+            }
+            if let Some(revision) = self.conn.query_row(
+                "SELECT r.id,r.entry_id,r.parent_id,r.restored_from_id,r.created_at,r.content FROM entries e JOIN revisions r ON e.published_revision_id=r.id WHERE e.id=?1 AND e.trashed_at IS NULL",
+                [entry_id], revision_row,
+            ).optional()? {
+                revisions.push(revision);
+            }
+        }
+        // Link eligibility needs all published identities, but never their bodies.
+        // This keeps incremental work proportional to changed notes and dependencies.
+        let mut published_stmt = self.conn.prepare(
+            "SELECT id,published_revision_id FROM entries WHERE published_revision_id IS NOT NULL AND trashed_at IS NULL ORDER BY id",
+        )?;
+        let published = published_stmt
+            .query_map([], |row| {
+                Ok(Revision {
+                    id: row.get(1)?,
+                    entry_id: row.get(0)?,
+                    parent_id: None,
+                    restored_from_id: None,
+                    created_at: String::new(),
+                    content: EntryContent::default(),
+                })
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut report = ExportReport {
             written: 0,
             unchanged: 0,
             conflicts: vec![],
             directory: directory.display().to_string(),
+            pending: 0,
+            cursor: manifest.cursor,
         };
+        let mut prepared = Vec::new();
         for revision in &revisions {
+            let created_at: String = self.conn.query_row(
+                "SELECT created_at FROM entries WHERE id=?1",
+                [&revision.entry_id],
+                |row| row.get(0),
+            )?;
+            match prepare_pending(
+                directory,
+                manifest_directory,
+                revision,
+                &published,
+                Some((&created_at, &revision.created_at)),
+                &mut manifest,
+                None,
+            ) {
+                Ok(()) => prepared.push(revision),
+                Err(error) => report
+                    .conflicts
+                    .push(format!("{}: {error:#}", revision.entry_id)),
+            }
+        }
+        write_manifest(manifest_directory, &manifest, &mut manifest_bytes)?;
+        for revision in prepared {
+            let created_at: String = self.conn.query_row(
+                "SELECT created_at FROM entries WHERE id=?1",
+                [&revision.entry_id],
+                |row| row.get(0),
+            )?;
             let result = export_one(
                 directory,
                 manifest_directory,
                 revision,
-                &revisions,
+                &published,
+                Some((&created_at, &revision.created_at)),
                 &mut manifest,
                 &mut manifest_bytes,
                 None,
+                true,
             );
             match result {
                 Ok(true) => report.written += 1,
@@ -134,10 +206,13 @@ impl JournalStore {
         }
         // Only replace notes that this destination previously owned. A deleted
         // reflection must not disclose even its existence in a fresh export.
-        let mut stmt = self.conn.prepare("SELECT id,working_revision_id FROM entries WHERE trashed_at IS NOT NULL UNION ALL SELECT entry_id,coalesce(last_published_revision_id,entry_id) FROM purged_entries")?;
+        let mut stmt = self.conn.prepare("SELECT e.id,e.working_revision_id FROM entries e WHERE e.trashed_at IS NOT NULL AND EXISTS(SELECT 1 FROM changes c WHERE c.entry_id=e.id AND c.sequence>?1 AND c.sequence<=?2) UNION ALL SELECT p.entry_id,coalesce(p.last_published_revision_id,p.entry_id) FROM purged_entries p WHERE EXISTS(SELECT 1 FROM changes c WHERE c.entry_id=p.entry_id AND c.sequence>?1 AND c.sequence<=?2)")?;
         let removed = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .query_map(rusqlite::params_from_iter(query_values.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut prepared_removed = Vec::new();
         for (entry_id, revision_id) in removed {
             if !manifest.receipts.contains_key(&entry_id) {
                 continue;
@@ -151,14 +226,34 @@ impl JournalStore {
                 content: EntryContent::default(),
             };
             let tombstone = format!("---\nentry_id: {}\ndeleted: true\n---\n\nThis reflection has been removed from Scripture Journal.\n", revision.entry_id);
+            if let Err(error) = prepare_pending(
+                directory,
+                manifest_directory,
+                &revision,
+                &published,
+                None,
+                &mut manifest,
+                Some(&tombstone),
+            ) {
+                report
+                    .conflicts
+                    .push(format!("{}: {error:#}", revision.entry_id));
+                continue;
+            }
+            prepared_removed.push((revision, tombstone));
+        }
+        write_manifest(manifest_directory, &manifest, &mut manifest_bytes)?;
+        for (revision, tombstone) in prepared_removed {
             match export_one(
                 directory,
                 manifest_directory,
                 &revision,
-                &revisions,
+                &published,
+                None,
                 &mut manifest,
                 &mut manifest_bytes,
                 Some(tombstone),
+                true,
             ) {
                 Ok(true) => report.written += 1,
                 Ok(false) => report.unchanged += 1,
@@ -167,8 +262,29 @@ impl JournalStore {
                     .push(format!("{}: {error:#}", revision.entry_id)),
             }
         }
+        write_manifest(manifest_directory, &manifest, &mut manifest_bytes)?;
+        if report.conflicts.is_empty() && batch_end > manifest.cursor {
+            manifest.cursor = batch_end;
+            write_manifest(manifest_directory, &manifest, &mut manifest_bytes)?;
+        }
+        report.cursor = manifest.cursor;
+        report.pending = self.conn.query_row(
+            "SELECT count(*) FROM changes WHERE sequence>?1",
+            [manifest.cursor],
+            |row| row.get(0),
+        )?;
         Ok(report)
     }
+}
+
+fn affected_revisions(conn: &Connection, cursor: i64, batch_end: i64) -> Result<Vec<Revision>> {
+    let mut stmt = conn.prepare(
+        "WITH changed AS (SELECT DISTINCT entry_id FROM changes WHERE sequence>?1 AND sequence<=?2), affected AS (SELECT entry_id FROM changed UNION SELECT e.id FROM entries e JOIN revisions r ON r.id=e.published_revision_id JOIN json_each(r.content,'$.links') l JOIN changed c ON l.value=c.entry_id) SELECT r.id,r.entry_id,r.parent_id,r.restored_from_id,r.created_at,r.content FROM affected a JOIN entries e ON e.id=a.entry_id JOIN revisions r ON e.published_revision_id=r.id WHERE e.trashed_at IS NULL ORDER BY e.id",
+    )?;
+    let revisions = stmt
+        .query_map([cursor, batch_end], revision_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(revisions)
 }
 
 fn export_one(
@@ -176,9 +292,11 @@ fn export_one(
     manifest_directory: &ManifestDirectory,
     revision: &Revision,
     published: &[Revision],
+    dates: Option<(&str, &str)>,
     manifest: &mut Manifest,
     manifest_bytes: &mut Option<Vec<u8>>,
     replacement: Option<String>,
+    manifest_prepared: bool,
 ) -> Result<bool> {
     validate_id(&revision.entry_id)?;
     let name = format!("{}.md", revision.entry_id);
@@ -187,7 +305,7 @@ fn export_one(
     let output = if let Some(output) = replacement {
         output
     } else {
-        render(revision, published)?
+        render(revision, published, dates)?
     };
     let expected = digest(output.as_bytes());
     #[cfg(unix)]
@@ -212,7 +330,9 @@ fn export_one(
                 receipt.hash = Some(expected);
                 receipt.pending_hash = None;
                 receipt.revision_id = Some(revision.id.clone());
-                write_manifest(manifest_directory, manifest, manifest_bytes)?;
+                if !manifest_prepared {
+                    write_manifest(manifest_directory, manifest, manifest_bytes)?;
+                }
                 return Ok(false);
             }
         }
@@ -223,7 +343,9 @@ fn export_one(
         .entry(revision.entry_id.clone())
         .or_default()
         .pending_hash = Some(expected.clone());
-    write_manifest(manifest_directory, manifest, manifest_bytes)?;
+    if !manifest_prepared {
+        write_manifest(manifest_directory, manifest, manifest_bytes)?;
+    }
     #[cfg(unix)]
     let temp = manifest_directory.stage(output.as_bytes())?;
     #[cfg(not(unix))]
@@ -276,8 +398,55 @@ fn export_one(
     receipt.hash = Some(expected);
     receipt.pending_hash = None;
     receipt.revision_id = Some(revision.id.clone());
-    write_manifest(manifest_directory, manifest, manifest_bytes)?;
+    if !manifest_prepared {
+        write_manifest(manifest_directory, manifest, manifest_bytes)?;
+    }
     Ok(true)
+}
+
+fn prepare_pending(
+    #[cfg_attr(unix, allow(unused_variables))] directory: &Path,
+    manifest_directory: &ManifestDirectory,
+    revision: &Revision,
+    published: &[Revision],
+    dates: Option<(&str, &str)>,
+    manifest: &mut Manifest,
+    replacement: Option<&str>,
+) -> Result<()> {
+    validate_id(&revision.entry_id)?;
+    let name = format!("{}.md", revision.entry_id);
+    #[cfg(not(unix))]
+    let target = directory.join(&name);
+    let output = match replacement {
+        Some(value) => value.to_owned(),
+        None => render(revision, published, dates)?,
+    };
+    let expected = digest(output.as_bytes());
+    #[cfg(unix)]
+    let existing = manifest_directory.read_optional(&name)?;
+    #[cfg(not(unix))]
+    let existing = read_optional(&target)?;
+    match (&existing, manifest.receipts.get(&revision.entry_id)) {
+        (Some(_), None) => bail!("Unowned file collision; file preserved"),
+        (None, Some(receipt)) if receipt.hash.is_some() => {
+            bail!("Previously exported file is missing; repair explicitly")
+        }
+        (Some(bytes), Some(receipt)) => {
+            let actual = digest(bytes);
+            ensure!(
+                receipt.hash.as_deref() == Some(&actual)
+                    || receipt.pending_hash.as_deref() == Some(&actual),
+                "Export changed externally; file preserved"
+            );
+        }
+        _ => {}
+    }
+    manifest
+        .receipts
+        .entry(revision.entry_id.clone())
+        .or_default()
+        .pending_hash = Some(expected);
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -298,10 +467,15 @@ fn displace_entry(
     Ok(())
 }
 
-fn render(revision: &Revision, published: &[Revision]) -> Result<String> {
+fn render(
+    revision: &Revision,
+    published: &[Revision],
+    dates: Option<(&str, &str)>,
+) -> Result<String> {
     // JSON strings/arrays are valid YAML values and prevent frontmatter injection.
     let c = &revision.content;
-    let mut text = format!("---\nformat: scripture-journal-v1\nentry_id: {}\nrevision_id: {}\ntitle: {}\ntags: {}\npassages: {}\n---\n\n{}\n", revision.entry_id, revision.id, serde_json::to_string(&c.title)?, serde_json::to_string(&c.tags)?, serde_json::to_string(&c.passages)?, c.body);
+    let (created_at, updated_at) = dates.unwrap_or((&revision.created_at, &revision.created_at));
+    let mut text = format!("---\nformat: scripture-journal-v1\nentry_id: {}\nrevision_id: {}\ncreated_at: {}\nupdated_at: {}\ntitle: {}\ntags: {}\npassages: {}\n---\n\n{}\n", revision.entry_id, revision.id, serde_json::to_string(created_at)?, serde_json::to_string(updated_at)?, serde_json::to_string(&c.title)?, serde_json::to_string(&c.tags)?, serde_json::to_string(&c.passages)?, c.body);
     if !c.links.is_empty() {
         text.push_str("\n## Related entries\n\n");
         for target in &c.links {
@@ -500,6 +674,42 @@ fn install_manifest(temp: NamedTempFile, directory: &Path, previous: Option<&[u8
 mod manifest_tests {
     use super::*;
 
+    #[test]
+    fn twenty_thousand_entry_selection_decodes_only_three_changed_bodies() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = JournalStore::open(&root.path().join("journal.sqlite3")).unwrap();
+        let tx = store.conn.transaction().unwrap();
+        let mut ids = Vec::with_capacity(20_000);
+        for index in 0..20_000 {
+            let entry = Uuid::new_v4().to_string();
+            let revision = Uuid::new_v4().to_string();
+            let content = serde_json::json!({"title": format!("Entry {index}"), "body": "body", "passages": [], "tags": [], "links": []}).to_string();
+            tx.execute("INSERT INTO entries(id,created_at,updated_at,working_revision_id,published_revision_id) VALUES(?1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',?2,?2)", (&entry, &revision)).unwrap();
+            tx.execute("INSERT INTO revisions(id,entry_id,created_at,content) VALUES(?1,?2,'2026-01-01T00:00:00Z',?3)", (&revision, &entry, content)).unwrap();
+            tx.execute("INSERT INTO changes(operation_id,entry_id,kind,revision_id) VALUES(?1,?2,'finish',?3)", (Uuid::new_v4().to_string(), &entry, &revision)).unwrap();
+            ids.push((entry, revision));
+        }
+        tx.commit().unwrap();
+        let cursor: i64 = store
+            .conn
+            .query_row("SELECT max(sequence) FROM changes", [], |row| row.get(0))
+            .unwrap();
+        for (entry, revision) in ids.iter().rev().take(3) {
+            store.conn.execute("INSERT INTO changes(operation_id,entry_id,kind,revision_id) VALUES(?1,?2,'finish',?3)", (Uuid::new_v4().to_string(), entry, revision)).unwrap();
+        }
+        let end: i64 = store
+            .conn
+            .query_row("SELECT max(sequence) FROM changes", [], |row| row.get(0))
+            .unwrap();
+        let selected = affected_revisions(&store.conn, cursor, end).unwrap();
+        assert_eq!(selected.len(), 3);
+        assert!(selected.iter().all(|revision| ids
+            .iter()
+            .rev()
+            .take(3)
+            .any(|(id, _)| id == &revision.entry_id)));
+    }
+
     #[cfg(not(unix))]
     fn staged(directory: &Path) -> NamedTempFile {
         let mut temp = NamedTempFile::new_in(directory).unwrap();
@@ -639,12 +849,13 @@ mod manifest_tests {
             };
             let published = std::slice::from_ref(&revision);
             let name = format!("{}.md", revision.entry_id);
-            let output = render(&revision, published).unwrap();
+            let output = render(&revision, published, None).unwrap();
             let mut manifest = Manifest {
                 version: 1,
                 journal_id: "synthetic journal".into(),
                 installation_id: "synthetic installation".into(),
                 receipts: BTreeMap::new(),
+                cursor: 0,
             };
             let mut previous = None;
             if state != "new" {
@@ -653,9 +864,11 @@ mod manifest_tests {
                     &handle,
                     &revision,
                     published,
+                    None,
                     &mut manifest,
                     &mut previous,
-                    None
+                    None,
+                    false
                 )
                 .unwrap());
             }
@@ -670,7 +883,7 @@ mod manifest_tests {
                 revision.content.body = "Updated synthetic reflection".into();
             }
             let published = std::slice::from_ref(&revision);
-            let output = render(&revision, published).unwrap();
+            let output = render(&revision, published, None).unwrap();
             fs::create_dir(&outside).unwrap();
             fs::write(outside.join(&name), b"outside entry").unwrap();
             fs::write(outside.join(MANIFEST), b"outside manifest").unwrap();
@@ -681,9 +894,11 @@ mod manifest_tests {
                 &handle,
                 &revision,
                 published,
+                None,
                 &mut manifest,
                 &mut previous,
                 None,
+                false,
             );
             if state == "edited" {
                 assert!(result
@@ -717,9 +932,11 @@ mod manifest_tests {
                     &handle,
                     &revision,
                     published,
+                    None,
                     &mut manifest,
                     &mut previous,
-                    None
+                    None,
+                    false
                 )
                 .unwrap());
             }
@@ -752,6 +969,7 @@ mod manifest_tests {
                 journal_id: "test journal".into(),
                 installation_id: "test installation".into(),
                 receipts: BTreeMap::new(),
+                cursor: 0,
             };
             let mut previous = None;
             if existing {

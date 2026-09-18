@@ -45,6 +45,8 @@ export interface ExportReport {
   unchanged: number;
   conflicts: string[];
   directory: string;
+  pending: number;
+  cursor: number;
 }
 
 export const blankContent = (passages: Passage[] = []): EntryContent => ({

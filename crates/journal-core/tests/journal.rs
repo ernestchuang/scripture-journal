@@ -3622,6 +3622,8 @@ fn export_only_published_content_and_preserves_external_changes() {
     assert_eq!(store.export_journal(&out).unwrap().written, 1);
     let file = out.join(format!("{}.md", req.entry_id));
     let initial = fs::read_to_string(&file).unwrap();
+    assert!(initial.contains("created_at:"));
+    assert!(initial.contains("updated_at:"));
     assert!(!initial.contains("TOP SECRET"));
     assert!(!initial.contains(&draft.entry_id));
     assert!(!out.join(format!("{}.md", draft.entry_id)).exists());
@@ -3633,14 +3635,58 @@ fn export_only_published_content_and_preserves_external_changes() {
     assert_eq!(fs::read_to_string(&file).unwrap(), initial);
     req.expected_revision_id = Some(second.working_revision_id);
     req.finish = true;
-    store.save_entry(req.clone()).unwrap();
+    let published = store.save_entry(req.clone()).unwrap();
     assert_eq!(store.export_journal(&out).unwrap().written, 1);
     assert!(fs::read_to_string(&file)
         .unwrap()
         .contains("Unfinished secret edit"));
     fs::write(&file, "External writing").unwrap();
+    req.expected_revision_id = Some(published.working_revision_id);
+    req.content.body = "A newer published change".into();
+    store.save_entry(req.clone()).unwrap();
     assert_eq!(store.export_journal(&out).unwrap().conflicts.len(), 1);
     assert_eq!(fs::read_to_string(&file).unwrap(), "External writing");
+}
+
+#[test]
+fn incremental_export_updates_link_dependents_and_preserves_unrelated_mtimes() {
+    let dir = TempDir::new().unwrap();
+    let mut store = JournalStore::open(&dir.path().join("j.db")).unwrap();
+    let target_request = request("Linked target", true);
+    let target = store.save_entry(target_request.clone()).unwrap();
+    let mut source_request = request("Source", true);
+    source_request.content.links.push(target.id.clone());
+    let source = store.save_entry(source_request.clone()).unwrap();
+    let unrelated_request = request("Unrelated", true);
+    store.save_entry(unrelated_request.clone()).unwrap();
+    let out = export_fixture(&dir, "incremental");
+    while store.export_journal(&out).unwrap().pending > 0 {}
+    let source_path = out.join(format!("{}.md", source.id));
+    let unrelated_path = out.join(format!("{}.md", unrelated_request.entry_id));
+    let source_before = fs::metadata(&source_path).unwrap().modified().unwrap();
+    let unrelated_before = fs::metadata(&unrelated_path).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    store
+        .set_entry_trashed(&target.id, &target.working_revision_id, true)
+        .unwrap();
+    let report = store.export_journal(&out).unwrap();
+
+    assert_eq!(report.conflicts, Vec::<String>::new());
+    assert!(fs::read_to_string(source_path)
+        .unwrap()
+        .contains("Unpublished or unavailable"));
+    assert!(
+        source_before
+            < fs::metadata(out.join(format!("{}.md", source.id)))
+                .unwrap()
+                .modified()
+                .unwrap()
+    );
+    assert_eq!(
+        unrelated_before,
+        fs::metadata(unrelated_path).unwrap().modified().unwrap()
+    );
 }
 
 #[test]

@@ -1,4 +1,5 @@
 mod journal_deletion;
+mod maintained_export;
 use journal_core::{
     AdoptCalendarPlanRequest, AdoptStreamPlanRequest, CalendarAssignmentCompletion,
     CalendarPlanEnrollment, CalendarScheduleMode, CompleteStreamRequest, DatedPlanAssignment,
@@ -8,7 +9,6 @@ use journal_core::{
 };
 use serde::Deserialize;
 use std::{
-    collections::HashSet,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -20,7 +20,7 @@ use scripture::{ScriptureStore, Verse};
 struct AppState {
     journal: Arc<Mutex<JournalStore>>,
     scripture: Arc<Mutex<ScriptureStore>>,
-    export_directories: Mutex<HashSet<PathBuf>>,
+    maintained_export: Arc<maintained_export::MaintainedExport>,
 }
 
 #[tauri::command]
@@ -1805,11 +1805,7 @@ async fn choose_export_directory(
         .map_err(|e| e.to_string())?
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    state
-        .export_directories
-        .lock()
-        .map_err(|_| "Folder access is unavailable.".to_string())?
-        .insert(path.clone());
+    state.maintained_export.associate(&path)?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
@@ -1821,11 +1817,8 @@ async fn export_journal(
     let path = PathBuf::from(directory)
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    if !state
-        .export_directories
-        .lock()
-        .map_err(|_| "Folder access is unavailable.".to_string())?
-        .contains(&path)
+    if state.maintained_export.status()?.directory.as_deref()
+        != Some(path.to_string_lossy().as_ref())
     {
         return Err("Choose the export folder using the app's folder picker first.".into());
     }
@@ -1833,6 +1826,37 @@ async fn export_journal(
         journal.export_journal(&path).map_err(|e| e.to_string())
     })
     .await
+}
+
+#[tauri::command]
+fn maintained_export_status(
+    state: State<'_, AppState>,
+) -> Result<maintained_export::Status, String> {
+    state.maintained_export.status()
+}
+
+#[tauri::command]
+async fn run_maintained_export(state: State<'_, AppState>) -> Result<Option<ExportReport>, String> {
+    let Some(path) = state.maintained_export.begin()? else {
+        return Ok(None);
+    };
+    let journal = state.journal.clone();
+    let result = run_store(journal, move |store| {
+        store.export_journal(&path).map_err(|e| e.to_string())
+    })
+    .await;
+    state.maintained_export.finish(result.clone());
+    result.map(Some)
+}
+
+#[tauri::command]
+fn cancel_maintained_export(state: State<'_, AppState>) -> Result<(), String> {
+    state.maintained_export.cancel()
+}
+
+#[tauri::command]
+fn disconnect_maintained_export(state: State<'_, AppState>) -> Result<(), String> {
+    state.maintained_export.disconnect()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1848,10 +1872,11 @@ pub fn run() {
             let scripture = ScriptureStore::open(&root.join("scripture.sqlite3"))
                 .or_else(|_| ScriptureStore::temporary())
                 .map_err(std::io::Error::other)?;
+            let maintained_export = Arc::new(maintained_export::MaintainedExport::open(&root));
             app.manage(AppState {
                 journal: Arc::new(Mutex::new(journal)),
                 scripture: Arc::new(Mutex::new(scripture)),
-                export_directories: Mutex::new(HashSet::new()),
+                maintained_export,
             });
             Ok(())
         })
@@ -1889,6 +1914,10 @@ pub fn run() {
             restore_revision,
             choose_export_directory,
             export_journal,
+            maintained_export_status,
+            run_maintained_export,
+            cancel_maintained_export,
+            disconnect_maintained_export,
             apply_appearance,
             read_omarchy_theme,
             startup_appearance,

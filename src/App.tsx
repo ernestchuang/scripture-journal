@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import type { Passage } from './domain';
+import type { ExportReport, Passage } from './domain';
 import { isDesktop, nativeJournal } from './platform/journal';
 import { browserJournal } from './platform/browserJournal';
 import { useAppearance, type Appearance } from './platform/appearance';
@@ -11,6 +11,8 @@ import { nativePlans } from './platform/plans';
 import { PlanPanel } from './plans/PlanPanel';
 
 const journal = isDesktop ? nativeJournal : browserJournal;
+type MaintainedExportStatus = { directory: string | null; lastSuccess: string | null; pending: number; conflicts: string[]; running: boolean; canceled: boolean; error: string | null };
+const emptyExportStatus: MaintainedExportStatus = { directory: null, lastSuccess: null, pending: 0, conflicts: [], running: false, canceled: false, error: null };
 
 export function App() {
   const appearance = useAppearance();
@@ -24,6 +26,7 @@ export function App() {
   const [pane, setPane] = useState<'read' | 'write'>('read');
   const [notice, setNotice] = useState('');
   const [exporting, setExporting] = useState(false);
+  const [exportStatus, setExportStatus] = useState<MaintainedExportStatus>(emptyExportStatus);
   const persistence = useRef<JournalPersistenceState | null>(null);
   const rememberPersistence = useCallback((state: JournalPersistenceState) => { persistence.current = state; }, []);
   useEffect(() => { try { window.localStorage?.setItem('scripture-journal.reader-location', JSON.stringify(selection)); } catch { /* Reading remains usable without preference storage. */ } }, [selection]);
@@ -45,6 +48,29 @@ export function App() {
     return () => { disposed = true; unlisten?.(); };
   }, []);
 
+  const refreshExportStatus = useCallback(async () => {
+    if (!isDesktop) return;
+    const status = await invoke<MaintainedExportStatus | undefined>('maintained_export_status');
+    if (status) setExportStatus(status);
+  }, []);
+
+  const runMaintainedExport = useCallback(async () => {
+    if (!isDesktop) return;
+    setExporting(true);
+    try {
+      const result = await invoke<ExportReport | null>('run_maintained_export');
+      if (result?.conflicts.length) setNotice(`${result.conflicts.length} managed files need attention. Existing files were preserved.`);
+    } catch (error) { setNotice(`Maintained export could not finish: ${String(error)}`); }
+    finally { setExporting(false); await refreshExportStatus().catch(() => undefined); }
+  }, [refreshExportStatus]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    void refreshExportStatus().catch(() => undefined);
+    const timer = window.setInterval(() => { void runMaintainedExport().catch(() => undefined); }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [refreshExportStatus, runMaintainedExport]);
+
   function reflect(passage: Passage) {
     setSelection(passage);
     setReflectRequest((request) => request + 1);
@@ -55,9 +81,11 @@ export function App() {
     setNotice('');
     setExporting(true);
     try {
+      if (exportStatus.directory && !window.confirm(`Change the maintained export folder?\n\nCurrent: ${exportStatus.directory}\n\nThe old folder will remain untouched.`)) return;
       const directory = await invoke<string | null>('choose_export_directory');
       if (!directory) return;
-      const result = await journal.exportJournal(directory);
+      const result = await invoke<ExportReport | null>('run_maintained_export');
+      if (!result) return;
       setNotice(result.conflicts.length
         ? `${result.written} entries exported. ${result.conflicts.length} files need attention: ${result.conflicts.join(', ')}. Existing files were preserved.`
         : `${result.written} entries exported; ${result.unchanged} already current. ${result.directory}`);
@@ -65,6 +93,7 @@ export function App() {
       setNotice(`Export could not finish: ${String(error)}`);
     } finally {
       setExporting(false);
+      await refreshExportStatus().catch(() => undefined);
     }
   }
 
@@ -95,6 +124,8 @@ export function App() {
             title={isDesktop ? 'Export finished entries to an Obsidian folder' : 'Folder export is available in the desktop app'}>
             {exporting ? 'Exporting…' : 'Export to Obsidian'}
           </button>
+          {exportStatus.directory && <button className="export-button" disabled={exporting} onClick={() => void runMaintainedExport()}>Retry export</button>}
+          {exportStatus.running && <button className="export-button" onClick={() => void invoke('cancel_maintained_export').then(refreshExportStatus)}>Cancel</button>}
         </div>
       </header>
       {appearance.error && <div className="app-notice" role="status">{appearance.error}</div>}
@@ -110,6 +141,12 @@ export function App() {
 
       {notice && <div className="app-notice" role="status">
         <span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss export notice">×</button>
+      </div>}
+      {isDesktop && exportStatus.directory && <div className="preview-note" role="status">
+        Maintained export: {exportStatus.pending} pending · {exportStatus.conflicts.length} conflicts
+        {exportStatus.lastSuccess ? ` · last success ${new Date(exportStatus.lastSuccess).toLocaleString()}` : ' · awaiting first success'}
+        {exportStatus.error ? ` · ${exportStatus.error}` : ''}
+        <button onClick={() => void invoke('disconnect_maintained_export').then(refreshExportStatus)}>Stop maintaining</button>
       </div>}
 
       <main className={`workspace show-${pane}`}>

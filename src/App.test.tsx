@@ -125,12 +125,16 @@ afterEach(() => {
 
 describe('native application close lifecycle', () => {
   it('clears a transient native appearance error after a later successful update', async () => {
-    native.invoke.mockRejectedValueOnce(new Error('Temporary native failure'));
+    let appearanceCalls = 0;
+    native.invoke.mockImplementation(async (command: string) => {
+      if (command === 'apply_appearance' && appearanceCalls++ === 0) throw new Error('Temporary native failure');
+      return undefined;
+    });
     render(<App />);
     expect(await screen.findByText('The window appearance could not be updated.')).toBeTruthy();
     await act(async () => { window.dispatchEvent(new Event('appearancechange')); });
     await waitFor(() => expect(screen.queryByText('The window appearance could not be updated.')).toBeNull());
-    expect(native.invoke).toHaveBeenCalledTimes(2);
+    expect(native.invoke.mock.calls.filter(([command]) => command === 'apply_appearance')).toHaveLength(2);
   });
 
   it('keeps close pending until the current editor generation is saved unfinished', async () => {
@@ -477,5 +481,18 @@ describe('native application close lifecycle', () => {
     expect(native.saveEntry).toHaveBeenCalledTimes(1);
     expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while undoing' } });
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this while undoing');
+  });
+
+  it('shows maintained export health and retries the bounded queue', async () => {
+    const status = { directory: '/tmp/Journal export', lastSuccess: '2026-09-18T12:00:00Z', pending: 3, conflicts: ['entry-1'], running: false, canceled: false, error: null };
+    native.invoke.mockImplementation(async (command: string) => {
+      if (command === 'maintained_export_status') return status;
+      if (command === 'run_maintained_export') return { written: 1, unchanged: 0, conflicts: [], directory: status.directory, pending: 2, cursor: 10 };
+      return undefined;
+    });
+    render(<App />);
+    expect(await screen.findByText(/Maintained export: 3 pending · 1 conflicts/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry export' }));
+    await waitFor(() => expect(native.invoke.mock.calls.some(([command]) => command === 'run_maintained_export')).toBe(true));
   });
 });
