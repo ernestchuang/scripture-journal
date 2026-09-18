@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type { PlanDefinitionApi, PlanEnrollment } from '../platform/plans';
+import type { PlanDefinitionApi, PlanDefinitionVersion, PlanEnrollment } from '../platform/plans';
 import { PlanPanel } from './PlanPanel';
 
 afterEach(cleanup);
@@ -20,13 +20,16 @@ const fourStream = {
 const created: PlanEnrollment = { id: 'enrollment-new', definitionVersionId: fourStream.id, createdAt: '2026-09-18T00:00:02Z' };
 const history = (id: string, enrollmentId = first.id, undone = false) => ({ id, assignmentId: 'assignment-1', enrollmentId, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, completedAt: '2026-09-18T00:00:03Z', undone });
 const importedPlan = { id: 'custom-version', planId: 'custom-plan', version: 1, createdAt: first.createdAt, definition: { schemaVersion: 1, name: 'Imported streams', schedule: { kind: 'chapterStreams' as const, streams: [] } } };
+const retainedDefinition = { ...importedPlan, id: 'retained-version-1', planId: 'retained-plan-1', definition: { ...importedPlan.definition, name: 'Duplicate name' } };
+const retainedExplicit = { ...importedPlan, id: 'retained-version-2', planId: 'retained-plan-2', version: 3, definition: { ...importedPlan.definition, name: 'Duplicate name', schedule: { kind: 'explicitSchedule' as const, days: [{ day: 1, passages: [{ book: 43, chapter: 3 }] }] } } };
 const importedStreams = { ...importedPlan, definition: { ...importedPlan.definition, schedule: { kind: 'chapterStreams' as const, streams: [
   { id: 'repeat', name: 'Repeated chapters', chapters: [{ book: 19, chapter: 1 }, { book: 19, chapter: 1 }] },
   { id: 'short', name: 'Short stream', chapters: [{ book: 40, chapter: 1 }] },
 ] } } };
 const customEnrollment: PlanEnrollment = { id: 'custom-enrollment', definitionVersionId: importedStreams.id, createdAt: '2026-09-18T00:00:04Z' };
-const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
+const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
+  listLatestPlanDefinitionVersions: vi.fn(async () => []),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
   activePlanAssignments: vi.fn(async id => id === first.id ? [{ id: 'assignment-1', enrollmentId: id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' }] : []),
   planCompletionHistory: vi.fn(async () => []),
@@ -39,6 +42,76 @@ const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefiniti
 });
 
 describe('retained plan panel', () => {
+  it('loads retained definitions in core order and distinguishes duplicate names by identity', async () => {
+    let resolveDefinitions!: (value: PlanDefinitionVersion[]) => void;
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockImplementationOnce(() => new Promise(resolve => { resolveDefinitions = resolve; }));
+    render(<PlanPanel api={plans} />);
+    expect(screen.getByText('Loading retained plan definitions…')).toBeTruthy();
+    await act(async () => { resolveDefinitions([retainedDefinition, retainedExplicit]); });
+    const select = screen.getByLabelText('Retained plan definition') as HTMLSelectElement;
+    expect(Array.from(select.options, option => option.text)).toEqual([
+      'Duplicate name · plan retained-plan-1',
+      'Duplicate name · plan retained-plan-2',
+    ]);
+    expect(select.value).toBe(retainedDefinition.id);
+    expect(screen.getByText(retainedDefinition.planId)).toBeTruthy();
+    expect(screen.getByText('Chapter streams')).toBeTruthy();
+    fireEvent.change(select, { target: { value: retainedExplicit.id } });
+    expect(screen.getByText(retainedExplicit.planId)).toBeTruthy();
+    expect(screen.getByText('Explicit schedule')).toBeTruthy();
+    expect(plans.registerFourStreamPlan).not.toHaveBeenCalled();
+    expect(plans.importPlanDefinitionJson).not.toHaveBeenCalled();
+    expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
+    expect(plans.completePlanStream).not.toHaveBeenCalled();
+    expect(plans.undoPlanCompletion).not.toHaveBeenCalled();
+  });
+
+  it('shows empty retained definitions and retries a failed read without writes', async () => {
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockRejectedValueOnce(new Error('definition discovery offline')).mockResolvedValueOnce([]);
+    render(<PlanPanel api={plans} />);
+    expect(await screen.findByText(/Could not load retained plan definitions: Error: definition discovery offline/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry retained definitions' }));
+    expect(await screen.findByText('No retained plan definitions yet.')).toBeTruthy();
+    expect(plans.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(2);
+    expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
+  });
+
+  it('ignores obsolete retained-definition success after API replacement and rejection after unmount', async () => {
+    let resolveOld!: (value: PlanDefinitionVersion[]) => void;
+    let rejectLate!: (reason: unknown) => void;
+    const oldApi = api();
+    const currentApi = api();
+    vi.mocked(oldApi.listLatestPlanDefinitionVersions).mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
+    vi.mocked(currentApi.listLatestPlanDefinitionVersions).mockResolvedValueOnce([retainedExplicit]);
+    const view = render(<PlanPanel api={oldApi} />);
+    view.rerender(<PlanPanel api={currentApi} />);
+    expect((await screen.findByLabelText('Retained plan definition') as HTMLSelectElement).value).toBe(retainedExplicit.id);
+    await act(async () => { resolveOld([retainedDefinition]); });
+    expect((screen.getByLabelText('Retained plan definition') as HTMLSelectElement).value).toBe(retainedExplicit.id);
+    view.unmount();
+
+    const lateApi = api();
+    vi.mocked(lateApi.listLatestPlanDefinitionVersions).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectLate = reject; }));
+    const lateView = render(<PlanPanel api={lateApi} />);
+    lateView.unmount();
+    await act(async () => { rejectLate(new Error('late definition rejection')); });
+    expect(lateView.container.textContent).toBe('');
+  });
+
+  it('discovers retained unenrolled definitions again after remount', async () => {
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedDefinition]);
+    const firstView = render(<PlanPanel api={plans} />);
+    expect(await screen.findByText(retainedDefinition.planId)).toBeTruthy();
+    firstView.unmount();
+    render(<PlanPanel api={plans} />);
+    expect(await screen.findByText(retainedDefinition.planId)).toBeTruthy();
+    expect(plans.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(2);
+    expect(plans.listPlanEnrollments).toHaveBeenCalledTimes(2);
+  });
+
   it('shows core-ordered enrollments and read-only current assignments', async () => {
     const plans = api(); render(<PlanPanel api={plans} />);
     expect(await screen.findByText('First plan')).toBeTruthy();
@@ -352,7 +425,7 @@ describe('retained plan panel', () => {
     const plans = api();
     vi.mocked(plans.listPlanEnrollments).mockImplementationOnce(() => new Promise(resolve => { resolveList = resolve; }));
     render(<PlanPanel api={plans} />);
-    expect(screen.getByRole('status').textContent).toBe('Loading retained plans…');
+    expect(screen.getByText('Loading retained plans…')).toBeTruthy();
     await act(async () => { resolveList([second, first]); });
     const select = await screen.findByLabelText('Retained enrollment') as HTMLSelectElement;
     expect(Array.from(select.options, option => option.value)).toEqual([second.id, first.id]);

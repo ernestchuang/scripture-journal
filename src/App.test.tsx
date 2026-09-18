@@ -10,6 +10,7 @@ const native = vi.hoisted(() => ({
   saveEntry: vi.fn(),
   invoke: vi.fn(),
   listPlanEnrollments: vi.fn(),
+  listLatestPlanDefinitionVersions: vi.fn(),
   getPlanDefinitionVersion: vi.fn(),
   activePlanAssignments: vi.fn(),
   planCompletionHistory: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock('./platform/journal', () => ({
 vi.mock('./platform/plans', () => ({
   nativePlans: {
     listPlanEnrollments: native.listPlanEnrollments,
+    listLatestPlanDefinitionVersions: native.listLatestPlanDefinitionVersions,
     getPlanDefinitionVersion: native.getPlanDefinitionVersion,
     activePlanAssignments: native.activePlanAssignments,
     planCompletionHistory: native.planCompletionHistory,
@@ -83,6 +85,7 @@ beforeEach(() => {
   native.listEntries.mockReset().mockResolvedValue([]);
   native.saveEntry.mockReset();
   native.listPlanEnrollments.mockReset().mockResolvedValue([]);
+  native.listLatestPlanDefinitionVersions.mockReset().mockResolvedValue([]);
   native.getPlanDefinitionVersion.mockReset();
   native.activePlanAssignments.mockReset();
   native.planCompletionHistory.mockReset().mockResolvedValue([]);
@@ -196,6 +199,28 @@ describe('native application close lifecycle', () => {
     expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Save this after browsing' } });
     expect(screen.getByRole('status').textContent).toBe('Draft saved');
     expect((editor as HTMLTextAreaElement).value).toBe('Save this after browsing');
+  });
+
+  it('preserves and autosaves dirty writing while browsing retained plan definitions', async () => {
+    native.listLatestPlanDefinitionVersions.mockResolvedValue([
+      { id: 'definition-1', planId: 'plan-1', version: 1, createdAt: '2026-09-18T00:00:00Z', definition: { schemaVersion: 1, name: 'First retained', schedule: { kind: 'chapterStreams', streams: [] } } },
+      { id: 'definition-2', planId: 'plan-2', version: 2, createdAt: '2026-09-18T00:00:01Z', definition: { schemaVersion: 1, name: 'Second retained', schedule: { kind: 'explicitSchedule', days: [{ day: 1, passages: [{ book: 43, chapter: 3 }] }] } } },
+    ]);
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    const select = await screen.findByLabelText('Retained plan definition');
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Keep this while browsing definitions' } });
+    fireEvent.change(select, { target: { value: 'definition-2' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(screen.getByText('plan-2')).toBeTruthy();
+    expect(native.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while browsing definitions' } });
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this while browsing definitions');
   });
 
   it('preserves and autosaves dirty writing while explicitly enrolling in four streams', async () => {

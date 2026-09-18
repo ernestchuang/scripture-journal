@@ -14,11 +14,15 @@ type PlanHistory =
   | { kind: 'ready'; items: PlanCompletionHistoryItem[] };
 type ReadyPlanHistory = Extract<PlanHistory, { kind: 'ready' }>;
 
-type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'>;
+type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'>;
 
 export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [enrollments, setEnrollments] = useState<PlanEnrollment[] | null>(null);
   const [selectedId, setSelectedId] = useState('');
+  const [retainedDefinitions, setRetainedDefinitions] = useState<PlanDefinitionVersion[] | null>(null);
+  const [selectedDefinitionId, setSelectedDefinitionId] = useState('');
+  const [definitionListError, setDefinitionListError] = useState('');
+  const [definitionListAttempt, setDefinitionListAttempt] = useState(0);
   const [listError, setListError] = useState('');
   const [attempt, setAttempt] = useState(0);
   const [detailAttempt, setDetailAttempt] = useState(0);
@@ -55,6 +59,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const importedEnrollmentEpoch = useRef(0);
   const exportEpoch = useRef(0);
   const discoveryEpoch = useRef(0);
+  const definitionDiscoveryEpoch = useRef(0);
   const confirmedEnrollment = useRef<PlanEnrollment | null>(null);
   const confirmedCompletions = useRef(new Map<string, string>());
   const confirmedUndos = useRef(new Map<string, string>());
@@ -70,6 +75,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     importEpoch.current += 1;
     importedEnrollmentEpoch.current += 1;
     exportEpoch.current += 1;
+    definitionDiscoveryEpoch.current += 1;
     confirmedEnrollment.current = null;
     confirmedCompletions.current.clear();
     confirmedUndos.current.clear();
@@ -83,6 +89,23 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     setExportError(null);
     setExportedJson(null);
   }, [selectedId]);
+
+  useEffect(() => {
+    if (!api) return;
+    let active = true;
+    const epoch = ++definitionDiscoveryEpoch.current;
+    setRetainedDefinitions(null); setDefinitionListError('');
+    api.listLatestPlanDefinitionVersions().then(items => {
+      if (!active || epoch !== definitionDiscoveryEpoch.current) return;
+      setRetainedDefinitions(items);
+      setSelectedDefinitionId(current => items.some(item => item.id === current) ? current : (items[0]?.id ?? ''));
+    }).catch(error => {
+      if (!active || epoch !== definitionDiscoveryEpoch.current) return;
+      setRetainedDefinitions([]);
+      setDefinitionListError(String(error));
+    });
+    return () => { active = false; };
+  }, [api, definitionListAttempt]);
 
   useEffect(() => {
     if (!api) return;
@@ -358,6 +381,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   }
 
   if (!api) return <aside className="plan-panel" aria-label="Reading plans"><h2>Reading plans</h2><p>Plans are available in the native desktop app.</p></aside>;
+  const selectedDefinition = retainedDefinitions?.find(item => item.id === selectedDefinitionId);
   return <aside className="plan-panel" aria-label="Reading plans">
     <header><div><span>READING PLANS</span><h2>Retained plans</h2></div></header>
     {enrollments === null && !listError && <p role="status">Loading retained plans…</p>}
@@ -394,6 +418,16 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
         {importedEnrollment && <p>Custom-plan enrollment {importedEnrollment.id} was created for definition version {importedEnrollment.definitionVersionId}.</p>}
         {importedEnrollError && <div role="alert" className="plan-error">{importedEnrollError}</div>}
       </div>}
+    </section>
+    <section className="plan-definitions" aria-label="Retained plan definitions">
+      <h3>Retained plan definitions</h3>
+      <p>Browse the latest immutable version of every retained plan identity. This selection does not change an active enrollment.</p>
+      {retainedDefinitions === null && <p role="status">Loading retained plan definitions…</p>}
+      {definitionListError && <div role="alert" className="plan-error">Could not load retained plan definitions: {definitionListError}<button onClick={() => setDefinitionListAttempt(value => value + 1)}>Retry retained definitions</button></div>}
+      {retainedDefinitions?.length === 0 && !definitionListError && <p>No retained plan definitions yet.</p>}
+      {retainedDefinitions && retainedDefinitions.length > 0 && <><label>Retained plan definition<select value={selectedDefinitionId} onChange={event => setSelectedDefinitionId(event.target.value)}>{retainedDefinitions.map(definition => <option key={definition.id} value={definition.id}>{definition.definition.name} · plan {definition.planId}</option>)}</select></label>
+        {selectedDefinition && <dl><dt>Name</dt><dd>{selectedDefinition.definition.name}</dd><dt>Plan identity</dt><dd>{selectedDefinition.planId}</dd><dt>Definition version</dt><dd>{selectedDefinition.version}</dd><dt>Schedule kind</dt><dd>{selectedDefinition.definition.schedule.kind === 'chapterStreams' ? 'Chapter streams' : 'Explicit schedule'}</dd></dl>}
+      </>}
     </section>
     {enrollments?.length === 0 && <p>No retained plan enrollments yet.</p>}
     {enrollments && enrollments.length > 0 && <>
