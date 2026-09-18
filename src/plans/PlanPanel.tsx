@@ -45,6 +45,24 @@ export function updateStreamEnrollmentChoice(
   }));
 }
 
+export type RetainedExportLifecycle = { epoch: number; selectedDefinitionId: string };
+
+export function selectRetainedExportDefinition(lifecycle: RetainedExportLifecycle, id: string) {
+  if (lifecycle.selectedDefinitionId === id) return false;
+  lifecycle.epoch += 1;
+  lifecycle.selectedDefinitionId = id;
+  return true;
+}
+
+export function startRetainedExport(lifecycle: RetainedExportLifecycle) {
+  lifecycle.epoch += 1;
+  return lifecycle.epoch;
+}
+
+export function ownsRetainedExport(lifecycle: RetainedExportLifecycle, epoch: number, definitionId: string) {
+  return lifecycle.epoch === epoch && lifecycle.selectedDefinitionId === definitionId;
+}
+
 export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [enrollments, setEnrollments] = useState<PlanEnrollment[] | null>(null);
   const [selectedId, setSelectedId] = useState('');
@@ -101,7 +119,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const importEpoch = useRef(0);
   const importedEnrollmentEpoch = useRef(0);
   const exportEpoch = useRef(0);
-  const retainedExportEpoch = useRef(0);
+  const retainedExportLifecycle = useRef<RetainedExportLifecycle>({ epoch: 0, selectedDefinitionId });
   const retainedEnrollmentEpoch = useRef(0);
   const versionEditEpoch = useRef(0);
   const retainedChoiceDefinitionId = useRef('');
@@ -115,9 +133,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const readyDetails = useRef(new Map<string, ReadyPlanDetails>());
   const readyHistory = useRef(new Map<string, ReadyPlanHistory>());
   const selectedIdRef = useRef(selectedId);
-  const selectedDefinitionIdRef = useRef(selectedDefinitionId);
   selectedIdRef.current = selectedId;
-  selectedDefinitionIdRef.current = selectedDefinitionId;
 
   useEffect(() => () => {
     actionEpoch.current += 1;
@@ -127,7 +143,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     importEpoch.current += 1;
     importedEnrollmentEpoch.current += 1;
     exportEpoch.current += 1;
-    retainedExportEpoch.current += 1;
+    retainedExportLifecycle.current.epoch += 1;
     retainedEnrollmentEpoch.current += 1;
     versionEditEpoch.current += 1;
     retainedChoiceDefinitionId.current = '';
@@ -152,9 +168,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   }, [api]);
 
   function selectRetainedDefinition(id: string) {
-    if (selectedDefinitionIdRef.current === id) return;
-    retainedExportEpoch.current += 1;
-    selectedDefinitionIdRef.current = id;
+    if (!selectRetainedExportDefinition(retainedExportLifecycle.current, id)) return;
     setRetainedExportingVersionId('');
     setRetainedExportError(null);
     setRetainedExportedJson(null);
@@ -162,7 +176,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   }
 
   useEffect(() => {
-    retainedExportEpoch.current += 1;
+    retainedExportLifecycle.current.epoch += 1;
     setRetainedExportingVersionId('');
     setRetainedExportError(null);
     setRetainedExportedJson(null);
@@ -185,8 +199,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       const visible = mergeConfirmedDefinitions(items, confirmedDefinitions.current);
       readyDefinitions.current = visible;
       setRetainedDefinitions(visible);
-      selectRetainedDefinition(visible.some(item => item.id === selectedDefinitionIdRef.current)
-        ? selectedDefinitionIdRef.current
+      selectRetainedDefinition(visible.some(item => item.id === retainedExportLifecycle.current.selectedDefinitionId)
+        ? retainedExportLifecycle.current.selectedDefinitionId
         : (visible[0]?.id ?? ''));
     }).catch(error => {
       if (!active || epoch !== definitionDiscoveryEpoch.current) return;
@@ -206,10 +220,10 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       readyDefinitions.current = visible;
       return visible;
     });
-    const selectedPlanId = previousDefinitions?.find(item => item.id === selectedDefinitionIdRef.current)?.planId;
-    selectRetainedDefinition(!selectedDefinitionIdRef.current || selectedPlanId === version.planId
+    const selectedPlanId = previousDefinitions?.find(item => item.id === retainedExportLifecycle.current.selectedDefinitionId)?.planId;
+    selectRetainedDefinition(!retainedExportLifecycle.current.selectedDefinitionId || selectedPlanId === version.planId
       ? version.id
-      : selectedDefinitionIdRef.current);
+      : retainedExportLifecycle.current.selectedDefinitionId);
     const epoch = ++definitionDiscoveryEpoch.current;
     try {
       const items = await api.listLatestPlanDefinitionVersions();
@@ -217,8 +231,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       const visible = mergeConfirmedDefinitions(items, confirmedDefinitions.current);
       readyDefinitions.current = visible;
       setRetainedDefinitions(visible);
-      selectRetainedDefinition(visible.some(item => item.id === selectedDefinitionIdRef.current)
-        ? selectedDefinitionIdRef.current
+      selectRetainedDefinition(visible.some(item => item.id === retainedExportLifecycle.current.selectedDefinitionId)
+        ? retainedExportLifecycle.current.selectedDefinitionId
         : (visible[0]?.id ?? ''));
     } catch (error) {
       if (epoch !== definitionDiscoveryEpoch.current) return;
@@ -517,16 +531,16 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
 
   async function exportSelectedRetainedDefinition(definition: PlanDefinitionVersion) {
     if (!api || retainedExportingVersionId) return;
-    const epoch = ++retainedExportEpoch.current;
+    const epoch = startRetainedExport(retainedExportLifecycle.current);
     setRetainedExportingVersionId(definition.id); setRetainedExportError(null);
     try {
       const json = await api.exportPlanDefinitionJson(definition.id);
-      if (epoch !== retainedExportEpoch.current || selectedDefinitionIdRef.current !== definition.id) return;
+      if (!ownsRetainedExport(retainedExportLifecycle.current, epoch, definition.id)) return;
       setRetainedExportedJson({ versionId: definition.id, json });
     } catch (error) {
-      if (epoch === retainedExportEpoch.current && selectedDefinitionIdRef.current === definition.id) setRetainedExportError({ versionId: definition.id, message: `Could not export retained plan JSON: ${String(error)}` });
+      if (ownsRetainedExport(retainedExportLifecycle.current, epoch, definition.id)) setRetainedExportError({ versionId: definition.id, message: `Could not export retained plan JSON: ${String(error)}` });
     } finally {
-      if (epoch === retainedExportEpoch.current && selectedDefinitionIdRef.current === definition.id) setRetainedExportingVersionId('');
+      if (ownsRetainedExport(retainedExportLifecycle.current, epoch, definition.id)) setRetainedExportingVersionId('');
     }
   }
 

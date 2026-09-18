@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { PlanDefinitionApi, PlanDefinitionVersion, PlanEnrollment } from '../platform/plans';
-import { PlanPanel, updateStreamEnrollmentChoice } from './PlanPanel';
+import { ownsRetainedExport, PlanPanel, selectRetainedExportDefinition, startRetainedExport, updateStreamEnrollmentChoice } from './PlanPanel';
 
 afterEach(cleanup);
 const first: PlanEnrollment = { id: 'enrollment-1', definitionVersionId: 'version-1', createdAt: '2026-09-18T00:00:00Z' };
@@ -47,6 +47,26 @@ const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanD
 });
 
 describe('retained plan panel', () => {
+  it('makes selection invalidation precede export ownership without a delayed reset', () => {
+    const delayedReset = { epoch: 0, selectedDefinitionId: retainedDefinition.id };
+    const prematurelyStartedEpoch = startRetainedExport(delayedReset);
+    delayedReset.epoch += 1;
+    expect(ownsRetainedExport(delayedReset, prematurelyStartedEpoch, retainedDefinition.id)).toBe(false);
+
+    const lifecycle = { epoch: 0, selectedDefinitionId: '' };
+    expect(selectRetainedExportDefinition(lifecycle, retainedDefinition.id)).toBe(true);
+    expect(lifecycle).toEqual({ epoch: 1, selectedDefinitionId: retainedDefinition.id });
+
+    const exportEpoch = startRetainedExport(lifecycle);
+    expect(exportEpoch).toBe(2);
+    expect(ownsRetainedExport(lifecycle, exportEpoch, retainedDefinition.id)).toBe(true);
+    expect(selectRetainedExportDefinition(lifecycle, retainedDefinition.id)).toBe(false);
+    expect(ownsRetainedExport(lifecycle, exportEpoch, retainedDefinition.id)).toBe(true);
+
+    expect(selectRetainedExportDefinition(lifecycle, retainedExplicit.id)).toBe(true);
+    expect(ownsRetainedExport(lifecycle, exportEpoch, retainedDefinition.id)).toBe(false);
+  });
+
   it('records an occurrence change even before retained choices have been initialized', () => {
     const streams = retainedStreams.definition.schedule.streams;
     expect(updateStreamEnrollmentChoice(streams, [], 0, { startingPosition: 1 })).toEqual([
