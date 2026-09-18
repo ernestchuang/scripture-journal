@@ -30,7 +30,8 @@ const importedStreams = { ...importedPlan, definition: { ...importedPlan.definit
 const customEnrollment: PlanEnrollment = { id: 'custom-enrollment', definitionVersionId: importedStreams.id, createdAt: '2026-09-18T00:00:04Z' };
 const retainedStreams = { ...importedStreams, id: retainedDefinition.id, planId: retainedDefinition.planId, definition: { ...importedStreams.definition, name: 'Duplicate name' } };
 const retainedEnrollment: PlanEnrollment = { id: 'retained-enrollment', definitionVersionId: retainedStreams.id, createdAt: '2026-09-18T00:00:05Z' };
-const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
+const calendarEnrollment = { id: 'calendar-enrollment', definitionVersionId: retainedExplicit.id, createdAt: '2026-09-18T00:00:06Z', startDate: '2026-03-01', scheduleMode: 'calendarAligned' as const };
+const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'enrollInCalendar' | 'completePlanStream' | 'undoPlanCompletion'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   listLatestPlanDefinitionVersions: vi.fn(async () => []),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
@@ -42,6 +43,7 @@ const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanD
   createPlanDefinitionVersion: vi.fn(async (_planId, definition) => ({ ...retainedDefinition, id: 'retained-version-3', version: 2, definition })),
   exportPlanDefinitionJson: vi.fn(async id => `{"versionId":"${id}"}`),
   enrollInChapterStreams: vi.fn(async () => created),
+  enrollInCalendar: vi.fn(async request => ({ ...calendarEnrollment, definitionVersionId: request.definitionVersionId, startDate: request.startDate, scheduleMode: request.scheduleMode })),
   completePlanStream: vi.fn(async request => ({ id: 'completion-1', assignmentId: request.expectedAssignmentId, completedAt: '2026-09-18T00:00:03Z' })),
   undoPlanCompletion: vi.fn(async () => undefined),
 });
@@ -373,6 +375,94 @@ describe('retained plan panel', () => {
     expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
   });
 
+  it('captures the selected calendar version, local date, and both explicit policies once', async () => {
+    let resolveEnrollment!: (value: typeof calendarEnrollment) => void;
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedExplicit]);
+    vi.mocked(plans.enrollInCalendar)
+      .mockImplementationOnce(() => new Promise(resolve => { resolveEnrollment = resolve; }))
+      .mockResolvedValueOnce({ ...calendarEnrollment, scheduleMode: 'dayOne' });
+    const firstView = render(<PlanPanel api={plans} />);
+    const defaultDate = await screen.findByLabelText('Calendar start date') as HTMLInputElement;
+    expect(defaultDate.value).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect((screen.getByLabelText('Calendar schedule policy') as HTMLSelectElement).value).toBe('calendarAligned');
+    fireEvent.change(screen.getByLabelText('Calendar start date'), { target: { value: '2026-03-01' } });
+    const create = screen.getByRole('button', { name: 'Create calendar enrollment' });
+    fireEvent.click(create); fireEvent.click(create);
+    expect(plans.enrollInCalendar).toHaveBeenCalledTimes(1);
+    expect(plans.enrollInCalendar).toHaveBeenNthCalledWith(1, {
+      definitionVersionId: retainedExplicit.id,
+      startDate: '2026-03-01',
+      scheduleMode: 'calendarAligned',
+    });
+    expect((screen.getByRole('button', { name: 'Creating calendar enrollment…' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('Calendar start date'), { target: { value: '2026-04-02' } });
+    fireEvent.change(screen.getByLabelText('Calendar schedule policy'), { target: { value: 'dayOne' } });
+    await act(async () => { resolveEnrollment(calendarEnrollment); });
+    expect(await screen.findByText(/Calendar enrollment calendar-enrollment was created/)).toBeTruthy();
+    firstView.unmount();
+
+    const retryPlans = api();
+    vi.mocked(retryPlans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedExplicit]);
+    render(<PlanPanel api={retryPlans} />);
+    fireEvent.change(await screen.findByLabelText('Calendar start date'), { target: { value: '2026-04-02' } });
+    fireEvent.change(screen.getByLabelText('Calendar schedule policy'), { target: { value: 'dayOne' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create calendar enrollment' }));
+    await waitFor(() => expect(retryPlans.enrollInCalendar).toHaveBeenCalledWith({
+      definitionVersionId: retainedExplicit.id,
+      startDate: '2026-04-02',
+      scheduleMode: 'dayOne',
+    }));
+  });
+
+  it('preserves calendar inputs through failure and retries with the current captured values', async () => {
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedExplicit]);
+    vi.mocked(plans.enrollInCalendar).mockRejectedValueOnce(new Error('calendar unavailable'));
+    render(<PlanPanel api={plans} />);
+    const dateInput = await screen.findByLabelText('Calendar start date') as HTMLInputElement;
+    fireEvent.change(dateInput, { target: { value: '2026-05-03' } });
+    fireEvent.change(screen.getByLabelText('Calendar schedule policy'), { target: { value: 'dayOne' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create calendar enrollment' }));
+    expect(await screen.findByText(/Could not create calendar enrollment: Error: calendar unavailable/)).toBeTruthy();
+    expect(dateInput.value).toBe('2026-05-03');
+    expect((screen.getByLabelText('Calendar schedule policy') as HTMLSelectElement).value).toBe('dayOne');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry calendar enrollment' }));
+    await waitFor(() => expect(plans.enrollInCalendar).toHaveBeenCalledTimes(2));
+    expect(plans.enrollInCalendar).toHaveBeenLastCalledWith({ definitionVersionId: retainedExplicit.id, startDate: '2026-05-03', scheduleMode: 'dayOne' });
+  });
+
+  it('ignores obsolete calendar settlement after selection, API replacement, and unmount', async () => {
+    let resolveOld!: (value: typeof calendarEnrollment) => void;
+    let resolveReplaced!: (value: typeof calendarEnrollment) => void;
+    let resolveUnmounted!: (value: typeof calendarEnrollment) => void;
+    const oldApi = api();
+    const currentApi = api();
+    const replacementApi = api();
+    vi.mocked(oldApi.listLatestPlanDefinitionVersions).mockResolvedValue([retainedExplicit, retainedStreams]);
+    vi.mocked(oldApi.enrollInCalendar).mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
+    vi.mocked(currentApi.listLatestPlanDefinitionVersions).mockResolvedValue([retainedExplicit]);
+    vi.mocked(currentApi.enrollInCalendar).mockImplementationOnce(() => new Promise(resolve => { resolveReplaced = resolve; }));
+    vi.mocked(replacementApi.listLatestPlanDefinitionVersions).mockResolvedValue([retainedExplicit]);
+    vi.mocked(replacementApi.enrollInCalendar).mockImplementationOnce(() => new Promise(resolve => { resolveUnmounted = resolve; }));
+    const view = render(<PlanPanel api={oldApi} />);
+    await screen.findByLabelText('Calendar start date');
+    fireEvent.click(screen.getByRole('button', { name: 'Create calendar enrollment' }));
+    fireEvent.change(screen.getByLabelText('Retained plan definition'), { target: { value: retainedStreams.id } });
+    await act(async () => { resolveOld(calendarEnrollment); });
+    expect(screen.queryByText(/Calendar enrollment calendar-enrollment was created/)).toBeNull();
+    view.rerender(<PlanPanel api={currentApi} />);
+    expect((await screen.findByLabelText('Retained plan definition') as HTMLSelectElement).value).toBe(retainedExplicit.id);
+    fireEvent.click(await screen.findByRole('button', { name: 'Create calendar enrollment' }));
+    view.rerender(<PlanPanel api={replacementApi} />);
+    await act(async () => { resolveReplaced(calendarEnrollment); });
+    expect(screen.queryByText(/Calendar enrollment calendar-enrollment was created/)).toBeNull();
+    fireEvent.click(await screen.findByRole('button', { name: 'Create calendar enrollment' }));
+    view.unmount();
+    await act(async () => { resolveUnmounted(calendarEnrollment); });
+    expect(view.container.textContent).toBe('');
+  });
+
   it('keeps retained-definition export state independent from an imported-definition export', async () => {
     const plans = api();
     vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedDefinition, retainedExplicit]);
@@ -582,7 +672,7 @@ describe('retained plan panel', () => {
     fireEvent.click(create);
     const definitionSelect = screen.getByLabelText('Retained plan definition') as HTMLSelectElement;
     fireEvent.change(definitionSelect, { target: { value: retainedExplicit.id } });
-    expect(screen.getByText('This retained calendar plan cannot be enrolled as chapter streams.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Create calendar enrollment' })).toBeTruthy();
     await act(async () => { resolveEnrollment(retainedEnrollment); });
 
     expect(definitionSelect.value).toBe(retainedExplicit.id);

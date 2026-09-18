@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { PlanAssignment, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, StreamEnrollment } from '../platform/plans';
+import type { CalendarEnrollmentRequest, CalendarPlanEnrollment, CalendarScheduleMode, PlanAssignment, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, StreamEnrollment } from '../platform/plans';
 import type { PlanDefinitionApi } from '../platform/plans';
 import './plans.css';
 
@@ -15,7 +15,15 @@ type PlanHistory =
 type ReadyPlanHistory = Extract<PlanHistory, { kind: 'ready' }>;
 type ChapterStreams = Extract<PlanDefinition['schedule'], { kind: 'chapterStreams' }>['streams'];
 
-type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'>;
+type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'enrollInCalendar' | 'completePlanStream' | 'undoPlanCompletion'>;
+
+function localToday() {
+  const now = new Date();
+  const year = String(now.getFullYear()).padStart(4, '0');
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 function mergeConfirmedDefinitions(items: PlanDefinitionVersion[], confirmed: Map<string, PlanDefinitionVersion>, acknowledge = true) {
   const visible = items.map(item => {
@@ -105,6 +113,11 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [retainedEnrollmentChoices, setRetainedEnrollmentChoices] = useState<StreamEnrollment[]>([]);
   const [enrollingRetained, setEnrollingRetained] = useState(false);
   const [retainedEnrollmentResult, setRetainedEnrollmentResult] = useState<{ definitionId: string; enrollment?: PlanEnrollment; message?: string } | null>(null);
+  const [calendarChoiceDefinitionId, setCalendarChoiceDefinitionId] = useState('');
+  const [calendarStartDate, setCalendarStartDate] = useState(localToday);
+  const [calendarScheduleMode, setCalendarScheduleMode] = useState<CalendarScheduleMode>('calendarAligned');
+  const [enrollingCalendar, setEnrollingCalendar] = useState(false);
+  const [calendarEnrollmentResult, setCalendarEnrollmentResult] = useState<{ definitionId: string; enrollment?: CalendarPlanEnrollment; message?: string } | null>(null);
   const [versionEditTarget, setVersionEditTarget] = useState<PlanDefinitionVersion | null>(null);
   const [versionEditJson, setVersionEditJson] = useState('');
   const [versionEditing, setVersionEditing] = useState(false);
@@ -121,6 +134,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const exportEpoch = useRef(0);
   const retainedExportLifecycle = useRef<RetainedExportLifecycle>({ epoch: 0, selectedDefinitionId });
   const retainedEnrollmentEpoch = useRef(0);
+  const calendarEnrollmentEpoch = useRef(0);
+  const calendarPendingEpoch = useRef(0);
   const versionEditEpoch = useRef(0);
   const retainedChoiceDefinitionId = useRef('');
   const discoveryEpoch = useRef(0);
@@ -145,6 +160,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     exportEpoch.current += 1;
     retainedExportLifecycle.current.epoch += 1;
     retainedEnrollmentEpoch.current += 1;
+    calendarEnrollmentEpoch.current += 1;
+    calendarPendingEpoch.current = 0;
     versionEditEpoch.current += 1;
     retainedChoiceDefinitionId.current = '';
     definitionDiscoveryEpoch.current += 1;
@@ -160,6 +177,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   useEffect(() => {
     setEnrollingRetained(false);
     setRetainedEnrollmentResult(null);
+    setEnrollingCalendar(false);
+    setCalendarEnrollmentResult(null);
     setVersionEditTarget(null);
     setVersionEditJson('');
     setVersionEditing(false);
@@ -169,6 +188,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
 
   function selectRetainedDefinition(id: string) {
     if (!selectRetainedExportDefinition(retainedExportLifecycle.current, id)) return;
+    calendarEnrollmentEpoch.current += 1;
+    setCalendarEnrollmentResult(null);
     setRetainedExportingVersionId('');
     setRetainedExportError(null);
     setRetainedExportedJson(null);
@@ -514,6 +535,34 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     }
   }
 
+  async function enrollSelectedCalendarDefinition(definition: PlanDefinitionVersion) {
+    if (!api || definition.definition.schedule.kind !== 'explicitSchedule' || enrollingCalendar || enrolling || enrollingImported || enrollingRetained) return;
+    const request: CalendarEnrollmentRequest = {
+      definitionVersionId: definition.id,
+      startDate: calendarChoiceDefinitionId === definition.id ? calendarStartDate : localToday(),
+      scheduleMode: calendarChoiceDefinitionId === definition.id ? calendarScheduleMode : 'calendarAligned',
+    };
+    if (!request.startDate) return;
+    const epoch = ++calendarEnrollmentEpoch.current;
+    calendarPendingEpoch.current = epoch;
+    setEnrollingCalendar(true);
+    setCalendarEnrollmentResult(null);
+    try {
+      const enrollment = await api.enrollInCalendar(request);
+      if (epoch !== calendarEnrollmentEpoch.current || retainedExportLifecycle.current.selectedDefinitionId !== definition.id) return;
+      setCalendarEnrollmentResult({ definitionId: definition.id, enrollment });
+    } catch (error) {
+      if (epoch === calendarEnrollmentEpoch.current && retainedExportLifecycle.current.selectedDefinitionId === definition.id) {
+        setCalendarEnrollmentResult({ definitionId: definition.id, message: `Could not create calendar enrollment: ${String(error)}` });
+      }
+    } finally {
+      if (calendarPendingEpoch.current === epoch) {
+        calendarPendingEpoch.current = 0;
+        setEnrollingCalendar(false);
+      }
+    }
+  }
+
   async function exportDefinition(definition: PlanDefinitionVersion, enrollmentId?: string) {
     if (!api || exportingVersionId) return;
     const epoch = ++exportEpoch.current;
@@ -626,6 +675,15 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
 
   if (!api) return <aside className="plan-panel" aria-label="Reading plans"><h2>Reading plans</h2><p>Plans are available in the native desktop app.</p></aside>;
   const selectedDefinition = retainedDefinitions?.find(item => item.id === selectedDefinitionId);
+  const visibleCalendarStartDate = selectedDefinition && calendarChoiceDefinitionId === selectedDefinition.id ? calendarStartDate : localToday();
+  const visibleCalendarScheduleMode = selectedDefinition && calendarChoiceDefinitionId === selectedDefinition.id ? calendarScheduleMode : 'calendarAligned';
+  function updateCalendarChoice(definitionId: string, update: { startDate?: string; scheduleMode?: CalendarScheduleMode }) {
+    if (calendarChoiceDefinitionId !== definitionId) setCalendarChoiceDefinitionId(definitionId);
+    if (update.startDate !== undefined) setCalendarStartDate(update.startDate);
+    else if (calendarChoiceDefinitionId !== definitionId) setCalendarStartDate(localToday());
+    if (update.scheduleMode !== undefined) setCalendarScheduleMode(update.scheduleMode);
+    else if (calendarChoiceDefinitionId !== definitionId) setCalendarScheduleMode('calendarAligned');
+  }
   const visibleRetainedEnrollmentChoices = selectedDefinition?.definition.schedule.kind === 'chapterStreams'
     ? updateStreamEnrollmentChoice(
       selectedDefinition.definition.schedule.streams,
@@ -698,7 +756,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       {retainedDefinitions?.length === 0 && !definitionListError && <p>No retained plan definitions yet.</p>}
       {retainedDefinitions && retainedDefinitions.length > 0 && <><label>Retained plan definition<select value={selectedDefinitionId} onChange={event => selectRetainedDefinition(event.target.value)}>{retainedDefinitions.map(definition => <option key={definition.id} value={definition.id}>{definition.definition.name} · plan {definition.planId}</option>)}</select></label>
         {selectedDefinition && <><dl><dt>Name</dt><dd>Retained name: {selectedDefinition.definition.name}</dd><dt>Plan identity</dt><dd>{selectedDefinition.planId}</dd><dt>Definition version</dt><dd>{selectedDefinition.version}</dd><dt>Schedule kind</dt><dd>{selectedDefinition.definition.schedule.kind === 'chapterStreams' ? 'Chapter streams' : 'Explicit schedule'}</dd></dl><section className="plan-export" aria-label="Export selected retained definition"><p>Export this selected retained immutable definition as portable JSON. This does not import, enroll, or modify a plan.</p><button disabled={!!retainedExportingVersionId} onClick={() => void exportSelectedRetainedDefinition(selectedDefinition)}>{retainedExportingVersionId === selectedDefinition.id ? 'Exporting retained definition JSON…' : retainedExportError?.versionId === selectedDefinition.id ? 'Retry retained definition JSON' : 'Export retained definition JSON'}</button>{retainedExportError?.versionId === selectedDefinition.id && <div role="alert" className="plan-error">{retainedExportError.message}</div>}{retainedExportedJson?.versionId === selectedDefinition.id && <label>Exported retained plan JSON<textarea readOnly value={retainedExportedJson.json} spellCheck={false} /></label>}</section><section className="plan-import" aria-label="Append retained plan version"><p>Editing appends a new immutable version. Existing enrollments remain pinned to their current version.</p><button disabled={versionEditing} onClick={() => beginVersionEdit(selectedDefinition)}>Edit selected as new version</button>{versionEditTarget && <><p>Editing plan {versionEditTarget.planId} from definition version {versionEditTarget.version}. Changing the retained selection does not retarget this edit.</p><label>Edited plan JSON<textarea value={versionEditJson} onChange={event => setVersionEditJson(event.target.value)} spellCheck={false} /></label><button disabled={versionEditing || !versionEditJson.trim()} onClick={() => void appendEditedVersion()}>{versionEditing ? 'Appending plan version…' : 'Append new plan version'}</button>{versionEditError && <div role="alert" className="plan-error">{versionEditError}</div>}{versionEditResult && <p role="status">Created immutable definition version {versionEditResult.version} for plan {versionEditResult.planId}. Existing enrollments were not changed.</p>}</>}</section>
-          {selectedDefinition.definition.schedule.kind === 'explicitSchedule' && <p>This retained calendar plan cannot be enrolled as chapter streams.</p>}
+          {selectedDefinition.definition.schedule.kind === 'explicitSchedule' && !(calendarEnrollmentResult?.definitionId === selectedDefinition.id && calendarEnrollmentResult.enrollment) && <section aria-label="Enroll in selected retained calendar plan"><p>Calendar alignment starts at the selected month and day and ends December 31, without earlier backlog. Start from day one schedules all 365 sets successively from the selected local date.</p><label>Calendar start date<input type="date" value={visibleCalendarStartDate} onChange={event => updateCalendarChoice(selectedDefinition.id, { startDate: event.target.value })} /></label><label>Calendar schedule policy<select value={visibleCalendarScheduleMode} onChange={event => updateCalendarChoice(selectedDefinition.id, { scheduleMode: event.target.value as CalendarScheduleMode })}><option value="calendarAligned">Align to the calendar</option><option value="dayOne">Start from day one</option></select></label><button disabled={enrollingCalendar || enrolling || enrollingImported || enrollingRetained || !visibleCalendarStartDate} onClick={() => void enrollSelectedCalendarDefinition(selectedDefinition)}>{enrollingCalendar ? 'Creating calendar enrollment…' : calendarEnrollmentResult?.definitionId === selectedDefinition.id && calendarEnrollmentResult.message ? 'Retry calendar enrollment' : 'Create calendar enrollment'}</button>{calendarEnrollmentResult?.definitionId === selectedDefinition.id && calendarEnrollmentResult.message && <div role="alert" className="plan-error">{calendarEnrollmentResult.message}</div>}</section>}
+          {calendarEnrollmentResult?.definitionId === selectedDefinition.id && calendarEnrollmentResult.enrollment && <p role="status">Calendar enrollment {calendarEnrollmentResult.enrollment.id} was created for definition version {calendarEnrollmentResult.enrollment.definitionVersionId}, starting {calendarEnrollmentResult.enrollment.startDate} with policy {calendarEnrollmentResult.enrollment.scheduleMode}.</p>}
           {selectedDefinition.definition.schedule.kind === 'chapterStreams' && !(retainedEnrollmentResult?.definitionId === selectedDefinition.id && retainedEnrollmentResult.enrollment) && <section aria-label="Enroll in selected retained plan"><p>Choose the starting occurrence and loop policy for an enrollment pinned to this selected immutable version.</p><div className="plan-streams">{selectedDefinition.definition.schedule.streams.map((stream, index) => <fieldset key={stream.id}><legend>{stream.name}</legend><label>Retained starting chapter<select value={visibleRetainedEnrollmentChoices[index].startingPosition} onChange={event => updateRetainedEnrollmentChoice(index, { startingPosition: Number(event.target.value) })}>{stream.chapters.map((chapter, position) => <option key={`${chapter.book}:${chapter.chapter}:${position}`} value={position}>Book {chapter.book} · Chapter {chapter.chapter}</option>)}</select></label><label className="plan-loop"><input type="checkbox" checked={visibleRetainedEnrollmentChoices[index].loopAfterEnd} onChange={event => updateRetainedEnrollmentChoice(index, { loopAfterEnd: event.target.checked })} /> Retained stream loops</label></fieldset>)}</div><button disabled={enrollingRetained || enrolling || enrollingImported} onClick={() => void enrollSelectedRetainedDefinition(selectedDefinition)}>{enrollingRetained ? 'Creating retained enrollment…' : 'Create retained enrollment'}</button></section>}
           {retainedEnrollmentResult?.definitionId === selectedDefinition.id && retainedEnrollmentResult.enrollment && <p>Retained-plan enrollment {retainedEnrollmentResult.enrollment.id} was created for definition version {retainedEnrollmentResult.enrollment.definitionVersionId}.</p>}
           {retainedEnrollmentResult?.definitionId === selectedDefinition.id && retainedEnrollmentResult.message && <div role="alert" className="plan-error">{retainedEnrollmentResult.message}</div>}
