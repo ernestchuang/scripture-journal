@@ -541,6 +541,80 @@ fn progress_tables_reject_updates_and_deletes_without_changing_retained_rows() {
 }
 
 #[test]
+fn progress_epochs_reject_cross_stream_and_cross_enrollment_assignments() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Epoch ownership"))
+        .unwrap();
+    let first_enrollment = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let second_enrollment = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let first_active = store.active_plan_assignments(&first_enrollment.id).unwrap();
+    let second_active = store
+        .active_plan_assignments(&second_enrollment.id)
+        .unwrap();
+    let first_old_assignment = first_active
+        .iter()
+        .find(|value| value.stream_id == "old-testament")
+        .unwrap();
+    let second_old_assignment = second_active
+        .iter()
+        .find(|value| value.stream_id == "old-testament")
+        .unwrap();
+    drop(store);
+
+    let retained = progress_fingerprint(&path);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for (stream_id, assignment_id) in [
+        ("new-testament", first_old_assignment.id.as_str()),
+        ("old-testament", second_old_assignment.id.as_str()),
+    ] {
+        assert!(conn
+            .execute(
+                "INSERT INTO plan_stream_progress_epochs(id,enrollment_id,stream_id,sequence,assignment_id,created_at) VALUES(?1,?2,?3,99,?4,'synthetic')",
+                rusqlite::params![
+                    Uuid::new_v4().to_string(),
+                    first_enrollment.id,
+                    stream_id,
+                    assignment_id
+                ],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("Progress epoch assignment must belong to its stream"));
+        assert_eq!(progress_fingerprint(&path), retained);
+    }
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, u32>(0)
+        })
+        .unwrap(),
+        0
+    );
+    drop(conn);
+
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(progress_fingerprint(&path), retained);
+    assert_eq!(
+        reopened
+            .active_plan_assignments(&first_enrollment.id)
+            .unwrap(),
+        first_active
+    );
+    assert_eq!(
+        reopened
+            .active_plan_assignments(&second_enrollment.id)
+            .unwrap(),
+        second_active
+    );
+}
+
+#[test]
 fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
