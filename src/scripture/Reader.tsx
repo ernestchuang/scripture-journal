@@ -27,7 +27,10 @@ function Chapter({ passage, selected, translation, generation, onAnchorRestored 
         setVerses(result);
       }
     }).catch((reason: unknown) => {
-      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'Unable to load scripture.');
+      if (!controller.signal.aborted) {
+        setError(reason instanceof Error ? reason.message : 'Unable to load scripture.');
+        if (chapterKey(selected) === chapterKey(passage)) onAnchorRestored();
+      }
     });
     return () => controller.abort();
   }, [passage.book, passage.chapter, translation, attempt, generation]);
@@ -178,8 +181,8 @@ export function Reader({ selection, onSelectionChange, onReflect }: ReaderProps)
     <header className="scripture-toolbar">
       <div><span className="scripture-eyebrow">THE READING ROOM</span><h2>Scripture</h2></div>
       <div className="scripture-navigation">
-        <label>Book<select value={safeSelection.book} onChange={e => onSelectionChange({ book: Number(e.target.value), chapter: 1 })}>{BOOKS.map(book => <option key={book.id} value={book.id}>{book.name}</option>)}</select></label>
-        <label>Chapter<select value={safeSelection.chapter} onChange={e => onSelectionChange({ book: safeSelection.book, chapter: Number(e.target.value) })}>{Array.from({ length: BOOKS[safeSelection.book - 1].chapters }, (_, i) => <option key={i + 1} value={i + 1}>{i + 1}</option>)}</select></label>
+        <label>Book<select value={safeSelection.book} onChange={e => { restoringTranslation.current = false; onSelectionChange({ book: Number(e.target.value), chapter: 1 }); }}>{BOOKS.map(book => <option key={book.id} value={book.id}>{book.name}</option>)}</select></label>
+        <label>Chapter<select value={safeSelection.chapter} onChange={e => { restoringTranslation.current = false; onSelectionChange({ book: safeSelection.book, chapter: Number(e.target.value) }); }}>{Array.from({ length: BOOKS[safeSelection.book - 1].chapters }, (_, i) => <option key={i + 1} value={i + 1}>{i + 1}</option>)}</select></label>
         <label>Translation<select value={translation} aria-describedby="translation-availability" onChange={e => changeTranslation(e.target.value as Translation)}><option value="KJV">KJV</option><option value="LSB">LSB</option><option value="NASB1995">NASB1995</option><option value="ESV">ESV</option></select></label>
       </div>
       <button className="scripture-reflect" onClick={() => onReflect(safeSelection)}>Reflect on {formatPassage(safeSelection)}</button>
