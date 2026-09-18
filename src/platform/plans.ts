@@ -92,6 +92,7 @@ export interface PlanCompletionHistoryItem {
 /** Native-only bridge for explicit plan-definition operations. */
 export interface PlanDefinitionApi {
   registerFourStreamPlan(): Promise<PlanDefinitionVersion>;
+  registerMcheynePlan(): Promise<PlanDefinitionVersion>;
   importPlanDefinitionJson(input: string): Promise<PlanDefinitionVersion>;
   createPlanDefinitionVersion(planId: string, definition: PlanDefinition): Promise<PlanDefinitionVersion>;
   exportPlanDefinitionJson(versionId: string): Promise<string>;
@@ -111,6 +112,7 @@ export interface PlanDefinitionApi {
 
 export const nativePlans: PlanDefinitionApi = {
   registerFourStreamPlan: () => invoke<PlanDefinitionVersion>('register_four_stream_plan'),
+  registerMcheynePlan: () => invoke<PlanDefinitionVersion>('register_mcheyne_plan'),
   importPlanDefinitionJson: input =>
     invoke<PlanDefinitionVersion>('import_plan_definition_json', { input }),
   createPlanDefinitionVersion: (planId, definition) =>

@@ -221,6 +221,22 @@ async fn register_four_stream_plan(
     register_four_stream_plan_for_store(state.journal.clone()).await
 }
 
+async fn register_mcheyne_plan_for_store(
+    store: Arc<Mutex<JournalStore>>,
+) -> Result<PlanDefinitionVersion, String> {
+    run_store(store, |journal| {
+        journal.register_mcheyne_plan().map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn register_mcheyne_plan(
+    state: State<'_, AppState>,
+) -> Result<PlanDefinitionVersion, String> {
+    register_mcheyne_plan_for_store(state.journal.clone()).await
+}
+
 async fn import_plan_definition_json_for_store(
     store: Arc<Mutex<JournalStore>>,
     input: String,
@@ -555,6 +571,42 @@ mod plan_command_tests {
                 .await
                 .unwrap(),
                 before_invalid
+            );
+        });
+    }
+
+    #[test]
+    fn typed_mcheyne_registration_is_idempotent_serialized_and_propagates_store_errors() {
+        tauri::async_runtime::block_on(async {
+            let (_directory, store) = test_store();
+            let first = register_mcheyne_plan_for_store(store.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                register_mcheyne_plan_for_store(store.clone())
+                    .await
+                    .unwrap(),
+                first
+            );
+            assert_eq!(first.definition.name, "M’Cheyne's Daily Bible Readings");
+            assert_eq!(
+                serde_json::from_str::<PlanDefinitionVersion>(
+                    &serde_json::to_string(&first).unwrap()
+                )
+                .unwrap(),
+                first
+            );
+
+            let poisoned = store.clone();
+            assert!(std::thread::spawn(move || {
+                let _guard = poisoned.lock().unwrap();
+                panic!("poison the test mutex");
+            })
+            .join()
+            .is_err());
+            assert_eq!(
+                register_mcheyne_plan_for_store(store).await.unwrap_err(),
+                "Journal is unavailable; restart the app."
             );
         });
     }
@@ -1148,6 +1200,7 @@ pub fn run() {
             list_entries,
             save_entry,
             register_four_stream_plan,
+            register_mcheyne_plan,
             import_plan_definition_json,
             create_plan_definition_version,
             export_plan_definition_json,

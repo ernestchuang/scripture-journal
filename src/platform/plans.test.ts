@@ -122,6 +122,25 @@ describe('native plan-definition adapter', () => {
     });
   });
 
+  it('maps idempotent M’Cheyne registration to its exact no-argument native command', async () => {
+    const mcheyne = { ...version, id: 'mcheyne-version', planId: 'mcheyne-plan', definition: { ...version.definition, name: "M’Cheyne's Daily Bible Readings" } };
+    native.invoke.mockResolvedValueOnce(mcheyne).mockResolvedValueOnce(mcheyne);
+
+    await expect(nativePlans.registerMcheynePlan()).resolves.toEqual(mcheyne);
+    await expect(nativePlans.registerMcheynePlan()).resolves.toEqual(mcheyne);
+    expect(native.invoke).toHaveBeenNthCalledWith(1, 'register_mcheyne_plan');
+    expect(native.invoke).toHaveBeenNthCalledWith(2, 'register_mcheyne_plan');
+  });
+
+  it('propagates M’Cheyne registration errors without retrying', async () => {
+    const error = new Error('Journal is unavailable; restart the app.');
+    native.invoke.mockRejectedValueOnce(error);
+
+    await expect(nativePlans.registerMcheynePlan()).rejects.toBe(error);
+    expect(native.invoke).toHaveBeenCalledTimes(1);
+    expect(native.invoke).toHaveBeenCalledWith('register_mcheyne_plan');
+  });
+
   it('propagates a native mutation error without retrying the import', async () => {
     const error = new Error('Invalid plan definition JSON');
     native.invoke.mockRejectedValueOnce(error);
