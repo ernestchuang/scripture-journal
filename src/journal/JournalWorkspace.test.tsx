@@ -47,4 +47,21 @@ describe('journal workspace', () => {
     await screen.findByText('Draft saved');
     expect((screen.getByLabelText(/Reflection Markdown/) as HTMLTextAreaElement).value).toBe('Do not lose me');
   });
+
+  it('exposes a close flush that persists the current draft', async () => {
+    const api = fakeApi();
+    let persistence: { flush: () => Promise<void> } | undefined;
+    render(<JournalWorkspace api={api} passage={{ book: 43, chapter: 3 }} reflectRequest={0}
+      onPersistenceChange={state => { persistence = state; }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    fireEvent.change(editor, { target: { value: 'Close-safe draft' } });
+    expect(persistence).toBeDefined();
+    await persistence!.flush();
+    expect(api.saveEntry).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.saveEntry).mock.calls[0][0]).toMatchObject({
+      finish: false,
+      content: { body: 'Close-safe draft' },
+    });
+  });
 });
