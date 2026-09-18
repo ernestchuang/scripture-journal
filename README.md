@@ -54,8 +54,13 @@ deleted individually. Previously exported deleted entries become body-free
 placeholders on the next export. Backups and export recovery files may retain
 earlier copies.
 
-Full backup/restore, legacy import, and automatic incremental export remain under
-development.
+Use **Full backup** to create a verified snapshot containing the complete journal
+and revision history. **Restore backup** verifies and stages a selected backup,
+then replaces the journal safely on restart after creating a pre-restore recovery
+copy. See [full backup and restore](docs/BACKUP-RESTORE.md). The legacy journal
+importer is available for a read-only preview and explicit import from the original
+application. Maintained automatic incremental export remains under review.
+
 Manual export scans finished entries and preserves conflicting external files;
 it is not a complete backup of drafts and history. Export retains displaced
 manifests as `.scripture-journal-manifest-recovery-*.json` files in the destination;
@@ -109,6 +114,8 @@ Beads issue across quota resets without invoking a model while waiting.
   transaction invariants.
 - [Portability](docs/PORTABILITY.md): maintained Obsidian export, migration,
   backup, and restoration.
+- [Backup and restore](docs/BACKUP-RESTORE.md): complete snapshots, verified
+  restart restoration, recovery copies, preferences, and exclusions.
 - [Decision record](docs/decisions/0001-local-authority.md): database authority
   and the one-way export boundary.
 - [Release defaults](docs/decisions/0002-release-defaults.md): delegated desktop
