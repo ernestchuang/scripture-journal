@@ -38,10 +38,14 @@ pub fn create(source: &Path, destination: &Path) -> Result<()> {
         temp.path().join("manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
     )?;
+    fs::File::open(&db_path)?.sync_all()?;
+    fs::File::open(temp.path().join("manifest.json"))?.sync_all()?;
+    sync_directory(temp.path())?;
     if destination.exists() {
         bail!("Backup destination already exists");
     }
     fs::rename(temp.keep(), destination)?;
+    sync_directory(parent)?;
     Ok(())
 }
 
@@ -69,6 +73,8 @@ pub fn stage_restore(backup: &Path, staged: &Path) -> Result<()> {
         bail!("A restore is already pending");
     }
     fs::rename(&temp, staged)?;
+    fs::File::open(staged)?.sync_all()?;
+    sync_directory(parent)?;
     Ok(())
 }
 
@@ -90,7 +96,11 @@ pub fn activate_pending(live: &Path, staged: &Path) -> Result<bool> {
     )?;
     // On supported Unix targets rename atomically replaces the live directory entry.
     // The old bytes are already durably retained in the verified pre-restore package.
+    fs::File::open(staged)?.sync_all()?;
+    let parent = live.parent().context("Journal path needs a parent")?;
+    sync_directory(parent)?;
     fs::rename(staged, live)?;
+    sync_directory(parent)?;
     Ok(true)
 }
 
@@ -114,6 +124,11 @@ fn validate_db(path: &Path) -> Result<()> {
 }
 fn checksum(path: &Path) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(fs::read(path)?)))
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    fs::File::open(path)?.sync_all()?;
+    Ok(())
 }
 
 #[cfg(test)]

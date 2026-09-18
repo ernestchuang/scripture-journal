@@ -20,6 +20,18 @@ struct AppState {
     export_directories: Mutex<HashSet<PathBuf>>,
 }
 
+fn open_startup_journal(root: &std::path::Path) -> Result<(JournalStore, PathBuf), String> {
+    let journal_path = root.join("journal.sqlite3");
+    let _ = journal_core::backup::activate_pending(
+        &journal_path,
+        &root.join("restore-pending.sqlite3"),
+    );
+    Ok((
+        JournalStore::open(&journal_path).map_err(|e| e.to_string())?,
+        journal_path,
+    ))
+}
+
 #[tauri::command]
 async fn create_full_backup(
     app: tauri::AppHandle,
@@ -1810,12 +1822,8 @@ pub fn run() {
         .setup(|app| {
             let root = app.path().app_data_dir()?;
             std::fs::create_dir_all(&root)?;
-            let journal_path = root.join("journal.sqlite3");
-            let _restore_result = journal_core::backup::activate_pending(
-                &journal_path,
-                &root.join("restore-pending.sqlite3"),
-            )?;
-            let journal = JournalStore::open(&journal_path)?;
+            let (journal, journal_path) =
+                open_startup_journal(&root).map_err(std::io::Error::other)?;
             app.manage(AppState {
                 journal: Arc::new(Mutex::new(journal)),
                 journal_path,
@@ -1860,4 +1868,16 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("Could not start Scripture Journal");
+}
+
+#[cfg(test)]
+mod backup_startup_tests {
+    use super::*;
+    #[test]
+    fn invalid_pending_restore_does_not_block_healthy_journal_startup() {
+        let root = tempfile::tempdir().unwrap();
+        drop(JournalStore::open(&root.path().join("journal.sqlite3")).unwrap());
+        std::fs::write(root.path().join("restore-pending.sqlite3"), b"invalid").unwrap();
+        assert!(open_startup_journal(root.path()).is_ok());
+    }
 }
