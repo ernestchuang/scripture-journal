@@ -138,6 +138,69 @@ fn malformed_plan_definitions_are_rejected_without_partial_rows() {
     streams[0].chapters[0].chapter = 51;
     assert!(store.create_plan_definition(invalid).is_err());
 
+    let first = store
+        .create_plan_definition(stream_definition("Version rollback"))
+        .unwrap();
+    let invalid_verse = PlanDefinition {
+        schema_version: 1,
+        name: "Out of range verse".into(),
+        description: None,
+        schedule: PlanSchedule::ExplicitSchedule {
+            days: vec![
+                ExplicitScheduleDay {
+                    day: 1,
+                    passages: vec![Passage {
+                        book: 43,
+                        chapter: 3,
+                        start_verse: Some(16),
+                        end_verse: Some(21),
+                    }],
+                },
+                ExplicitScheduleDay {
+                    day: 2,
+                    passages: vec![Passage {
+                        book: 43,
+                        chapter: 3,
+                        start_verse: Some(999),
+                        end_verse: Some(1_000),
+                    }],
+                },
+            ],
+        },
+    };
+    assert!(store
+        .create_plan_definition_version(&first.plan_id, invalid_verse)
+        .unwrap_err()
+        .to_string()
+        .contains("Verse exceeds chapter limit"));
+    assert_eq!(
+        store
+            .list_plan_definition_versions(&first.plan_id)
+            .unwrap()
+            .len(),
+        1
+    );
+    let boundary_definition = PlanDefinition {
+        schema_version: 1,
+        name: "Valid verse boundary".into(),
+        description: None,
+        schedule: PlanSchedule::ExplicitSchedule {
+            days: vec![ExplicitScheduleDay {
+                day: 1,
+                passages: vec![Passage {
+                    book: 43,
+                    chapter: 3,
+                    start_verse: Some(36),
+                    end_verse: None,
+                }],
+            }],
+        },
+    };
+    let second = store
+        .create_plan_definition_version(&first.plan_id, boundary_definition)
+        .unwrap();
+    assert_eq!(second.version, 2);
+
     let mut invalid = stream_definition("Duplicate IDs");
     let PlanSchedule::ChapterStreams { streams } = &mut invalid.schedule else {
         unreachable!()
@@ -178,8 +241,14 @@ fn schema_one_journal_data_survives_plan_migration() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
     let mut store = JournalStore::open(&path).unwrap();
-    let saved_request = request("Existing journal data", true);
-    let saved = store.save_entry(saved_request.clone()).unwrap();
+    let mut target_request = request("Existing target", true);
+    let first_target = store.save_entry(target_request.clone()).unwrap();
+    target_request.expected_revision_id = Some(first_target.working_revision_id);
+    target_request.content.body = "A retained second revision".into();
+    let saved_target = store.save_entry(target_request.clone()).unwrap();
+    let mut source_request = request("Existing linked source", false);
+    source_request.content.links.push(saved_target.id.clone());
+    let saved_source = store.save_entry(source_request.clone()).unwrap();
     drop(store);
 
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -196,9 +265,20 @@ fn schema_one_journal_data_survives_plan_migration() {
 
     let mut migrated = JournalStore::open(&path).unwrap();
     let entries = migrated.list_entries().unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].id, saved.id);
-    assert_eq!(entries[0].content, saved_request.content);
+    assert_eq!(entries.len(), 2);
+    let target = entries
+        .iter()
+        .find(|entry| entry.id == saved_target.id)
+        .unwrap();
+    assert_eq!(target.content, target_request.content);
+    let source = entries
+        .iter()
+        .find(|entry| entry.id == saved_source.id)
+        .unwrap();
+    assert_eq!(source.content, source_request.content);
+    assert_eq!(source.content.links, vec![saved_target.id.clone()]);
+    assert_eq!(migrated.get_history(&saved_target.id).unwrap().len(), 2);
+    assert_eq!(migrated.get_history(&saved_source.id).unwrap().len(), 1);
     let plan = migrated
         .create_plan_definition(stream_definition("After migration"))
         .unwrap();

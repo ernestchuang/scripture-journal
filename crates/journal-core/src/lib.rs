@@ -10,12 +10,16 @@ mod export;
 #[cfg(unix)]
 mod export_directory;
 mod plans;
+mod verse_counts;
 pub use export::ExportReport;
 pub use plans::{
     ChapterRef, ChapterStream, ExplicitScheduleDay, PlanDefinition, PlanDefinitionVersion,
     PlanSchedule,
 };
 
+/// A passage in canonical Protestant 66-book order using KJV versification.
+/// With no verse fields it denotes a whole chapter. `start_verse` alone denotes
+/// one verse; when `end_verse` is present the inclusive range requires both.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Passage {
@@ -329,6 +333,16 @@ pub(crate) fn validate_passage(p: &Passage) -> Result<()> {
     ensure!(
         p.start_verse != Some(0) && p.end_verse != Some(0),
         "Verse numbers start at one"
+    );
+    let chapter_offset: usize = CHAPTERS[..(p.book - 1) as usize]
+        .iter()
+        .map(|chapters| *chapters as usize)
+        .sum();
+    let max_verse = verse_counts::VERSE_COUNTS[chapter_offset + (p.chapter - 1) as usize] as u32;
+    ensure!(
+        p.start_verse.is_none_or(|verse| verse <= max_verse)
+            && p.end_verse.is_none_or(|verse| verse <= max_verse),
+        "Verse exceeds chapter limit"
     );
     if let Some(end) = p.end_verse {
         ensure!(
