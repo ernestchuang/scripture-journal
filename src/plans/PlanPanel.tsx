@@ -13,6 +13,7 @@ type PlanHistory =
   | { kind: 'error'; message: string }
   | { kind: 'ready'; items: PlanCompletionHistoryItem[] };
 type ReadyPlanHistory = Extract<PlanHistory, { kind: 'ready' }>;
+type ChapterStreams = Extract<PlanDefinition['schedule'], { kind: 'chapterStreams' }>['streams'];
 
 type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'>;
 
@@ -26,6 +27,22 @@ function mergeConfirmedDefinitions(items: PlanDefinitionVersion[], confirmed: Ma
     if (acknowledge && items.some(item => item.planId === version.planId && item.version >= version.version)) confirmed.delete(version.planId);
   }
   return visible;
+}
+
+export function updateStreamEnrollmentChoice(
+  streams: ChapterStreams,
+  current: StreamEnrollment[],
+  index: number,
+  update: Partial<Pick<StreamEnrollment, 'startingPosition' | 'loopAfterEnd'>>,
+) {
+  return streams.map((stream, choiceIndex) => ({
+    ...(current.find(choice => choice.streamId === stream.id) ?? {
+      streamId: stream.id,
+      startingPosition: 0,
+      loopAfterEnd: true,
+    }),
+    ...(choiceIndex === index ? update : {}),
+  }));
 }
 
 export function PlanPanel({ api }: { api?: PlanPanelApi }) {
@@ -140,15 +157,6 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     setRetainedExportError(null);
     setRetainedExportedJson(null);
   }, [api, selectedDefinitionId]);
-
-  useEffect(() => {
-    if (retainedChoiceDefinitionId.current === selectedDefinitionId) return;
-    retainedChoiceDefinitionId.current = selectedDefinitionId;
-    const definition = retainedDefinitions?.find(item => item.id === selectedDefinitionId);
-    setRetainedEnrollmentChoices(definition?.definition.schedule.kind === 'chapterStreams'
-      ? definition.definition.schedule.streams.map(stream => ({ streamId: stream.id, startingPosition: 0, loopAfterEnd: true }))
-      : []);
-  }, [api, retainedDefinitions, selectedDefinitionId]);
 
   useEffect(() => {
     exportEpoch.current += 1;
@@ -441,7 +449,12 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
 
   async function enrollSelectedRetainedDefinition(definition: PlanDefinitionVersion) {
     if (!api || definition.definition.schedule.kind !== 'chapterStreams' || enrolling || enrollingImported || enrollingRetained) return;
-    const submitted = retainedEnrollmentChoices.map(choice => ({ ...choice }));
+    const submitted = updateStreamEnrollmentChoice(
+      definition.definition.schedule.streams,
+      retainedChoiceDefinitionId.current === definition.id ? retainedEnrollmentChoices : [],
+      -1,
+      {},
+    );
     if (submitted.length !== definition.definition.schedule.streams.length) return;
     const epoch = ++retainedEnrollmentEpoch.current;
     setEnrollingRetained(true);
@@ -585,6 +598,26 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
 
   if (!api) return <aside className="plan-panel" aria-label="Reading plans"><h2>Reading plans</h2><p>Plans are available in the native desktop app.</p></aside>;
   const selectedDefinition = retainedDefinitions?.find(item => item.id === selectedDefinitionId);
+  const visibleRetainedEnrollmentChoices = selectedDefinition?.definition.schedule.kind === 'chapterStreams'
+    ? updateStreamEnrollmentChoice(
+      selectedDefinition.definition.schedule.streams,
+      retainedChoiceDefinitionId.current === selectedDefinition.id ? retainedEnrollmentChoices : [],
+      -1,
+      {},
+    )
+    : [];
+  function updateRetainedEnrollmentChoice(index: number, update: Partial<Pick<StreamEnrollment, 'startingPosition' | 'loopAfterEnd'>>) {
+    if (!selectedDefinition || selectedDefinition.definition.schedule.kind !== 'chapterStreams') return;
+    const streams = selectedDefinition.definition.schedule.streams;
+    const sameDefinition = retainedChoiceDefinitionId.current === selectedDefinition.id;
+    retainedChoiceDefinitionId.current = selectedDefinition.id;
+    setRetainedEnrollmentChoices(current => updateStreamEnrollmentChoice(
+      streams,
+      sameDefinition ? current : [],
+      index,
+      update,
+    ));
+  }
   return <aside className="plan-panel" aria-label="Reading plans">
     <header><div><span>READING PLANS</span><h2>Retained plans</h2></div></header>
     {enrollments === null && !listError && <p role="status">Loading retained plans…</p>}
@@ -638,7 +671,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       {retainedDefinitions && retainedDefinitions.length > 0 && <><label>Retained plan definition<select value={selectedDefinitionId} onChange={event => setSelectedDefinitionId(event.target.value)}>{retainedDefinitions.map(definition => <option key={definition.id} value={definition.id}>{definition.definition.name} · plan {definition.planId}</option>)}</select></label>
         {selectedDefinition && <><dl><dt>Name</dt><dd>Retained name: {selectedDefinition.definition.name}</dd><dt>Plan identity</dt><dd>{selectedDefinition.planId}</dd><dt>Definition version</dt><dd>{selectedDefinition.version}</dd><dt>Schedule kind</dt><dd>{selectedDefinition.definition.schedule.kind === 'chapterStreams' ? 'Chapter streams' : 'Explicit schedule'}</dd></dl><section className="plan-export" aria-label="Export selected retained definition"><p>Export this selected retained immutable definition as portable JSON. This does not import, enroll, or modify a plan.</p><button disabled={!!retainedExportingVersionId} onClick={() => void exportSelectedRetainedDefinition(selectedDefinition)}>{retainedExportingVersionId === selectedDefinition.id ? 'Exporting retained definition JSON…' : retainedExportError?.versionId === selectedDefinition.id ? 'Retry retained definition JSON' : 'Export retained definition JSON'}</button>{retainedExportError?.versionId === selectedDefinition.id && <div role="alert" className="plan-error">{retainedExportError.message}</div>}{retainedExportedJson?.versionId === selectedDefinition.id && <label>Exported retained plan JSON<textarea readOnly value={retainedExportedJson.json} spellCheck={false} /></label>}</section><section className="plan-import" aria-label="Append retained plan version"><p>Editing appends a new immutable version. Existing enrollments remain pinned to their current version.</p><button disabled={versionEditing} onClick={() => beginVersionEdit(selectedDefinition)}>Edit selected as new version</button>{versionEditTarget && <><p>Editing plan {versionEditTarget.planId} from definition version {versionEditTarget.version}. Changing the retained selection does not retarget this edit.</p><label>Edited plan JSON<textarea value={versionEditJson} onChange={event => setVersionEditJson(event.target.value)} spellCheck={false} /></label><button disabled={versionEditing || !versionEditJson.trim()} onClick={() => void appendEditedVersion()}>{versionEditing ? 'Appending plan version…' : 'Append new plan version'}</button>{versionEditError && <div role="alert" className="plan-error">{versionEditError}</div>}{versionEditResult && <p role="status">Created immutable definition version {versionEditResult.version} for plan {versionEditResult.planId}. Existing enrollments were not changed.</p>}</>}</section>
           {selectedDefinition.definition.schedule.kind === 'explicitSchedule' && <p>This retained calendar plan cannot be enrolled as chapter streams.</p>}
-          {selectedDefinition.definition.schedule.kind === 'chapterStreams' && !(retainedEnrollmentResult?.definitionId === selectedDefinition.id && retainedEnrollmentResult.enrollment) && <section aria-label="Enroll in selected retained plan"><p>Choose the starting occurrence and loop policy for an enrollment pinned to this selected immutable version.</p><div className="plan-streams">{selectedDefinition.definition.schedule.streams.map((stream, index) => <fieldset key={stream.id}><legend>{stream.name}</legend><label>Retained starting chapter<select value={retainedEnrollmentChoices[index]?.startingPosition ?? 0} onChange={event => setRetainedEnrollmentChoices(current => current.map((choice, choiceIndex) => choiceIndex === index ? { ...choice, startingPosition: Number(event.target.value) } : choice))}>{stream.chapters.map((chapter, position) => <option key={`${chapter.book}:${chapter.chapter}:${position}`} value={position}>Book {chapter.book} · Chapter {chapter.chapter}</option>)}</select></label><label className="plan-loop"><input type="checkbox" checked={retainedEnrollmentChoices[index]?.loopAfterEnd ?? true} onChange={event => setRetainedEnrollmentChoices(current => current.map((choice, choiceIndex) => choiceIndex === index ? { ...choice, loopAfterEnd: event.target.checked } : choice))} /> Retained stream loops</label></fieldset>)}</div><button disabled={enrollingRetained || enrolling || enrollingImported || retainedEnrollmentChoices.length !== selectedDefinition.definition.schedule.streams.length} onClick={() => void enrollSelectedRetainedDefinition(selectedDefinition)}>{enrollingRetained ? 'Creating retained enrollment…' : 'Create retained enrollment'}</button></section>}
+          {selectedDefinition.definition.schedule.kind === 'chapterStreams' && !(retainedEnrollmentResult?.definitionId === selectedDefinition.id && retainedEnrollmentResult.enrollment) && <section aria-label="Enroll in selected retained plan"><p>Choose the starting occurrence and loop policy for an enrollment pinned to this selected immutable version.</p><div className="plan-streams">{selectedDefinition.definition.schedule.streams.map((stream, index) => <fieldset key={stream.id}><legend>{stream.name}</legend><label>Retained starting chapter<select value={visibleRetainedEnrollmentChoices[index].startingPosition} onChange={event => updateRetainedEnrollmentChoice(index, { startingPosition: Number(event.target.value) })}>{stream.chapters.map((chapter, position) => <option key={`${chapter.book}:${chapter.chapter}:${position}`} value={position}>Book {chapter.book} · Chapter {chapter.chapter}</option>)}</select></label><label className="plan-loop"><input type="checkbox" checked={visibleRetainedEnrollmentChoices[index].loopAfterEnd} onChange={event => updateRetainedEnrollmentChoice(index, { loopAfterEnd: event.target.checked })} /> Retained stream loops</label></fieldset>)}</div><button disabled={enrollingRetained || enrolling || enrollingImported} onClick={() => void enrollSelectedRetainedDefinition(selectedDefinition)}>{enrollingRetained ? 'Creating retained enrollment…' : 'Create retained enrollment'}</button></section>}
           {retainedEnrollmentResult?.definitionId === selectedDefinition.id && retainedEnrollmentResult.enrollment && <p>Retained-plan enrollment {retainedEnrollmentResult.enrollment.id} was created for definition version {retainedEnrollmentResult.enrollment.definitionVersionId}.</p>}
           {retainedEnrollmentResult?.definitionId === selectedDefinition.id && retainedEnrollmentResult.message && <div role="alert" className="plan-error">{retainedEnrollmentResult.message}</div>}
         </>}

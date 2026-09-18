@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { PlanDefinitionApi, PlanDefinitionVersion, PlanEnrollment } from '../platform/plans';
-import { PlanPanel } from './PlanPanel';
+import { PlanPanel, updateStreamEnrollmentChoice } from './PlanPanel';
 
 afterEach(cleanup);
 const first: PlanEnrollment = { id: 'enrollment-1', definitionVersionId: 'version-1', createdAt: '2026-09-18T00:00:00Z' };
@@ -47,6 +47,14 @@ const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanD
 });
 
 describe('retained plan panel', () => {
+  it('records an occurrence change even before retained choices have been initialized', () => {
+    const streams = retainedStreams.definition.schedule.streams;
+    expect(updateStreamEnrollmentChoice(streams, [], 0, { startingPosition: 1 })).toEqual([
+      { streamId: 'repeat', startingPosition: 1, loopAfterEnd: true },
+      { streamId: 'short', startingPosition: 0, loopAfterEnd: true },
+    ]);
+  });
+
   it('registers M’Cheyne only after explicit guarded submission, retains its identity, and does not enroll it', async () => {
     let resolveRegistration!: (value: typeof mcheyne) => void;
     const plans = api();
