@@ -6,6 +6,9 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 import {
   nativePlans,
   type CompleteStreamRequest,
+  type CalendarEnrollmentRequest,
+  type CalendarPlanEnrollment,
+  type DatedPlanAssignment,
   type PlanAssignment,
   type PlanDefinition,
   type PlanDefinitionVersion,
@@ -48,6 +51,29 @@ const enrollment: PlanEnrollment = {
   id: 'enrollment-1',
   definitionVersionId: 'version-1',
   createdAt: '2026-09-18T00:00:00Z',
+};
+
+const calendarRequest: CalendarEnrollmentRequest = {
+  definitionVersionId: version.id,
+  startDate: '2024-02-28',
+  scheduleMode: 'dayOne',
+};
+
+const calendarEnrollment: CalendarPlanEnrollment = {
+  id: 'calendar-enrollment-1',
+  definitionVersionId: version.id,
+  createdAt: '2026-09-18T00:00:00Z',
+  startDate: '2024-02-28',
+  scheduleMode: 'dayOne',
+};
+
+const datedAssignment: DatedPlanAssignment = {
+  id: 'dated-assignment-1',
+  enrollmentId: calendarEnrollment.id,
+  definitionVersionId: version.id,
+  definitionDay: 1,
+  localDate: '2024-02-28',
+  passages: [{ book: 1, chapter: 1 }, { book: 40, chapter: 1 }],
 };
 
 const assignment: PlanAssignment = {
@@ -230,6 +256,34 @@ describe('native plan-definition adapter', () => {
     expect(native.invoke).toHaveBeenNthCalledWith(4, 'undo_plan_completion', {
       completionId: 'completion-1',
     });
+  });
+
+  it('maps calendar enrollment and readback with exact local dates, modes, IDs, and snapshots', async () => {
+    native.invoke
+      .mockResolvedValueOnce(calendarEnrollment)
+      .mockResolvedValueOnce(calendarEnrollment)
+      .mockResolvedValueOnce([datedAssignment]);
+
+    await expect(nativePlans.enrollInCalendar(calendarRequest)).resolves.toEqual(calendarEnrollment);
+    await expect(nativePlans.getCalendarPlanEnrollment(calendarEnrollment.id)).resolves.toEqual(calendarEnrollment);
+    await expect(nativePlans.calendarPlanAssignments(calendarEnrollment.id)).resolves.toEqual([datedAssignment]);
+
+    expect(native.invoke).toHaveBeenNthCalledWith(1, 'enroll_in_calendar', { request: calendarRequest });
+    expect(native.invoke).toHaveBeenNthCalledWith(2, 'get_calendar_plan_enrollment', { enrollmentId: calendarEnrollment.id });
+    expect(native.invoke).toHaveBeenNthCalledWith(3, 'calendar_plan_assignments', { enrollmentId: calendarEnrollment.id });
+  });
+
+  it('returns empty or missing calendar readback unchanged and propagates a calendar enrollment error', async () => {
+    const error = new Error('Calendar start date must be an ISO local date (YYYY-MM-DD).');
+    native.invoke.mockResolvedValueOnce(null).mockResolvedValueOnce([]).mockRejectedValueOnce(error);
+
+    await expect(nativePlans.getCalendarPlanEnrollment('missing-calendar-enrollment')).resolves.toBeNull();
+    await expect(nativePlans.calendarPlanAssignments('calendar-enrollment-empty')).resolves.toEqual([]);
+    await expect(nativePlans.enrollInCalendar({ ...calendarRequest, startDate: '2024-2-28' })).rejects.toBe(error);
+
+    expect(native.invoke).toHaveBeenNthCalledWith(1, 'get_calendar_plan_enrollment', { enrollmentId: 'missing-calendar-enrollment' });
+    expect(native.invoke).toHaveBeenNthCalledWith(2, 'calendar_plan_assignments', { enrollmentId: 'calendar-enrollment-empty' });
+    expect(native.invoke).toHaveBeenNthCalledWith(3, 'enroll_in_calendar', { request: { ...calendarRequest, startDate: '2024-2-28' } });
   });
 
   it('maps retained completion history with all camelCase fields intact', async () => {

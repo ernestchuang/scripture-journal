@@ -50,6 +50,33 @@ export interface PlanEnrollment {
   createdAt: string;
 }
 
+export type CalendarScheduleMode = 'calendarAligned' | 'dayOne';
+
+export interface CalendarEnrollmentRequest {
+  definitionVersionId: string;
+  /** ISO local civil date; never a timestamp or browser-derived timezone value. */
+  startDate: string;
+  scheduleMode: CalendarScheduleMode;
+}
+
+export interface CalendarPlanEnrollment {
+  id: string;
+  definitionVersionId: string;
+  createdAt: string;
+  startDate: string;
+  scheduleMode: CalendarScheduleMode;
+}
+
+/** A retained dated assignment with the exact plan-version passage snapshot. */
+export interface DatedPlanAssignment {
+  id: string;
+  enrollmentId: string;
+  definitionVersionId: string;
+  definitionDay: number;
+  localDate: string;
+  passages: Passage[];
+}
+
 export interface PlanAssignment {
   id: string;
   enrollmentId: string;
@@ -104,6 +131,9 @@ export interface PlanDefinitionApi {
     definitionVersionId: string,
     streams: StreamEnrollment[],
   ): Promise<PlanEnrollment>;
+  enrollInCalendar(request: CalendarEnrollmentRequest): Promise<CalendarPlanEnrollment>;
+  getCalendarPlanEnrollment(enrollmentId: string): Promise<CalendarPlanEnrollment | null>;
+  calendarPlanAssignments(enrollmentId: string): Promise<DatedPlanAssignment[]>;
   activePlanAssignments(enrollmentId: string): Promise<PlanAssignment[]>;
   planCompletionHistory(enrollmentId: string): Promise<PlanCompletionHistoryItem[]>;
   completePlanStream(request: CompleteStreamRequest): Promise<PlanCompletion>;
@@ -128,6 +158,12 @@ export const nativePlans: PlanDefinitionApi = {
   listPlanEnrollments: () => invoke<PlanEnrollment[]>('list_plan_enrollments'),
   enrollInChapterStreams: (definitionVersionId, streams) =>
     invoke<PlanEnrollment>('enroll_in_chapter_streams', { definitionVersionId, streams }),
+  enrollInCalendar: request =>
+    invoke<CalendarPlanEnrollment>('enroll_in_calendar', { request }),
+  getCalendarPlanEnrollment: enrollmentId =>
+    invoke<CalendarPlanEnrollment | null>('get_calendar_plan_enrollment', { enrollmentId }),
+  calendarPlanAssignments: enrollmentId =>
+    invoke<DatedPlanAssignment[]>('calendar_plan_assignments', { enrollmentId }),
   activePlanAssignments: enrollmentId =>
     invoke<PlanAssignment[]>('active_plan_assignments', { enrollmentId }),
   planCompletionHistory: enrollmentId =>

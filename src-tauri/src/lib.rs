@@ -1,8 +1,9 @@
 use journal_core::{
-    CompleteStreamRequest, Entry, ExportReport, JournalStore, PlanAssignment, PlanCompletion,
-    PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, Revision,
-    SaveRequest, StreamEnrollment,
+    CalendarPlanEnrollment, CalendarScheduleMode, CompleteStreamRequest, DatedPlanAssignment,
+    Entry, ExportReport, JournalStore, PlanAssignment, PlanCompletion, PlanCompletionHistoryItem,
+    PlanDefinition, PlanDefinitionVersion, PlanEnrollment, Revision, SaveRequest, StreamEnrollment,
 };
+use serde::Deserialize;
 use std::{
     collections::HashSet,
     path::PathBuf,
@@ -14,6 +15,14 @@ use tauri_plugin_dialog::DialogExt;
 struct AppState {
     journal: Arc<Mutex<JournalStore>>,
     export_directories: Mutex<HashSet<PathBuf>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CalendarEnrollmentRequest {
+    definition_version_id: String,
+    start_date: String,
+    schedule_mode: CalendarScheduleMode,
 }
 
 #[tauri::command]
@@ -393,6 +402,74 @@ async fn enroll_in_chapter_streams(
     enroll_in_chapter_streams_for_store(state.journal.clone(), definition_version_id, streams).await
 }
 
+async fn enroll_in_calendar_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    request: CalendarEnrollmentRequest,
+) -> Result<CalendarPlanEnrollment, String> {
+    let start_date = chrono::NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d")
+        .ok()
+        .filter(|date| date.format("%Y-%m-%d").to_string() == request.start_date)
+        .ok_or_else(|| "Calendar start date must be an ISO local date (YYYY-MM-DD).".to_string())?;
+    run_store(store, move |journal| {
+        journal
+            .enroll_in_calendar(
+                &request.definition_version_id,
+                start_date,
+                request.schedule_mode,
+            )
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn enroll_in_calendar(
+    state: State<'_, AppState>,
+    request: CalendarEnrollmentRequest,
+) -> Result<CalendarPlanEnrollment, String> {
+    enroll_in_calendar_for_store(state.journal.clone(), request).await
+}
+
+async fn get_calendar_plan_enrollment_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    enrollment_id: String,
+) -> Result<Option<CalendarPlanEnrollment>, String> {
+    run_store(store, move |journal| {
+        journal
+            .get_calendar_plan_enrollment(&enrollment_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_calendar_plan_enrollment(
+    state: State<'_, AppState>,
+    enrollment_id: String,
+) -> Result<Option<CalendarPlanEnrollment>, String> {
+    get_calendar_plan_enrollment_for_store(state.journal.clone(), enrollment_id).await
+}
+
+async fn calendar_plan_assignments_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    enrollment_id: String,
+) -> Result<Vec<DatedPlanAssignment>, String> {
+    run_store(store, move |journal| {
+        journal
+            .calendar_plan_assignments(&enrollment_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn calendar_plan_assignments(
+    state: State<'_, AppState>,
+    enrollment_id: String,
+) -> Result<Vec<DatedPlanAssignment>, String> {
+    calendar_plan_assignments_for_store(state.journal.clone(), enrollment_id).await
+}
+
 async fn active_plan_assignments_for_store(
     store: Arc<Mutex<JournalStore>>,
     enrollment_id: String,
@@ -607,6 +684,83 @@ mod plan_command_tests {
             assert_eq!(
                 register_mcheyne_plan_for_store(store).await.unwrap_err(),
                 "Journal is unavailable; restart the app."
+            );
+        });
+    }
+
+    #[test]
+    fn typed_calendar_commands_validate_dates_and_preserve_durable_readback() {
+        tauri::async_runtime::block_on(async {
+            let (_directory, store) = test_store();
+            let definition = register_mcheyne_plan_for_store(store.clone())
+                .await
+                .unwrap();
+            let request = CalendarEnrollmentRequest {
+                definition_version_id: definition.id.clone(),
+                start_date: "2024-02-28".into(),
+                schedule_mode: CalendarScheduleMode::DayOne,
+            };
+            let enrollment = enroll_in_calendar_for_store(store.clone(), request)
+                .await
+                .unwrap();
+            assert_eq!(enrollment.definition_version_id, definition.id);
+            assert_eq!(enrollment.start_date.to_string(), "2024-02-28");
+            assert_eq!(enrollment.schedule_mode, CalendarScheduleMode::DayOne);
+            assert_eq!(
+                serde_json::to_value(&enrollment).unwrap(),
+                serde_json::json!({
+                    "id": enrollment.id,
+                    "definitionVersionId": definition.id,
+                    "createdAt": enrollment.created_at,
+                    "startDate": "2024-02-28",
+                    "scheduleMode": "dayOne",
+                })
+            );
+            assert_eq!(
+                get_calendar_plan_enrollment_for_store(store.clone(), enrollment.id.clone())
+                    .await
+                    .unwrap(),
+                Some(enrollment.clone())
+            );
+            let assignments =
+                calendar_plan_assignments_for_store(store.clone(), enrollment.id.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(assignments.len(), 365);
+            assert_eq!(assignments[0].local_date.to_string(), "2024-02-28");
+            assert_eq!(assignments[1].local_date.to_string(), "2024-02-29");
+            assert_eq!(assignments[0].definition_version_id, definition.id);
+            assert!(!assignments[0].passages.is_empty());
+            assert_eq!(
+                serde_json::to_value(&assignments[0]).unwrap()["localDate"],
+                serde_json::json!("2024-02-28")
+            );
+            assert_eq!(
+                get_calendar_plan_enrollment_for_store(
+                    store.clone(),
+                    "00000000-0000-4000-a000-000000000000".into()
+                )
+                .await
+                .unwrap(),
+                None
+            );
+            assert!(
+                calendar_plan_assignments_for_store(store.clone(), "not-an-id".into())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                enroll_in_calendar_for_store(
+                    store,
+                    CalendarEnrollmentRequest {
+                        definition_version_id: definition.id,
+                        start_date: "2024-2-28".into(),
+                        schedule_mode: CalendarScheduleMode::DayOne,
+                    }
+                )
+                .await
+                .unwrap_err(),
+                "Calendar start date must be an ISO local date (YYYY-MM-DD)."
             );
         });
     }
@@ -1209,6 +1363,9 @@ pub fn run() {
             list_latest_plan_definition_versions,
             list_plan_enrollments,
             enroll_in_chapter_streams,
+            enroll_in_calendar,
+            get_calendar_plan_enrollment,
+            calendar_plan_assignments,
             active_plan_assignments,
             plan_completion_history,
             complete_plan_stream,
