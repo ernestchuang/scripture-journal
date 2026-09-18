@@ -946,6 +946,161 @@ fn plan_definitions_round_trip_and_prior_versions_are_retained() {
 }
 
 #[test]
+fn latest_plan_definition_discovery_is_empty_for_a_new_journal() {
+    let dir = TempDir::new().unwrap();
+    let store = JournalStore::open(&dir.path().join("j.db")).unwrap();
+    assert!(store
+        .list_latest_plan_definition_versions()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn latest_plan_definition_discovery_is_ordered_durable_and_read_only() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let portable = serialize_plan_definition_json(&stream_definition("Identical import")).unwrap();
+    let first_v1 = store.import_plan_definition_json(&portable).unwrap();
+    let second = store.import_plan_definition_json(&portable).unwrap();
+    assert_ne!(first_v1.plan_id, second.plan_id);
+    let first_v2 = store
+        .create_plan_definition_version(
+            &first_v1.plan_id,
+            PlanDefinition {
+                schema_version: 1,
+                name: "Latest explicit version".into(),
+                description: None,
+                schedule: PlanSchedule::ExplicitSchedule {
+                    days: vec![ExplicitScheduleDay {
+                        day: 1,
+                        passages: vec![Passage {
+                            book: 43,
+                            chapter: 3,
+                            start_verse: Some(16),
+                            end_verse: Some(21),
+                        }],
+                    }],
+                },
+            },
+        )
+        .unwrap();
+    let built_in = store.register_four_stream_plan().unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(
+            &second.id,
+            vec![
+                StreamEnrollment {
+                    stream_id: "old-testament".into(),
+                    starting_position: 0,
+                    loop_after_end: false,
+                },
+                StreamEnrollment {
+                    stream_id: "new-testament".into(),
+                    starting_position: 0,
+                    loop_after_end: true,
+                },
+            ],
+        )
+        .unwrap();
+    let assignment = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: assignment.stream_id.clone(),
+            expected_assignment_id: assignment.id,
+            expected_progress_id: assignment.progress_id,
+        })
+        .unwrap();
+
+    let mut expected = vec![
+        (
+            first_v1.created_at.clone(),
+            first_v1.plan_id.clone(),
+            first_v2.clone(),
+        ),
+        (
+            second.created_at.clone(),
+            second.plan_id.clone(),
+            second.clone(),
+        ),
+        (
+            built_in.created_at.clone(),
+            built_in.plan_id.clone(),
+            built_in.clone(),
+        ),
+    ];
+    expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    let expected = expected
+        .into_iter()
+        .map(|(_, _, version)| version)
+        .collect::<Vec<_>>();
+    let versions_before = [
+        first_v1.plan_id.clone(),
+        second.plan_id.clone(),
+        built_in.plan_id.clone(),
+    ]
+    .map(|plan_id| store.list_plan_definition_versions(&plan_id).unwrap());
+    let enrollments_before = store.list_plan_enrollments().unwrap();
+    let assignments_before = store.active_plan_assignments(&enrollment.id).unwrap();
+    let history_before = store.plan_completion_history(&enrollment.id).unwrap();
+
+    assert_eq!(
+        store.list_latest_plan_definition_versions().unwrap(),
+        expected
+    );
+    assert_eq!(
+        [
+            first_v1.plan_id.clone(),
+            second.plan_id.clone(),
+            built_in.plan_id.clone()
+        ]
+        .map(|plan_id| store.list_plan_definition_versions(&plan_id).unwrap()),
+        versions_before
+    );
+    assert_eq!(store.list_plan_enrollments().unwrap(), enrollments_before);
+    assert_eq!(
+        store.active_plan_assignments(&enrollment.id).unwrap(),
+        assignments_before
+    );
+    assert_eq!(
+        store.plan_completion_history(&enrollment.id).unwrap(),
+        history_before
+    );
+    drop(store);
+
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.list_latest_plan_definition_versions().unwrap(),
+        expected
+    );
+    assert_eq!(
+        [
+            first_v1.plan_id.clone(),
+            second.plan_id.clone(),
+            built_in.plan_id.clone()
+        ]
+        .map(|plan_id| reopened.list_plan_definition_versions(&plan_id).unwrap()),
+        versions_before
+    );
+    assert_eq!(
+        reopened.list_plan_enrollments().unwrap(),
+        enrollments_before
+    );
+    assert_eq!(
+        reopened.active_plan_assignments(&enrollment.id).unwrap(),
+        assignments_before
+    );
+    assert_eq!(
+        reopened.plan_completion_history(&enrollment.id).unwrap(),
+        history_before
+    );
+}
+
+#[test]
 fn malformed_plan_definitions_are_rejected_without_partial_rows() {
     let dir = TempDir::new().unwrap();
     let mut store = JournalStore::open(&dir.path().join("j.db")).unwrap();

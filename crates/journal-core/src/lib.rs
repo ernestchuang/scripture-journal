@@ -347,6 +347,12 @@ impl JournalStore {
         plans::definition_versions(&self.conn, plan_id)
     }
 
+    /// Lists the latest immutable version of every retained plan identity,
+    /// oldest plan first and breaking plan-creation timestamp ties by plan ID.
+    pub fn list_latest_plan_definition_versions(&self) -> Result<Vec<PlanDefinitionVersion>> {
+        plans::latest_definition_versions(&self.conn)
+    }
+
     pub fn enroll_in_chapter_streams(
         &mut self,
         definition_version_id: &str,

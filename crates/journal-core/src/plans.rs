@@ -698,6 +698,20 @@ pub(crate) fn definition_versions(
     Ok(versions)
 }
 
+pub(crate) fn latest_definition_versions(conn: &Connection) -> Result<Vec<PlanDefinitionVersion>> {
+    let mut statement = conn.prepare(
+        "SELECT v.id,v.plan_id,v.version,v.created_at,v.definition
+         FROM plans p
+         JOIN plan_definition_versions v ON v.plan_id=p.id
+         WHERE v.version=(SELECT MAX(candidate.version) FROM plan_definition_versions candidate WHERE candidate.plan_id=p.id)
+         ORDER BY p.created_at,p.id",
+    )?;
+    let versions = statement
+        .query_map([], row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(versions)
+}
+
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanDefinitionVersion> {
     let text: String = row.get(4)?;
     let definition = serde_json::from_str(&text).map_err(|error| {
