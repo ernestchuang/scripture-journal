@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 const DEFINITION_SCHEMA_VERSION: u32 = 1;
 const FOUR_STREAM_BUILT_IN_ID: &str = "four-stream";
+const MCHEYNE_BUILT_IN_ID: &str = "mcheyne";
 /// Maximum UTF-8 input size accepted by the portable plan-definition codec.
 pub const MAX_PLAN_DEFINITION_JSON_BYTES: usize = 1_000_000;
 
@@ -726,18 +727,29 @@ pub(crate) fn create_definition(
 }
 
 pub(crate) fn register_four_stream(conn: &mut Connection) -> Result<PlanDefinitionVersion> {
+    register_built_in(conn, FOUR_STREAM_BUILT_IN_ID, four_stream_plan_definition())
+}
+
+pub(crate) fn register_mcheyne(conn: &mut Connection) -> Result<PlanDefinitionVersion> {
+    register_built_in(conn, MCHEYNE_BUILT_IN_ID, mcheyne_plan_definition())
+}
+
+fn register_built_in(
+    conn: &mut Connection,
+    built_in_id: &str,
+    definition: PlanDefinition,
+) -> Result<PlanDefinitionVersion> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(version_id) = tx
         .query_row(
             "SELECT definition_version_id FROM built_in_plan_registrations WHERE built_in_id=?1",
-            [FOUR_STREAM_BUILT_IN_ID],
+            [built_in_id],
             |row| row.get::<_, String>(0),
         )
         .optional()?
     {
         return definition_version(&tx, &version_id)?.context("Registered built-in plan missing");
     }
-    let definition = four_stream_plan_definition();
     validate_definition(&definition)?;
     let plan_id = Uuid::new_v4().to_string();
     let version_id = Uuid::new_v4().to_string();
@@ -752,7 +764,7 @@ pub(crate) fn register_four_stream(conn: &mut Connection) -> Result<PlanDefiniti
     )?;
     tx.execute(
         "INSERT INTO built_in_plan_registrations(built_in_id,definition_version_id) VALUES(?1,?2)",
-        params![FOUR_STREAM_BUILT_IN_ID, version_id],
+        params![built_in_id, version_id],
     )?;
     let result =
         definition_version(&tx, &version_id)?.context("Registered built-in plan missing")?;

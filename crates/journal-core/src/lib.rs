@@ -323,6 +323,10 @@ impl JournalStore {
         plans::register_four_stream(&mut self.conn)
     }
 
+    pub fn register_mcheyne_plan(&mut self) -> Result<PlanDefinitionVersion> {
+        plans::register_mcheyne(&mut self.conn)
+    }
+
     pub fn create_plan_definition_version(
         &mut self,
         plan_id: &str,

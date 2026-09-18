@@ -818,6 +818,115 @@ fn simultaneous_stores_register_exactly_one_four_stream_plan() {
 }
 
 #[test]
+fn mcheyne_registration_is_idempotent_durable_and_preserves_existing_state() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let four_stream = store.register_four_stream_plan().unwrap();
+    let matching_custom = store
+        .create_plan_definition(mcheyne_plan_definition())
+        .unwrap();
+    let existing = store
+        .create_plan_definition(stream_definition("Existing custom plan"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&existing.id, stream_selections(false))
+        .unwrap();
+    let before_assignments = store.active_plan_assignments(&enrollment.id).unwrap();
+    let before_progress = progress_fingerprint(&path);
+
+    let registered = store.register_mcheyne_plan().unwrap();
+    assert_ne!(registered.plan_id, matching_custom.plan_id);
+    assert_eq!(registered.definition, mcheyne_plan_definition());
+    assert_eq!(store.register_mcheyne_plan().unwrap(), registered);
+    assert_eq!(progress_fingerprint(&path), before_progress);
+    drop(store);
+
+    let mut reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(reopened.register_mcheyne_plan().unwrap(), registered);
+    assert_eq!(reopened.register_four_stream_plan().unwrap(), four_stream);
+    assert_eq!(
+        reopened
+            .list_plan_definition_versions(&matching_custom.plan_id)
+            .unwrap(),
+        vec![matching_custom]
+    );
+    assert_eq!(
+        reopened
+            .list_plan_definition_versions(&existing.plan_id)
+            .unwrap(),
+        vec![existing]
+    );
+    assert_eq!(
+        reopened.active_plan_assignments(&enrollment.id).unwrap(),
+        before_assignments
+    );
+    assert_eq!(progress_fingerprint(&path), before_progress);
+}
+
+#[test]
+fn mcheyne_registration_rolls_back_after_partial_writes() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    drop(JournalStore::open(&path).unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER inject_mcheyne_registration_failure BEFORE INSERT ON built_in_plan_registrations
+         WHEN NEW.built_in_id='mcheyne'
+         BEGIN SELECT RAISE(ABORT,'injected MCheyne registration failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let before = plan_registry_fingerprint(&path);
+    let mut store = JournalStore::open(&path).unwrap();
+    assert!(store
+        .register_mcheyne_plan()
+        .unwrap_err()
+        .to_string()
+        .contains("injected MCheyne registration failure"));
+    drop(store);
+    assert_eq!(plan_registry_fingerprint(&path), before);
+}
+
+#[test]
+fn simultaneous_stores_register_exactly_one_mcheyne_plan() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let first = JournalStore::open(&path).unwrap();
+    let second = JournalStore::open(&path).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let registrations = std::thread::scope(|scope| {
+        let first_barrier = barrier.clone();
+        let first_registration = scope.spawn(move || {
+            let mut store = first;
+            first_barrier.wait();
+            store.register_mcheyne_plan().unwrap()
+        });
+        let second_registration = scope.spawn(move || {
+            let mut store = second;
+            barrier.wait();
+            store.register_mcheyne_plan().unwrap()
+        });
+        [
+            first_registration.join().unwrap(),
+            second_registration.join().unwrap(),
+        ]
+    });
+    assert_eq!(registrations[0], registrations[1]);
+    let conn = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT (SELECT count(*) FROM plans),(SELECT count(*) FROM plan_definition_versions),(SELECT count(*) FROM built_in_plan_registrations WHERE built_in_id='mcheyne')",
+            [],
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, u32>(2)?)),
+        )
+        .unwrap(),
+        (1, 1, 1)
+    );
+}
+
+#[test]
 fn schema_six_registration_migration_preserves_existing_plan_progress() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
