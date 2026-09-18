@@ -75,6 +75,20 @@ export interface PlanCompletion {
   completedAt: string;
 }
 
+/** A retained completion with its immutable assignment snapshot and undo state. */
+export interface PlanCompletionHistoryItem {
+  id: string;
+  assignmentId: string;
+  enrollmentId: string;
+  streamId: string;
+  ordinal: number;
+  cycle: number;
+  passage: Passage;
+  streamPosition: number | null;
+  completedAt: string;
+  undone: boolean;
+}
+
 /** Native-only bridge for explicit plan-definition operations. */
 export interface PlanDefinitionApi {
   registerFourStreamPlan(): Promise<PlanDefinitionVersion>;
@@ -88,6 +102,7 @@ export interface PlanDefinitionApi {
     streams: StreamEnrollment[],
   ): Promise<PlanEnrollment>;
   activePlanAssignments(enrollmentId: string): Promise<PlanAssignment[]>;
+  planCompletionHistory(enrollmentId: string): Promise<PlanCompletionHistoryItem[]>;
   completePlanStream(request: CompleteStreamRequest): Promise<PlanCompletion>;
   undoPlanCompletion(completionId: string): Promise<void>;
 }
@@ -107,6 +122,8 @@ export const nativePlans: PlanDefinitionApi = {
     invoke<PlanEnrollment>('enroll_in_chapter_streams', { definitionVersionId, streams }),
   activePlanAssignments: enrollmentId =>
     invoke<PlanAssignment[]>('active_plan_assignments', { enrollmentId }),
+  planCompletionHistory: enrollmentId =>
+    invoke<PlanCompletionHistoryItem[]>('plan_completion_history', { enrollmentId }),
   completePlanStream: request =>
     invoke<PlanCompletion>('complete_plan_stream', { request }),
   undoPlanCompletion: completionId =>

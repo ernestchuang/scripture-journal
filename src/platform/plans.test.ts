@@ -9,6 +9,7 @@ import {
   type PlanAssignment,
   type PlanDefinitionVersion,
   type PlanEnrollment,
+  type PlanCompletionHistoryItem,
   type StreamEnrollment,
 } from './plans';
 
@@ -64,6 +65,19 @@ const completionRequest: CompleteStreamRequest = {
   streamId: assignment.streamId,
   expectedAssignmentId: assignment.id,
   expectedProgressId: assignment.progressId,
+};
+
+const completionHistory: PlanCompletionHistoryItem = {
+  id: 'completion-1',
+  assignmentId: assignment.id,
+  enrollmentId: enrollment.id,
+  streamId: assignment.streamId,
+  ordinal: 1,
+  cycle: 1,
+  passage: assignment.passage,
+  streamPosition: null,
+  completedAt: '2026-09-18T00:00:01Z',
+  undone: true,
 };
 
 describe('native plan-definition adapter', () => {
@@ -160,6 +174,51 @@ describe('native plan-definition adapter', () => {
     });
     expect(native.invoke).toHaveBeenNthCalledWith(4, 'undo_plan_completion', {
       completionId: 'completion-1',
+    });
+  });
+
+  it('maps retained completion history with all camelCase fields intact', async () => {
+    native.invoke.mockResolvedValueOnce([completionHistory]);
+
+    await expect(nativePlans.planCompletionHistory(enrollment.id)).resolves.toEqual([
+      completionHistory,
+    ]);
+    expect(native.invoke).toHaveBeenCalledTimes(1);
+    expect(native.invoke).toHaveBeenCalledWith('plan_completion_history', {
+      enrollmentId: enrollment.id,
+    });
+    expect(completionHistory).toEqual({
+      id: 'completion-1',
+      assignmentId: assignment.id,
+      enrollmentId: enrollment.id,
+      streamId: assignment.streamId,
+      ordinal: 1,
+      cycle: 1,
+      passage: { book: 1, chapter: 1 },
+      streamPosition: null,
+      completedAt: '2026-09-18T00:00:01Z',
+      undone: true,
+    });
+  });
+
+  it('returns empty retained completion history unchanged', async () => {
+    native.invoke.mockResolvedValueOnce([]);
+
+    await expect(nativePlans.planCompletionHistory(enrollment.id)).resolves.toEqual([]);
+    expect(native.invoke).toHaveBeenCalledTimes(1);
+    expect(native.invoke).toHaveBeenCalledWith('plan_completion_history', {
+      enrollmentId: enrollment.id,
+    });
+  });
+
+  it('propagates completion-history errors without reporting results', async () => {
+    const error = new Error('Journal is unavailable; restart the app.');
+    native.invoke.mockRejectedValueOnce(error);
+
+    await expect(nativePlans.planCompletionHistory(enrollment.id)).rejects.toBe(error);
+    expect(native.invoke).toHaveBeenCalledTimes(1);
+    expect(native.invoke).toHaveBeenCalledWith('plan_completion_history', {
+      enrollmentId: enrollment.id,
     });
   });
 
