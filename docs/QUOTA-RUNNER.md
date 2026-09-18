@@ -7,8 +7,12 @@ session; it does not remotely control the current desktop conversation or assume
 their accounts/quotas match.
 
 The supervisor reads the documented `account/rateLimits/read` app-server method
-between work units. At 80% usage in any reported window it sleeps until that
-window's reset, plus a one-minute margin. It checks both short and long windows.
+between work units. By default, at 80% usage in any reported window it sleeps until
+that window's reset, plus a one-minute margin. With `--quota-window primary`, only
+the primary (normally five-hour) window triggers this proactive reserve. Weekly
+usage remains visible but does not trigger a reserve pause. The user selected this
+primary-only policy for the Luna worker. Actual provider denials still stop work;
+this option does not override subscription limits or authorize credit purchases.
 Sleeping and quota metadata requests do not invoke a model or generate model
 tokens. Actual work, checkpointing, and resuming consume tokens normally.
 
@@ -21,10 +25,10 @@ credits, consume reset credits, or switch accounts/models to bypass limits.
 
 ```bash
 # Metadata only: no model invocation.
-python scripts/quota_runner.py --check
+python scripts/quota_runner.py --check --quota-window primary
 
 # Run from an existing dedicated worktree, until this issue is done or blocked.
-python scripts/quota_runner.py --worktree "$PWD" --issue sj-kfw --model gpt-5.6-luna
+python scripts/quota_runner.py --worktree "$PWD" --issue sj-kfw --model gpt-5.6-luna --quota-window primary
 ```
 
 The user has authorized noninteractive unrestricted development for this project.

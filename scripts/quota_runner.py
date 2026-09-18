@@ -64,7 +64,7 @@ def read_quota(codex="codex"):
         process.stdout.close()
 
 
-def quota_decision(result, threshold, now):
+def quota_decision(result, threshold, now, quota_window="all"):
     """Return safe public window details and earliest safe retry time, or fail closed."""
     buckets = result.get("rateLimitsByLimitId")
     if not buckets:
@@ -73,6 +73,7 @@ def quota_decision(result, threshold, now):
     if not buckets:
         raise ValueError("No subscription quota returned. Automatic model calls are disabled.")
     windows, waits = [], []
+    selected_windows = 0
     for name, bucket in buckets.items():
         if not isinstance(bucket, dict):
             raise ValueError("Invalid quota bucket.")
@@ -87,13 +88,16 @@ def quota_decision(result, threshold, now):
                     not math.isfinite(used) or not 0 <= used <= 100):
                 raise ValueError("Invalid quota usage percentage.")
             windows.append({"bucket": name, "window": kind, "usedPercent": used, "resetsAt": reset})
+            if quota_window == "primary" and kind != "primary":
+                continue
+            selected_windows += 1
             if used >= threshold:
                 if isinstance(reset, bool) or not isinstance(reset, (int, float)) or not math.isfinite(reset):
                     raise ValueError("No usable reset time; refusing a blind retry loop.")
                 # Stale snapshots must not result in a tight retry loop.
                 waits.append(max(now + 300, reset + 60))
-    if not windows:
-        raise ValueError("No measurable quota windows returned.")
+    if not selected_windows:
+        raise ValueError("No measurable selected quota windows returned.")
     if result.get("ordinaryUsageAllowed") is False and not waits:
         raise ValueError("Ordinary usage is unavailable without a known limiting window.")
     return windows, max(waits) if waits else None
@@ -183,6 +187,8 @@ def main():
     parser.add_argument("--threshold", type=float, default=80, help="Pause at this used percentage (default: 80)")
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--model", help="Explicit coding-worker model; omitted uses the CLI/session default")
+    parser.add_argument("--quota-window", choices=("all", "primary"), default="all",
+                        help="Proactive reserve: all windows or only the primary (normally five-hour) window")
     parser.add_argument("--check", action="store_true", help="Read quota only; never invoke a model")
     parser.add_argument("--max-turns", type=int, default=50, help="Safety ceiling for this invocation")
     parser.add_argument("--delay", type=float, default=0, help="Initial delay in seconds, without model calls")
@@ -190,7 +196,7 @@ def main():
     if not 1 <= args.threshold < 100 or args.max_turns < 1 or args.delay < 0:
         parser.error("Use threshold 1–99, positive max-turns, and nonnegative delay.")
     if args.check:
-        windows, wake = quota_decision(read_quota(args.codex), args.threshold, time.time())
+        windows, wake = quota_decision(read_quota(args.codex), args.threshold, time.time(), args.quota_window)
         print(json.dumps({"windows": windows, "waitUntil": wake}, indent=2))
         return
     worktree = args.worktree.resolve(strict=True)
@@ -221,7 +227,7 @@ def main():
         sleep_until(time.time() + args.delay)
         for _ in range(args.max_turns):
             while not stop.exists():
-                _, wake = quota_decision(read_quota(args.codex), args.threshold, time.time())
+                _, wake = quota_decision(read_quota(args.codex), args.threshold, time.time(), args.quota_window)
                 if wake is None:
                     break
                 print(f"Quota reserve reached. Sleeping until {time.ctime(wake)}; no model calls.", flush=True)
@@ -232,7 +238,7 @@ def main():
             print(f"Starting one checkpoint-sized unit for {args.issue}.", flush=True)
             result = execute_unit(args.codex, worktree, state_dir, state, args.issue, args.model)
             if result is None:
-                _, wake = quota_decision(read_quota(args.codex), args.threshold, time.time())
+                _, wake = quota_decision(read_quota(args.codex), args.threshold, time.time(), args.quota_window)
                 if wake is None:
                     raise RuntimeError(f"Codex failed without a confirmed quota limit. Inspect logs in {state_dir}.")
                 sleep_until(wake)

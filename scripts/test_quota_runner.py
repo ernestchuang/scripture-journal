@@ -24,6 +24,22 @@ class QuotaRunnerTests(unittest.TestCase):
     def test_stale_reset_has_backoff(self):
         self.assertEqual(runner.quota_decision(quota(primary=100, primary_reset=10), 80, 1000)[1], 1300)
 
+    def test_primary_only_ignores_weekly_reserve(self):
+        windows, wake = runner.quota_decision(quota(primary=5, secondary=84), 80, 1000, "primary")
+        self.assertEqual(len(windows), 2)
+        self.assertIsNone(wake)
+        self.assertEqual(runner.quota_decision(quota(primary=85, secondary=95), 80, 1000, "primary")[1], 1560)
+
+    def test_primary_only_does_not_override_provider_denial(self):
+        with self.assertRaises(ValueError):
+            runner.quota_decision({**quota(primary=5, secondary=100), "ordinaryUsageAllowed": False}, 80, 1000, "primary")
+
+    def test_primary_only_requires_primary_window(self):
+        result = quota()
+        del result["rateLimits"]["primary"]
+        with self.assertRaises(ValueError):
+            runner.quota_decision(result, 80, 1000, "primary")
+
     def test_unknown_limits_fail_closed(self):
         for result in ({}, {"rateLimits": {}}, quota(primary=100, primary_reset=None),
                        quota(primary=float("nan")), {**quota(), "ordinaryUsageAllowed": False}):
