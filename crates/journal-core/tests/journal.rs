@@ -1,6 +1,7 @@
 use journal_core::{
-    ChapterRef, ChapterStream, CompleteStreamRequest, EntryContent, ExplicitScheduleDay,
-    JournalStore, Passage, PlanDefinition, PlanSchedule, SaveRequest, StreamEnrollment,
+    four_stream_plan_definition, ChapterRef, ChapterStream, CompleteStreamRequest, EntryContent,
+    ExplicitScheduleDay, JournalStore, Passage, PlanDefinition, PlanSchedule, SaveRequest,
+    StreamEnrollment,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -58,6 +59,148 @@ fn stream_definition(name: &str) -> PlanDefinition {
             ],
         },
     }
+}
+
+#[test]
+fn built_in_four_stream_definition_covers_every_canonical_chapter_and_enrolls() {
+    let definition = four_stream_plan_definition();
+    let PlanSchedule::ChapterStreams { streams } = &definition.schedule else {
+        unreachable!()
+    };
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["old-testament", "new-testament", "psalms", "proverbs"]
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.chapters.len())
+            .collect::<Vec<_>>(),
+        vec![748, 260, 150, 31]
+    );
+    assert_eq!(
+        streams[0].chapters.first(),
+        Some(&ChapterRef {
+            book: 1,
+            chapter: 1
+        })
+    );
+    assert_eq!(
+        streams[0].chapters.last(),
+        Some(&ChapterRef {
+            book: 39,
+            chapter: 4
+        })
+    );
+    assert_eq!(
+        streams[1].chapters.first(),
+        Some(&ChapterRef {
+            book: 40,
+            chapter: 1
+        })
+    );
+    assert_eq!(
+        streams[1].chapters.last(),
+        Some(&ChapterRef {
+            book: 66,
+            chapter: 22
+        })
+    );
+    assert_eq!(
+        streams[2].chapters.first(),
+        Some(&ChapterRef {
+            book: 19,
+            chapter: 1
+        })
+    );
+    assert_eq!(
+        streams[2].chapters.last(),
+        Some(&ChapterRef {
+            book: 19,
+            chapter: 150
+        })
+    );
+    assert_eq!(
+        streams[3].chapters.first(),
+        Some(&ChapterRef {
+            book: 20,
+            chapter: 1
+        })
+    );
+    assert_eq!(
+        streams[3].chapters.last(),
+        Some(&ChapterRef {
+            book: 20,
+            chapter: 31
+        })
+    );
+
+    let all_chapters = streams
+        .iter()
+        .flat_map(|stream| stream.chapters.iter())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(all_chapters.len(), 1_189);
+    assert!(!streams[0]
+        .chapters
+        .iter()
+        .any(|chapter| chapter.book == 19 || chapter.book == 20));
+    assert_eq!(
+        serde_json::from_str::<PlanDefinition>(&serde_json::to_string(&definition).unwrap())
+            .unwrap(),
+        definition
+    );
+
+    let dir = TempDir::new().unwrap();
+    let mut store = JournalStore::open(&dir.path().join("j.db")).unwrap();
+    let version = store.create_plan_definition(definition).unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(
+            &version.id,
+            vec![
+                StreamEnrollment {
+                    stream_id: "old-testament".into(),
+                    starting_position: 0,
+                    loop_after_end: true,
+                },
+                StreamEnrollment {
+                    stream_id: "new-testament".into(),
+                    starting_position: 259,
+                    loop_after_end: true,
+                },
+                StreamEnrollment {
+                    stream_id: "psalms".into(),
+                    starting_position: 149,
+                    loop_after_end: true,
+                },
+                StreamEnrollment {
+                    stream_id: "proverbs".into(),
+                    starting_position: 30,
+                    loop_after_end: true,
+                },
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .active_plan_assignments(&enrollment.id)
+            .unwrap()
+            .into_iter()
+            .map(|assignment| (
+                assignment.stream_id,
+                assignment.passage.book,
+                assignment.passage.chapter
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("new-testament".into(), 66, 22),
+            ("old-testament".into(), 1, 1),
+            ("proverbs".into(), 20, 31),
+            ("psalms".into(), 19, 150),
+        ]
+    );
 }
 
 #[test]

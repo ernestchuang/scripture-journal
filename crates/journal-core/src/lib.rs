@@ -13,9 +13,9 @@ mod plans;
 mod verse_counts;
 pub use export::ExportReport;
 pub use plans::{
-    ChapterRef, ChapterStream, CompleteStreamRequest, ExplicitScheduleDay, PlanAssignment,
-    PlanCompletion, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, PlanSchedule,
-    StreamEnrollment,
+    four_stream_plan_definition, ChapterRef, ChapterStream, CompleteStreamRequest,
+    ExplicitScheduleDay, PlanAssignment, PlanCompletion, PlanDefinition, PlanDefinitionVersion,
+    PlanEnrollment, PlanSchedule, StreamEnrollment,
 };
 
 /// A passage in canonical Protestant 66-book order using KJV versification.

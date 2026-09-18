@@ -8,6 +8,56 @@ use uuid::Uuid;
 
 const DEFINITION_SCHEMA_VERSION: u32 = 1;
 
+/// The built-in completion-driven plan: one independently advancing chapter
+/// stream from each canonical category. This is definition data only; callers
+/// persist and enroll it like any other immutable plan definition.
+pub fn four_stream_plan_definition() -> PlanDefinition {
+    PlanDefinition {
+        schema_version: DEFINITION_SCHEMA_VERSION,
+        name: "Four streams: one chapter each".into(),
+        description: Some(
+            "One chapter from each of the Old Testament, New Testament, Psalms, and Proverbs."
+                .into(),
+        ),
+        schedule: PlanSchedule::ChapterStreams {
+            streams: vec![
+                ChapterStream {
+                    id: "old-testament".into(),
+                    name: "Old Testament".into(),
+                    chapters: canonical_chapters(1..=39, |book| book != 19 && book != 20),
+                },
+                ChapterStream {
+                    id: "new-testament".into(),
+                    name: "New Testament".into(),
+                    chapters: canonical_chapters(40..=66, |_| true),
+                },
+                ChapterStream {
+                    id: "psalms".into(),
+                    name: "Psalms".into(),
+                    chapters: canonical_chapters(19..=19, |_| true),
+                },
+                ChapterStream {
+                    id: "proverbs".into(),
+                    name: "Proverbs".into(),
+                    chapters: canonical_chapters(20..=20, |_| true),
+                },
+            ],
+        },
+    }
+}
+
+fn canonical_chapters(
+    books: std::ops::RangeInclusive<u32>,
+    include: impl Fn(u32) -> bool,
+) -> Vec<ChapterRef> {
+    books
+        .filter(|book| include(*book))
+        .flat_map(|book| {
+            (1..=CHAPTERS[(book - 1) as usize]).map(move |chapter| ChapterRef { book, chapter })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChapterRef {
