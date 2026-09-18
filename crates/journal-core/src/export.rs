@@ -578,7 +578,7 @@ mod manifest_tests {
     #[cfg(unix)]
     #[test]
     fn entry_creation_reads_and_conflicts_stay_pinned_after_directory_swap() {
-        for state in ["new", "unchanged", "edited"] {
+        for state in ["new", "unchanged", "edited", "updated"] {
             let root = tempfile::tempdir().unwrap();
             let base = root.path().canonicalize().unwrap();
             let selected = base.join("selected");
@@ -620,6 +620,15 @@ mod manifest_tests {
             if state == "edited" {
                 fs::write(selected.join(&name), b"retained external edit").unwrap();
             }
+            let original_output = output.clone();
+            let mut revision = revision.clone();
+            if state == "updated" {
+                revision.parent_id = Some(revision.id.clone());
+                revision.id = Uuid::new_v4().to_string();
+                revision.content.body = "Updated synthetic reflection".into();
+            }
+            let published = std::slice::from_ref(&revision);
+            let output = render(&revision, published).unwrap();
             fs::create_dir(&outside).unwrap();
             fs::write(outside.join(&name), b"outside entry").unwrap();
             fs::write(outside.join(MANIFEST), b"outside manifest").unwrap();
@@ -643,7 +652,7 @@ mod manifest_tests {
                     b"retained external edit"
                 );
             } else {
-                assert_eq!(result.unwrap(), state == "new");
+                assert_eq!(result.unwrap(), state == "new" || state == "updated");
                 assert_eq!(fs::read(moved.join(&name)).unwrap(), output.as_bytes());
                 let saved: Manifest =
                     serde_json::from_slice(&fs::read(moved.join(MANIFEST)).unwrap()).unwrap();
@@ -652,6 +661,23 @@ mod manifest_tests {
                     Some(digest(output.as_bytes()).as_str())
                 );
                 assert!(saved.receipts[&revision.entry_id].pending_hash.is_none());
+            }
+            if state == "updated" {
+                let recovered: Vec<_> = fs::read_dir(moved.join(".scripture-journal-recovery"))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .collect();
+                assert_eq!(recovered.len(), 1);
+                assert_eq!(fs::read(&recovered[0]).unwrap(), original_output.as_bytes());
+                assert!(!export_one(
+                    &selected,
+                    &handle,
+                    &revision,
+                    published,
+                    &mut manifest,
+                    &mut previous
+                )
+                .unwrap());
             }
             assert_eq!(fs::read(outside.join(&name)).unwrap(), b"outside entry");
             assert_eq!(

@@ -41,6 +41,23 @@ edits cannot be made atomic with unrelated editors; displaced files are retained
 for recovery. Keep the original app in use
 until the release and migration checks are complete.
 
+On Unix, export holds directory handles for the destination and recovery folder;
+subsequent reads, staging, installation, and recovery use those handles. Replacing
+a directory path with a symlink does not redirect these operations. If a held
+directory is renamed, output stays with that directory; the report still displays
+the originally selected path. Linux filesystem regression tests cover this behavior.
+The Unix implementation also targets macOS, but macOS build/runtime validation
+remains outstanding. The non-Unix fallback does not provide this directory-race
+protection and is outside the supported desktop targets.
+
+Use an app-owned export folder. The local lock coordinates cooperating exporters;
+it does not prevent another program from replacing lock, staging, or recovery
+filenames, changing file contents, or relocating a held directory. Export is not
+a security boundary against a process that can mutate that folder. Filesystem
+power-loss durability and network-filesystem locking are not established by these
+tests. Displaced entry files remain in `.scripture-journal-recovery/`; failed or
+interrupted replacements may require explicit repair from retained files.
+
 ```bash
 npm run build
 npm test
