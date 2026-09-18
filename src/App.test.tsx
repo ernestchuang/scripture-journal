@@ -12,6 +12,8 @@ const native = vi.hoisted(() => ({
   listPlanEnrollments: vi.fn(),
   getPlanDefinitionVersion: vi.fn(),
   activePlanAssignments: vi.fn(),
+  registerFourStreamPlan: vi.fn(),
+  enrollInChapterStreams: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
@@ -34,6 +36,8 @@ vi.mock('./platform/plans', () => ({
     listPlanEnrollments: native.listPlanEnrollments,
     getPlanDefinitionVersion: native.getPlanDefinitionVersion,
     activePlanAssignments: native.activePlanAssignments,
+    registerFourStreamPlan: native.registerFourStreamPlan,
+    enrollInChapterStreams: native.enrollInChapterStreams,
   },
 }));
 vi.mock('./scripture/Reader', () => ({ Reader: () => null }));
@@ -71,6 +75,8 @@ beforeEach(() => {
   native.listPlanEnrollments.mockReset().mockResolvedValue([]);
   native.getPlanDefinitionVersion.mockReset();
   native.activePlanAssignments.mockReset();
+  native.registerFourStreamPlan.mockReset();
+  native.enrollInChapterStreams.mockReset();
 });
 
 afterEach(() => {
@@ -175,5 +181,39 @@ describe('native application close lifecycle', () => {
     expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Save this after browsing' } });
     expect(screen.getByRole('status').textContent).toBe('Draft saved');
     expect((editor as HTMLTextAreaElement).value).toBe('Save this after browsing');
+  });
+
+  it('preserves and autosaves dirty writing while explicitly enrolling in four streams', async () => {
+    const version = {
+      id: 'four-version', planId: 'four-plan', version: 1, createdAt: '2026-09-18T00:00:00Z',
+      definition: { schemaVersion: 1, name: 'Four streams', schedule: { kind: 'chapterStreams', streams: [
+        { id: 'old', name: 'Old Testament', chapters: [{ book: 1, chapter: 1 }] },
+        { id: 'new', name: 'New Testament', chapters: [{ book: 40, chapter: 1 }] },
+        { id: 'psalms', name: 'Psalms', chapters: [{ book: 19, chapter: 1 }] },
+        { id: 'proverbs', name: 'Proverbs', chapters: [{ book: 20, chapter: 1 }] },
+      ] } },
+    };
+    const enrollment = { id: 'new-enrollment', definitionVersionId: version.id, createdAt: '2026-09-18T00:00:01Z' };
+    native.listPlanEnrollments.mockResolvedValueOnce([]).mockResolvedValueOnce([enrollment]);
+    native.registerFourStreamPlan.mockResolvedValue(version);
+    native.enrollInChapterStreams.mockResolvedValue(enrollment);
+    native.getPlanDefinitionVersion.mockResolvedValue(version);
+    native.activePlanAssignments.mockResolvedValue([]);
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    await screen.findByText('No retained plan enrollments yet.');
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Keep this while enrolling' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Set up four-stream plan' }));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole('button', { name: 'Create enrollment' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(native.enrollInChapterStreams).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while enrolling' } });
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this while enrolling');
   });
 });

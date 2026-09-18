@@ -7,4 +7,5 @@
 .plan-panel button { margin-left: .5rem; padding: .3rem .5rem; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: .35rem; }
 .plan-error { color: var(--error-ink); background: var(--error-surface); border: 1px solid var(--error-line); border-radius: .4rem; padding: .55rem; overflow-wrap: anywhere; }
 .plan-details ul { margin: .4rem 0 0; padding-left: 1.2rem; }.plan-details li { margin: .3rem 0; display: grid; gap: .1rem; }.plan-details li span { color: var(--muted); }
+.plan-enrollment { margin: .75rem 0; padding: .7rem; border: 1px solid var(--line); border-radius: .5rem; }.plan-enrollment button { margin-left: 0; }.plan-streams { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .6rem; margin: .6rem 0; }.plan-streams fieldset { min-width: 0; border: 1px solid var(--line); border-radius: .4rem; }.plan-streams legend { font-weight: 700; }.plan-loop { display: flex !important; grid-template-columns: auto 1fr; align-items: center; margin-top: .5rem; }.plan-loop input { margin: 0; }
 @media (max-width: 640px) { .plan-panel { padding: .8rem 1rem; } }

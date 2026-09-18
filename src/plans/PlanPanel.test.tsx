@@ -8,10 +8,22 @@ afterEach(cleanup);
 const first: PlanEnrollment = { id: 'enrollment-1', definitionVersionId: 'version-1', createdAt: '2026-09-18T00:00:00Z' };
 const second: PlanEnrollment = { id: 'enrollment-2', definitionVersionId: 'version-2', createdAt: '2026-09-18T00:00:01Z' };
 const definition = (id: string, name: string) => ({ id, planId: 'plan-1', version: 1, createdAt: first.createdAt, definition: { schemaVersion: 1, name, schedule: { kind: 'chapterStreams' as const, streams: [] } } });
-const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments'> => ({
+const fourStream = {
+  id: 'four-stream-version', planId: 'four-stream-plan', version: 1, createdAt: first.createdAt,
+  definition: { schemaVersion: 1, name: 'Four streams', schedule: { kind: 'chapterStreams' as const, streams: [
+    { id: 'old', name: 'Old Testament', chapters: [{ book: 1, chapter: 1 }, { book: 1, chapter: 2 }] },
+    { id: 'new', name: 'New Testament', chapters: [{ book: 40, chapter: 1 }] },
+    { id: 'psalms', name: 'Psalms', chapters: [{ book: 19, chapter: 1 }] },
+    { id: 'proverbs', name: 'Proverbs', chapters: [{ book: 20, chapter: 1 }] },
+  ] } },
+};
+const created: PlanEnrollment = { id: 'enrollment-new', definitionVersionId: fourStream.id, createdAt: '2026-09-18T00:00:02Z' };
+const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'registerFourStreamPlan' | 'enrollInChapterStreams'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
   activePlanAssignments: vi.fn(async id => id === first.id ? [{ id: 'assignment-1', enrollmentId: id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' }] : []),
+  registerFourStreamPlan: vi.fn(async () => fourStream),
+  enrollInChapterStreams: vi.fn(async () => created),
 });
 
 describe('retained plan panel', () => {
@@ -115,5 +127,77 @@ describe('retained plan panel', () => {
   it('identifies browser preview plans as native-only', () => {
     render(<PlanPanel />);
     expect(screen.getByText('Plans are available in the native desktop app.')).toBeTruthy();
+  });
+
+  it('requires explicit setup and submits selected starts and loop policies once', async () => {
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValueOnce([]).mockResolvedValueOnce([created]);
+    render(<PlanPanel api={plans} />);
+    await screen.findByText('No retained plan enrollments yet.');
+    expect(plans.registerFourStreamPlan).not.toHaveBeenCalled();
+    expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Set up four-stream plan' }));
+    expect(await screen.findByText('Four streams')).toBeTruthy();
+    const starts = screen.getAllByLabelText('Starting chapter') as HTMLSelectElement[];
+    const loops = screen.getAllByLabelText('Loop after the final chapter') as HTMLInputElement[];
+    expect(starts.map(select => select.value)).toEqual(['0', '0', '0', '0']);
+    expect(loops.every(input => input.checked)).toBe(true);
+    fireEvent.change(starts[0], { target: { value: '1' } });
+    fireEvent.click(loops[1]);
+    const submit = screen.getByRole('button', { name: 'Create enrollment' });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1));
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledWith(fourStream.id, [
+      { streamId: 'old', startingPosition: 1, loopAfterEnd: true },
+      { streamId: 'new', startingPosition: 0, loopAfterEnd: false },
+      { streamId: 'psalms', startingPosition: 0, loopAfterEnd: true },
+      { streamId: 'proverbs', startingPosition: 0, loopAfterEnd: true },
+    ]);
+    await waitFor(() => expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(created.id));
+    expect(plans.listPlanEnrollments).toHaveBeenCalledTimes(2);
+  });
+
+  it('disables pending enrollment and reports failure without retrying or mutating the retained selection', async () => {
+    let rejectEnrollment!: (reason: unknown) => void;
+    const plans = api();
+    vi.mocked(plans.enrollInChapterStreams).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectEnrollment = reject; }));
+    render(<PlanPanel api={plans} />);
+    await screen.findByText('First plan');
+    fireEvent.click(screen.getByRole('button', { name: 'Set up four-stream plan' }));
+    await screen.findByText('Four streams');
+    fireEvent.click(screen.getByRole('button', { name: 'Create enrollment' }));
+    expect((screen.getByRole('button', { name: 'Creating enrollment…' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { rejectEnrollment(new Error('database busy')); });
+    expect(await screen.findByText(/Could not create enrollment: Error: database busy/)).toBeTruthy();
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(first.id);
+  });
+
+  it('reports a failed explicit setup without registering or enrolling again automatically', async () => {
+    const plans = api();
+    vi.mocked(plans.registerFourStreamPlan).mockRejectedValueOnce(new Error('registration failed'));
+    render(<PlanPanel api={plans} />);
+    await screen.findByText('First plan');
+    fireEvent.click(screen.getByRole('button', { name: 'Set up four-stream plan' }));
+    expect(await screen.findByText(/Could not prepare four-stream enrollment: Error: registration failed/)).toBeTruthy();
+    expect(plans.registerFourStreamPlan).toHaveBeenCalledTimes(1);
+    expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
+  });
+
+  it('ignores an obsolete enrollment result after unmount', async () => {
+    let resolveEnrollment!: (value: PlanEnrollment) => void;
+    const plans = api();
+    vi.mocked(plans.enrollInChapterStreams).mockImplementationOnce(() => new Promise(resolve => { resolveEnrollment = resolve; }));
+    const view = render(<PlanPanel api={plans} />);
+    await screen.findByText('First plan');
+    fireEvent.click(screen.getByRole('button', { name: 'Set up four-stream plan' }));
+    await screen.findByText('Four streams');
+    fireEvent.click(screen.getByRole('button', { name: 'Create enrollment' }));
+    view.unmount();
+    await act(async () => { resolveEnrollment(created); });
+    expect(plans.listPlanEnrollments).toHaveBeenCalledTimes(1);
   });
 });
