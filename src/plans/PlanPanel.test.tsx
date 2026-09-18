@@ -331,4 +331,59 @@ describe('retained plan panel', () => {
     expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(created.id);
     expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
   });
+
+  it('preserves ready assignment details when discovery retry and stale refresh reject', async () => {
+    let rejectRefresh!: (reason: unknown) => void;
+    let rejectRetry!: (reason: unknown) => void;
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments)
+      .mockRejectedValueOnce(new Error('initial offline'))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRefresh = reject; }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRetry = reject; }));
+    vi.mocked(plans.getPlanDefinitionVersion).mockResolvedValue(fourStream);
+    vi.mocked(plans.activePlanAssignments).mockResolvedValue([{ id: 'created-assignment', enrollmentId: created.id, streamId: 'old', ordinal: 1, cycle: 1, passage: { book: 1, chapter: 1 }, streamPosition: 0, progressId: 'created-progress' }]);
+    render(<PlanPanel api={plans} />);
+    await screen.findByText(/Could not load retained plans/);
+    fireEvent.click(screen.getByRole('button', { name: 'Set up four-stream plan' }));
+    await screen.findByText('Four streams');
+    fireEvent.click(screen.getByRole('button', { name: 'Create enrollment' }));
+    expect(await screen.findByLabelText('Current plan assignments')).toBeTruthy();
+    expect(screen.getByText('Book 1 · Chapter 1')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry plans' }));
+    await act(async () => { rejectRetry(new Error('retry offline')); });
+    await act(async () => { rejectRefresh(new Error('stale refresh failure')); });
+    expect(screen.getByLabelText('Current plan assignments')).toBeTruthy();
+    expect(screen.getByText('Book 1 · Chapter 1')).toBeTruthy();
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(created.id);
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows pending assignment details to settle after discovery retry failure', async () => {
+    let rejectRefresh!: (reason: unknown) => void;
+    let rejectRetry!: (reason: unknown) => void;
+    let resolveAssignments!: (value: Awaited<ReturnType<PlanDefinitionApi['activePlanAssignments']>>) => void;
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments)
+      .mockRejectedValueOnce(new Error('initial offline'))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRefresh = reject; }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRetry = reject; }));
+    vi.mocked(plans.getPlanDefinitionVersion).mockResolvedValue(fourStream);
+    vi.mocked(plans.activePlanAssignments).mockImplementationOnce(() => new Promise(resolve => { resolveAssignments = resolve; }));
+    render(<PlanPanel api={plans} />);
+    await screen.findByText(/Could not load retained plans/);
+    fireEvent.click(screen.getByRole('button', { name: 'Set up four-stream plan' }));
+    await screen.findByText('Four streams');
+    fireEvent.click(screen.getByRole('button', { name: 'Create enrollment' }));
+    expect(await screen.findByText('Loading current assignments…')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry plans' }));
+    await act(async () => { rejectRetry(new Error('retry offline')); });
+    await act(async () => { rejectRefresh(new Error('stale refresh failure')); });
+    expect(screen.getByText('Loading current assignments…')).toBeTruthy();
+    await act(async () => { resolveAssignments([]); });
+    expect(await screen.findByText(/enrollment is exhausted/i)).toBeTruthy();
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(created.id);
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
+  });
 });

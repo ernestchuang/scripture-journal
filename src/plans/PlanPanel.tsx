@@ -36,7 +36,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     if (!api) return;
     let active = true;
     const epoch = ++discoveryEpoch.current;
-    setListError(''); setDetails(null);
+    setListError('');
     api.listPlanEnrollments().then(items => {
       if (!active || epoch !== discoveryEpoch.current) return;
       const confirmed = confirmedEnrollment.current;
@@ -45,7 +45,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       setSelectedId(current => confirmed?.id ?? (visible.some(item => item.id === current) ? current : (visible[0]?.id ?? '')));
       if (confirmed && items.some(item => item.id === confirmed.id)) confirmedEnrollment.current = null;
     }).catch(error => { if (active && epoch === discoveryEpoch.current) setListError(String(error)); });
-    return () => { active = false; detailEpoch.current += 1; };
+    return () => { active = false; };
   }, [api, attempt]);
 
   useEffect(() => {
