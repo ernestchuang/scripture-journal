@@ -40,7 +40,9 @@ Use **Download KJV** in the desktop reader to install a validated offline Bible
 in a separate Scripture database. Without a download, KJV loads online on demand.
 The reader remembers its location and continues beyond plan passage boundaries.
 LSB, NASB1995, and ESV appear in the translation selector but require authorized
-sources that are not yet supplied. See the
+sources that are not bundled. Use **Import authorized Scripture pack** to install
+your own supported [local JSON pack](docs/SCRIPTURE-PACKS.md), including source
+attribution. See the
 [translation source investigation](docs/TRANSLATION-SOURCES.md).
 
 Reading plans include M’Cheyne and four independent chapter streams. Custom JSON

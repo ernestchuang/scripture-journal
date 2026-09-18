@@ -8,6 +8,10 @@ holds implementation status and remaining acceptance work.
 - Download a validated KJV library for offline desktop reading. Scripture lives
   separately from journals; a damaged Scripture cache does not block writing.
   Reading location is retained, and successful downloads refresh the reader.
+- Import authorized local JSON packs for LSB, NASB1995, ESV, or KJV. Each import
+  replaces only its translation atomically, retains source attribution, and
+  refreshes the reader. Invalid input or failed writes preserve the installed
+  library. Licensed Bible text is not bundled or included in journal exports.
 - M’Cheyne and the four chapter streams now support enrollment, progress, and
   undo. Custom JSON plans support editing, versioning, import, and export.
   Explicit version adoption retains previous assignments and completion records.
