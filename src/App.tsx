@@ -9,6 +9,8 @@ import { Reader } from './scripture/Reader';
 import { JournalWorkspace, type JournalPersistenceState } from './journal/JournalWorkspace';
 import { nativePlans } from './platform/plans';
 import { PlanPanel } from './plans/PlanPanel';
+import { LegacyImportPanel } from './migration/LegacyImportPanel';
+import { nativeLegacyImport } from './platform/legacyImport';
 
 const journal = isDesktop ? nativeJournal : browserJournal;
 const portablePreferenceKeys = [
@@ -33,6 +35,7 @@ export function App() {
   const [exporting, setExporting] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
   const [restoredPreferences, setRestoredPreferences] = useState<Record<string, string>>({});
+  const [journalRefresh, setJournalRefresh] = useState(0);
   const persistence = useRef<JournalPersistenceState | null>(null);
   const rememberPersistence = useCallback((state: JournalPersistenceState) => { persistence.current = state; }, []);
   useEffect(() => { try { window.localStorage?.setItem('scripture-journal.reader-location', JSON.stringify(selection)); } catch { /* Reading remains usable without preference storage. */ } }, [selection]);
@@ -174,7 +177,8 @@ export function App() {
         </section>
         <section className="journal-panel" aria-label="Journal">
           <PlanPanel api={isDesktop ? nativePlans : undefined} />
-          <JournalWorkspace api={journal} passage={selection} reflectRequest={reflectRequest} onPersistenceChange={rememberPersistence} />
+          <LegacyImportPanel api={isDesktop ? nativeLegacyImport : undefined} onImported={() => setJournalRefresh(value => value + 1)} />
+          <JournalWorkspace api={journal} passage={selection} reflectRequest={reflectRequest} refreshRequest={journalRefresh} onPersistenceChange={rememberPersistence} />
         </section>
       </main>
       <footer className="app-footer"><span>Scripture Journal · Early desktop preview</span><span>Read slowly. Keep what you discover.</span></footer>

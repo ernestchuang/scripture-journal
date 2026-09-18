@@ -2,9 +2,9 @@ mod journal_deletion;
 use journal_core::{
     AdoptCalendarPlanRequest, AdoptStreamPlanRequest, CalendarAssignmentCompletion,
     CalendarPlanEnrollment, CalendarScheduleMode, CompleteStreamRequest, DatedPlanAssignment,
-    Entry, ExportReport, JournalStore, PlanAdoptionEvent, PlanAssignment, PlanCompletion,
-    PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, Revision,
-    SaveRequest, StreamEnrollment,
+    Entry, ExportReport, JournalStore, LegacyImportPreview, LegacyImportResult, PlanAdoptionEvent,
+    PlanAssignment, PlanCompletion, PlanCompletionHistoryItem, PlanDefinition,
+    PlanDefinitionVersion, PlanEnrollment, Revision, SaveRequest, StreamEnrollment,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -24,6 +24,7 @@ struct AppState {
     journal_path: PathBuf,
     restore_backups: Mutex<HashSet<PathBuf>>,
     export_directories: Mutex<HashSet<PathBuf>>,
+    legacy_import_directories: Mutex<HashSet<PathBuf>>,
     restore_outcome: Mutex<StartupRestoreOutcome>,
     // Declared last so journal connections close before releasing the lease.
     _journal_lock: std::fs::File,
@@ -2065,6 +2066,84 @@ async fn choose_export_directory(
 }
 
 #[tauri::command]
+async fn choose_legacy_import_directory(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("Choose your old Bible Reading Plans folder")
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected.into_path().map_err(|e| e.to_string())?;
+    if path
+        .symlink_metadata()
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_symlink()
+    {
+        return Err("Choose the real legacy journal folder, not a symbolic link.".into());
+    }
+    let path = path.canonicalize().map_err(|e| e.to_string())?;
+    state
+        .legacy_import_directories
+        .lock()
+        .map_err(|_| "Folder access is unavailable.".to_string())?
+        .insert(path.clone());
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+fn selected_legacy_path(state: &AppState, directory: String) -> Result<PathBuf, String> {
+    let path = PathBuf::from(directory)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !state
+        .legacy_import_directories
+        .lock()
+        .map_err(|_| "Folder access is unavailable.".to_string())?
+        .contains(&path)
+    {
+        return Err("Choose the legacy journal using the app's folder picker first.".into());
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+async fn preview_legacy_import(
+    state: State<'_, AppState>,
+    directory: String,
+) -> Result<LegacyImportPreview, String> {
+    let path = selected_legacy_path(&state, directory)?;
+    run_store(state.journal.clone(), move |journal| {
+        journal
+            .preview_legacy_import(&path)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn confirm_legacy_import(
+    state: State<'_, AppState>,
+    directory: String,
+    expected_preview_id: String,
+) -> Result<LegacyImportResult, String> {
+    let path = selected_legacy_path(&state, directory)?;
+    run_store(state.journal.clone(), move |journal| {
+        journal
+            .import_legacy_journal(&path, &expected_preview_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
 async fn export_journal(
     state: State<'_, AppState>,
     directory: String,
@@ -2109,6 +2188,7 @@ pub fn run() {
                 restore_backups: Mutex::new(HashSet::new()),
                 export_directories: Mutex::new(HashSet::new()),
                 restore_outcome: Mutex::new(restore_outcome),
+                legacy_import_directories: Mutex::new(HashSet::new()),
             });
             Ok(())
         })
@@ -2146,6 +2226,9 @@ pub fn run() {
             restore_revision,
             choose_export_directory,
             export_journal,
+            choose_legacy_import_directory,
+            preview_legacy_import,
+            confirm_legacy_import,
             apply_appearance,
             read_omarchy_theme,
             startup_appearance,
