@@ -336,19 +336,103 @@ fn schema_six_registration_migration_preserves_existing_plan_progress() {
     assert_eq!(schema_two_retained_fingerprint(&path), retained_plans);
     assert_eq!(progress_fingerprint(&path), retained_progress);
     assert_eq!(
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM built_in_plan_registrations",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
         migrated
             .list_plan_definition_versions(&existing.plan_id)
             .unwrap(),
         vec![existing]
     );
-    migrated.register_four_stream_plan().unwrap();
+    let registered = migrated.register_four_stream_plan().unwrap();
     drop(migrated);
+    let mut reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(reopened.register_four_stream_plan().unwrap(), registered);
+    drop(reopened);
     let conn = rusqlite::Connection::open(path).unwrap();
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
         7
     );
+}
+
+fn plan_registry_fingerprint(path: &std::path::Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    [
+        "SELECT group_concat(id||':'||created_at,'|') FROM (SELECT * FROM plans ORDER BY id)",
+        "SELECT group_concat(id||':'||plan_id||':'||version||':'||created_at||':'||definition,'|') FROM (SELECT * FROM plan_definition_versions ORDER BY id)",
+        "SELECT group_concat(built_in_id||':'||definition_version_id,'|') FROM (SELECT * FROM built_in_plan_registrations ORDER BY built_in_id)",
+    ]
+    .into_iter()
+    .map(|query| {
+        conn.query_row(query, [], |row| row.get::<_, Option<String>>(0))
+            .unwrap()
+            .unwrap_or_default()
+    })
+    .collect()
+}
+
+#[test]
+fn built_in_registry_constraints_preserve_registration_exactly() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let registered = store.register_four_stream_plan().unwrap();
+    let custom = store
+        .create_plan_definition(stream_definition("Constraint target"))
+        .unwrap();
+    drop(store);
+    let retained = plan_registry_fingerprint(&path);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    for (statement, parameters, expected_error) in [
+        (
+            "UPDATE built_in_plan_registrations SET built_in_id=built_in_id WHERE ?1=?2",
+            ("same", "same"),
+            "Built-in plan registrations are immutable",
+        ),
+        (
+            "DELETE FROM built_in_plan_registrations WHERE ?1=?2",
+            ("same", "same"),
+            "Built-in plan registrations are retained",
+        ),
+        (
+            "INSERT INTO built_in_plan_registrations(built_in_id,definition_version_id) VALUES(?1,?2)",
+            ("four-stream", custom.id.as_str()),
+            "UNIQUE constraint failed: built_in_plan_registrations.built_in_id",
+        ),
+        (
+            "INSERT INTO built_in_plan_registrations(built_in_id,definition_version_id) VALUES(?1,?2)",
+            ("other-built-in", registered.id.as_str()),
+            "UNIQUE constraint failed: built_in_plan_registrations.definition_version_id",
+        ),
+        (
+            "INSERT INTO built_in_plan_registrations(built_in_id,definition_version_id) VALUES(?1,?2)",
+            ("missing-version", "00000000-0000-4000-a000-000000000000"),
+            "FOREIGN KEY constraint failed",
+        ),
+    ] {
+        assert!(conn
+            .execute(statement, rusqlite::params![parameters.0, parameters.1])
+            .unwrap_err()
+            .to_string()
+            .contains(expected_error));
+        assert_eq!(plan_registry_fingerprint(&path), retained);
+    }
+    drop(conn);
+
+    let mut reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(reopened.register_four_stream_plan().unwrap(), registered);
+    assert_eq!(plan_registry_fingerprint(&path), retained);
 }
 
 #[test]
@@ -544,7 +628,8 @@ fn schema_one_journal_data_survives_plan_migration() {
 
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TABLE plan_stream_progress_epochs;
+        "DROP TABLE built_in_plan_registrations;
+         DROP TABLE plan_stream_progress_epochs;
          DROP TABLE reading_completion_undos;
          DROP TABLE reading_completions;
          DROP TABLE plan_assignments;
@@ -1239,6 +1324,7 @@ fn populated_schema_two_journal_and_plan_versions_survive_migration_and_reopen()
     let retained_before = schema_two_retained_fingerprint(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     for table in [
+        "built_in_plan_registrations",
         "plan_stream_progress_epochs",
         "reading_completion_undos",
         "reading_completions",
@@ -1356,7 +1442,8 @@ fn schema_three_progress_migration_preserves_history_and_adds_command_epoch() {
 
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TABLE plan_stream_progress_epochs;
+        "DROP TABLE built_in_plan_registrations;
+         DROP TABLE plan_stream_progress_epochs;
          DROP TRIGGER plan_assignments_immutable;
          DROP TRIGGER plan_assignments_position_required;
          ALTER TABLE plan_assignments DROP COLUMN stream_position;
@@ -1430,7 +1517,8 @@ fn exhausted_schema_three_stream_can_undo_and_recomplete_after_migration() {
 
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TABLE plan_stream_progress_epochs;
+        "DROP TABLE built_in_plan_registrations;
+         DROP TABLE plan_stream_progress_epochs;
          DROP TRIGGER plan_assignments_immutable;
          DROP TRIGGER plan_assignments_position_required;
          ALTER TABLE plan_assignments DROP COLUMN stream_position;
@@ -1884,7 +1972,8 @@ fn schema_four_reconstructs_repeated_occurrences_without_rewriting_snapshots() {
         )
         .unwrap();
     conn.execute_batch(
-        "DROP TRIGGER plan_assignments_immutable;
+        "DROP TABLE built_in_plan_registrations;
+         DROP TRIGGER plan_assignments_immutable;
          DROP TRIGGER plan_assignments_position_required;
          ALTER TABLE plan_assignments DROP COLUMN stream_position;
          CREATE TRIGGER plan_assignments_immutable BEFORE UPDATE ON plan_assignments BEGIN SELECT RAISE(ABORT,'Plan assignments are immutable'); END;
@@ -1951,7 +2040,8 @@ fn ambiguous_legacy_occurrence_is_retained_and_refuses_guessed_progression() {
 
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TRIGGER plan_assignments_immutable;
+        "DROP TABLE built_in_plan_registrations;
+         DROP TRIGGER plan_assignments_immutable;
          DROP TRIGGER plan_assignments_position_required;
          UPDATE plan_assignments SET passage=json_set(passage,'$.chapter',2) WHERE ordinal=4;
          ALTER TABLE plan_assignments DROP COLUMN stream_position;
@@ -2021,7 +2111,8 @@ fn divergent_v5_suffix_is_invalidated_without_chapter_skips_or_history_rewrite()
 
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TRIGGER plan_assignments_immutable;
+        "DROP TABLE built_in_plan_registrations;
+         DROP TRIGGER plan_assignments_immutable;
          UPDATE plan_assignments SET passage=json_set(passage,'$.chapter',2) WHERE ordinal=4;
          CREATE TRIGGER plan_assignments_immutable BEFORE UPDATE ON plan_assignments BEGIN SELECT RAISE(ABORT,'Plan assignments are immutable'); END;
          PRAGMA user_version=5;",
