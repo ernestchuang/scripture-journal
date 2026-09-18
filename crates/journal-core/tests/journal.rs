@@ -214,6 +214,226 @@ fn portable_plan_definition_json_rejects_domain_valid_oversized_serialization() 
 }
 
 #[test]
+fn store_imports_new_json_plans_and_exports_selected_versions_without_touching_history() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let built_in = store.register_four_stream_plan().unwrap();
+    let existing = store
+        .create_plan_definition(stream_definition("Existing retained plan"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&existing.id, stream_selections(false))
+        .unwrap();
+    let assignment = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|value| value.stream_id == "old-testament")
+        .unwrap();
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id,
+            stream_id: assignment.stream_id,
+            expected_assignment_id: assignment.id,
+            expected_progress_id: assignment.progress_id,
+        })
+        .unwrap();
+    let retained_progress = progress_fingerprint(&path);
+
+    let stream_definition = stream_definition("Imported stream plan");
+    let imported_stream = store
+        .import_plan_definition_json(&serialize_plan_definition_json(&stream_definition).unwrap())
+        .unwrap();
+    let explicit_definition = PlanDefinition {
+        schema_version: 1,
+        name: "Imported explicit plan".into(),
+        description: None,
+        schedule: PlanSchedule::ExplicitSchedule {
+            days: vec![ExplicitScheduleDay {
+                day: 1,
+                passages: vec![Passage {
+                    book: 43,
+                    chapter: 3,
+                    start_verse: None,
+                    end_verse: None,
+                }],
+            }],
+        },
+    };
+    let imported_explicit = store
+        .import_plan_definition_json(&serialize_plan_definition_json(&explicit_definition).unwrap())
+        .unwrap();
+    assert_ne!(imported_stream.plan_id, existing.plan_id);
+    assert_ne!(imported_explicit.plan_id, imported_stream.plan_id);
+    let explicit_export = store
+        .export_plan_definition_json(&imported_explicit.id)
+        .unwrap();
+    assert_eq!(
+        parse_plan_definition_json(&explicit_export).unwrap(),
+        explicit_definition
+    );
+    let selected_export = store
+        .export_plan_definition_json(&imported_stream.id)
+        .unwrap();
+    let mut edited = stream_definition.clone();
+    edited.name = "Later edited stream plan".into();
+    store
+        .create_plan_definition_version(&imported_stream.plan_id, edited)
+        .unwrap();
+    assert_eq!(
+        store
+            .export_plan_definition_json(&imported_stream.id)
+            .unwrap(),
+        selected_export
+    );
+    assert_eq!(progress_fingerprint(&path), retained_progress);
+    assert_eq!(store.register_four_stream_plan().unwrap(), built_in);
+    assert_eq!(
+        store
+            .list_plan_definition_versions(&existing.plan_id)
+            .unwrap(),
+        vec![existing]
+    );
+    drop(store);
+
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .export_plan_definition_json(&imported_stream.id)
+            .unwrap(),
+        selected_export
+    );
+    assert_eq!(
+        reopened
+            .export_plan_definition_json(&imported_explicit.id)
+            .unwrap(),
+        explicit_export
+    );
+    assert_eq!(progress_fingerprint(&path), retained_progress);
+}
+
+#[test]
+fn failed_json_plan_imports_and_missing_export_leave_existing_rows_unchanged() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    store.register_four_stream_plan().unwrap();
+    let existing = store
+        .create_plan_definition(stream_definition("Retained before failures"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&existing.id, stream_selections(false))
+        .unwrap();
+    let assignment = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|value| value.stream_id == "old-testament")
+        .unwrap();
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id,
+            stream_id: assignment.stream_id,
+            expected_assignment_id: assignment.id,
+            expected_progress_id: assignment.progress_id,
+        })
+        .unwrap();
+    let retained = plan_registry_fingerprint(&path);
+    let retained_progress = progress_fingerprint(&path);
+    let valid = serialize_plan_definition_json(&stream_definition("Valid JSON")).unwrap();
+    let unsupported = valid.replacen("\"schemaVersion\":1", "\"schemaVersion\":2", 1);
+    let unknown = valid.replacen("{", "{\"unknown\":true,", 1);
+    let oversized = " ".repeat(MAX_PLAN_DEFINITION_JSON_BYTES + 1);
+    for input in [
+        "{",
+        unsupported.as_str(),
+        unknown.as_str(),
+        oversized.as_str(),
+    ] {
+        assert!(store.import_plan_definition_json(input).is_err());
+        assert_eq!(plan_registry_fingerprint(&path), retained);
+        assert_eq!(progress_fingerprint(&path), retained_progress);
+    }
+    assert!(store
+        .export_plan_definition_json("00000000-0000-4000-a000-000000000000")
+        .is_err());
+    assert_eq!(plan_registry_fingerprint(&path), retained);
+    assert_eq!(progress_fingerprint(&path), retained_progress);
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER inject_json_import_failure BEFORE INSERT ON plan_definition_versions
+         BEGIN SELECT RAISE(ABORT,'injected JSON import failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+    let mut store = JournalStore::open(&path).unwrap();
+    assert!(store
+        .import_plan_definition_json(&valid)
+        .unwrap_err()
+        .to_string()
+        .contains("injected JSON import failure"));
+    drop(store);
+    assert_eq!(plan_registry_fingerprint(&path), retained);
+    assert_eq!(progress_fingerprint(&path), retained_progress);
+}
+
+#[test]
+fn exporting_stored_domain_valid_oversized_definition_fails_without_writes() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let store = JournalStore::open(&path).unwrap();
+    drop(store);
+    let definition = PlanDefinition {
+        schema_version: 1,
+        name: "Stored oversized definition".into(),
+        description: None,
+        schedule: PlanSchedule::ExplicitSchedule {
+            days: (1..=1_000)
+                .map(|day| ExplicitScheduleDay {
+                    day,
+                    passages: vec![
+                        Passage {
+                            book: 1,
+                            chapter: 1,
+                            start_verse: None,
+                            end_verse: None,
+                        };
+                        100
+                    ],
+                })
+                .collect(),
+        },
+    };
+    let plan_id = Uuid::new_v4().to_string();
+    let version_id = Uuid::new_v4().to_string();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO plans(id,created_at) VALUES(?1,'synthetic')",
+        [&plan_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO plan_definition_versions(id,plan_id,version,created_at,definition) VALUES(?1,?2,1,'synthetic',?3)",
+        rusqlite::params![version_id, plan_id, serde_json::to_string(&definition).unwrap()],
+    )
+    .unwrap();
+    drop(conn);
+    let retained = plan_registry_fingerprint(&path);
+
+    let store = JournalStore::open(&path).unwrap();
+    assert!(store
+        .export_plan_definition_json(&version_id)
+        .unwrap_err()
+        .to_string()
+        .contains("byte limit"));
+    drop(store);
+    assert_eq!(plan_registry_fingerprint(&path), retained);
+}
+
+#[test]
 fn built_in_four_stream_definition_covers_every_canonical_chapter_and_enrolls() {
     let definition = four_stream_plan_definition();
     let PlanSchedule::ChapterStreams { streams } = &definition.schedule else {

@@ -304,6 +304,20 @@ impl JournalStore {
         plans::create_definition(&mut self.conn, None, definition)
     }
 
+    /// Imports one bounded portable definition as a new retained custom plan.
+    pub fn import_plan_definition_json(&mut self, input: &str) -> Result<PlanDefinitionVersion> {
+        let definition = plans::parse_plan_definition_json(input)?;
+        plans::create_definition(&mut self.conn, None, definition)
+    }
+
+    /// Exports exactly the selected immutable definition version.
+    pub fn export_plan_definition_json(&self, version_id: &str) -> Result<String> {
+        validate_id(version_id)?;
+        let version = plans::definition_version(&self.conn, version_id)?
+            .context("Plan definition version not found")?;
+        plans::serialize_plan_definition_json(&version.definition)
+    }
+
     pub fn register_four_stream_plan(&mut self) -> Result<PlanDefinitionVersion> {
         plans::register_four_stream(&mut self.conn)
     }
