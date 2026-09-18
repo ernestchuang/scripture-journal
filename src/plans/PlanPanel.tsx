@@ -957,9 +957,9 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     try {
       const event = await api.adoptCalendarPlan({ enrollmentId: enrollment.id, expectedDefinitionVersionId: effectiveVersionId(enrollment), targetDefinitionVersionId: selectedDefinition.id, effectiveFromLocalDate: assignment.localDate, expectedAssignmentId: assignment.id });
       setAdoptionHistory(value => ({ ...value, [enrollment.id]: [...(value[enrollment.id] ?? []), event] }));
+      if (currentApi.current === api) setCalendarAssignmentAttempt(value => value + 1);
       if (epoch !== adoptionEpoch.current || selectedCalendarEnrollmentIdRef.current !== enrollment.id) return;
       setAdoptionMessage(`Adopted definition version ${event.targetDefinitionVersionId} from ${assignment.localDate}.`);
-      setCalendarAssignmentAttempt(value => value + 1);
     } catch (error) { if (epoch === adoptionEpoch.current && selectedCalendarEnrollmentIdRef.current === enrollment.id) setAdoptionMessage(`Could not adopt calendar version: ${String(error)}`); }
     finally { if (epoch === adoptionEpoch.current) setAdoptingEnrollmentId(''); }
   }
