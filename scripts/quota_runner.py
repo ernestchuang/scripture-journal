@@ -109,11 +109,13 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def choose_role(state, review_enabled, routine_enabled, review_every):
+def choose_role(state, review_enabled, routine_enabled, review_every, complex_enabled=False):
     if review_enabled and (not state.get("review_initialized") or state.get("completion_pending")
                            or state.get("next_kind") == "review"
                            or state.get("units_since_review", 0) >= review_every):
         return "review"
+    if complex_enabled and state.get("next_kind") == "complex":
+        return "complex"
     if routine_enabled and state.get("next_kind") == "routine" and state.get("next_task", "").strip():
         return "routine"
     return "coding"
@@ -144,7 +146,7 @@ def execute_unit(codex, worktree, state_dir, state, issue, model=None, role="cod
                        "required": ["status", "summary", "next_kind", "next_task"], "properties": {
                            "status": {"type": "string", "enum": ["continue", "done", "blocked"]},
                            "summary": {"type": "string"},
-                           "next_kind": {"type": "string", "enum": ["coding", "routine", "review"]},
+                           "next_kind": {"type": "string", "enum": ["coding", "routine", "complex", "review"]},
                            "next_task": {"type": "string"}}})
     prompt = (
         f"Continue Scripture Journal issue {issue} in {worktree}. Read AGENTS.md, run bd prime, "
@@ -155,19 +157,22 @@ def execute_unit(codex, worktree, state_dir, state, issue, model=None, role="cod
         "commit and push before returning. Work only in this existing Git worktree. "
         "Use the model selected by the supervisor and the current CLI account; do not change models/accounts, buy credits, or change limits. "
         "You are the coding worker. Keep changes focused and tested. If a task needs unresolved architectural "
-        "judgment or you cannot resolve a correctness problem, checkpoint the evidence for a separate review "
-        "and return blocked rather than repeatedly guessing. "
+        "judgment or difficult debugging, checkpoint the evidence and return continue with next_kind complex "
+        "or review. A failed test or missing installable development tool is work to investigate, not itself "
+        "a reason to declare blocked. Reserve blocked for essential user input or inaccessible external resources. "
         "Do not modify or launch the quota runner. If an essential decision/access is missing, checkpoint "
         "and return blocked. Return done only when this issue is actually complete and pushed; "
         "otherwise continue. Before starting another substantial subtask, checkpoint and return so "
-        "the external supervisor can check quota. "
+        "the external supervisor can route the next task and apply configured execution limits. "
         f"Previous checkpoint: {state.get('summary', 'See Beads notes and the working tree.')}"
     )
     prompt += (
         f"\nAssigned role: {role}. Next bounded task: {state.get('next_task', 'Follow the Beads checkpoint.')}. "
         "Return next_kind and a concrete next_task. Choose routine only for narrowly specified styling, "
         "documentation, fixtures, or mechanical UI work. Database, save ordering, recovery, migration, "
-        "filesystem safety and architecture always require coding or review. Request review after a major "
+        "filesystem safety and architecture require complex coding or review. Choose complex for concurrency, "
+        "data integrity, migrations, difficult debugging and cross-module design. Choose coding for ordinary "
+        "feature implementation. Select by task difficulty, not automatically the largest model. Request review after a major "
         "feature milestone or changes to data integrity, saving, recovery, migrations or export safety. "
     )
     if review_enabled and role != "review":
@@ -230,7 +235,7 @@ def execute_unit(codex, worktree, state_dir, state, issue, model=None, role="cod
     result = json.loads(output.read_text())
     if result.get("status") not in ("continue", "done", "blocked") or not isinstance(result.get("summary"), str):
         raise ValueError("Invalid checkpoint; stopping instead of launching more work.")
-    if result.get("next_kind") not in ("coding", "routine", "review") or not isinstance(result.get("next_task"), str):
+    if result.get("next_kind") not in ("coding", "routine", "complex", "review") or not isinstance(result.get("next_task"), str):
         raise ValueError("Invalid task routing; stopping instead of guessing a model.")
     return result
 
@@ -243,11 +248,14 @@ def main():
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--model", help="Explicit coding-worker model; omitted uses the CLI/session default")
     parser.add_argument("--routine-model", help="Smaller worker for explicitly scoped routine tasks")
+    parser.add_argument("--complex-model", help="Stronger coder for difficult implementation and debugging")
     parser.add_argument("--review-model", help="Independent reviewer; gates milestone completion")
     parser.add_argument("--review-every", type=int, default=4, help="Review after at most this many coding units")
     parser.add_argument("--quota-window", choices=("all", "primary"), default="all",
                         help="Proactive reserve: all windows or only the primary (normally five-hour) window")
     parser.add_argument("--check", action="store_true", help="Read quota only; never invoke a model")
+    parser.add_argument("--no-quota-monitor", action="store_true", help="Do not read quota or proactively pause; stop on worker errors")
+    parser.add_argument("--resume-blocked", action="store_true", help="Explicitly retry a blocked checkpoint without erasing its evidence")
     parser.add_argument("--max-turns", type=int, default=50, help="Safety ceiling for this invocation")
     parser.add_argument("--delay", type=float, default=0, help="Initial delay in seconds, without model calls")
     args = parser.parse_args()
@@ -271,6 +279,8 @@ def main():
         identity = {"worktree": str(worktree), "issue": args.issue}
         if state and any(state.get(key) != value for key, value in identity.items()):
             raise ValueError("Stored runner belongs to another issue/worktree. Archive its state before starting a different task.")
+        if state.get("status") == "blocked" and args.resume_blocked:
+            state["status"] = "continue"
         if state.get("status") in ("done", "blocked"):
             print(f"Runner is {state['status']}: {state.get('summary', '')}")
             return
@@ -285,6 +295,8 @@ def main():
         sleep_until(time.time() + args.delay)
         for _ in range(args.max_turns):
             while not stop.exists():
+                if args.no_quota_monitor:
+                    break
                 _, wake = quota_decision(read_quota(args.codex), args.threshold, time.time(), args.quota_window)
                 if wake is None:
                     break
@@ -293,11 +305,13 @@ def main():
             if stop.exists():
                 print("STOP requested; no further work launched.", flush=True)
                 return
-            role = choose_role(state, bool(args.review_model), bool(args.routine_model), args.review_every)
-            model = {"coding": args.model, "routine": args.routine_model, "review": args.review_model}[role]
+            role = choose_role(state, bool(args.review_model), bool(args.routine_model), args.review_every, bool(args.complex_model))
+            model = {"coding": args.model, "routine": args.routine_model, "complex": args.complex_model, "review": args.review_model}[role]
             print(f"Starting {role} unit for {args.issue} using {model or 'CLI default'}.", flush=True)
             result = execute_unit(args.codex, worktree, state_dir, state, args.issue, model, role, bool(args.review_model))
             if result is None:
+                if args.no_quota_monitor:
+                    raise RuntimeError(f"Worker failed. Quota monitoring is disabled; inspect logs in {state_dir} before resuming.")
                 _, wake = quota_decision(read_quota(args.codex), args.threshold, time.time(), args.quota_window)
                 if wake is None:
                     raise RuntimeError(f"Codex failed without a confirmed quota limit. Inspect logs in {state_dir}.")

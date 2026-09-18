@@ -1,5 +1,10 @@
 # Quota-aware continuation
 
+The current Pro workflow runs with `--no-quota-monitor`: no quota metadata polling
+and no proactive five-hour or weekly pauses. Actual worker/provider failures stop
+the runner with logs; this mode does not bypass provider-enforced limits. The
+optional quota controls below remain available if explicitly re-enabled.
+
 `scripts/quota_runner.py` is a local supervisor for a bounded Beads issue. It uses
 the installed Codex CLI login and an explicitly selected model, or the CLI/session
 default when `--model` is omitted. It starts a separate CLI
@@ -30,10 +35,13 @@ python scripts/quota_runner.py --check --quota-window primary
 # Run from an existing dedicated worktree, until this issue is done or blocked.
 python scripts/quota_runner.py --worktree "$PWD" --issue sj-kfw \
   --model gpt-5.6-terra --routine-model gpt-5.6-luna \
-  --review-model gpt-6-astra --review-every 4 --quota-window primary
+  --complex-model gpt-5.6-sol --review-model gpt-6-astra \
+  --review-every 4 --no-quota-monitor
 ```
 
-Terra is the default coding worker. It can assign an explicit bounded routine task
+Terra is the default coding worker. Sol handles explicitly routed complex coding,
+including concurrency, data integrity, migration and difficult debugging. Terra
+can assign an explicit bounded routine task
 to Luna through the structured `next_kind`/`next_task` handoff; examples include
 styling, documentation and fixtures. Core persistence, recovery, filesystem and
 architectural work stays with the main coder or reviewer. Workers run sequentially
@@ -45,9 +53,14 @@ and before accepting completion. A worker's `done` becomes a pending completion
 review. Findings are recorded in Beads and routed back to coding; only a review
 can confirm completion. Reviewers inspect code/tests and change only review
 bookkeeping. Missing essential access or user decisions still stop the runner.
+Use `--resume-blocked` to explicitly retry a stopped investigation; this preserves
+the prior checkpoint and session IDs. It never reopens completed work. Failed
+tests and installable missing tools should route to investigation rather than
+being treated as missing user authorization.
+
 The review gate governs supervisor completion; worker adherence to issue status
 and code-scope instructions is also checked by the reviewer, not enforced by a
-filesystem sandbox. All roles pass through the same five-hour quota check.
+filesystem sandbox. All roles follow the selected monitoring policy.
 
 The user has authorized noninteractive unrestricted development for this project.
 The runner therefore passes `approval_policy="never"` and

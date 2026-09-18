@@ -16,6 +16,35 @@ def quota(primary=10, secondary=20, primary_reset=1500, secondary_reset=9000):
 
 
 class QuotaRunnerTests(unittest.TestCase):
+    def test_complex_coding_uses_stronger_role_but_review_takes_priority(self):
+        state = {"review_initialized": True, "next_kind": "complex", "next_task": "Diagnose a save race"}
+        self.assertEqual(runner.choose_role(state, True, True, 4, True), "complex")
+        self.assertEqual(runner.choose_role(state, True, True, 4, False), "coding")
+        state["completion_pending"] = True
+        self.assertEqual(runner.choose_role(state, True, True, 4, True), "review")
+
+    def test_no_monitor_resumes_checkpoint_without_quota_calls(self):
+        for fails in (False, True):
+            with self.subTest(fails=fails), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                common = root / "git"
+                state_dir = common / "quota-runner"
+                state_dir.mkdir(parents=True)
+                runner.write_json(state_dir / "state.json", {"worktree": str(root), "issue": "sj-kfw",
+                    "status": "blocked", "summary": "Native test needs diagnosis", "thread": "saved-session"})
+                result = None if fails else {"status": "done", "summary": "Verified", "next_kind": "coding", "next_task": ""}
+                with patch("sys.argv", ["runner", "--worktree", str(root), "--no-quota-monitor", "--resume-blocked", "--max-turns", "1"]), \
+                     patch.object(runner.subprocess, "check_output", side_effect=[str(common), str(common / "worktrees" / "test")]), \
+                     patch.object(runner, "read_quota", side_effect=AssertionError("Quota must not be read")) as checks, \
+                     patch.object(runner, "execute_unit", return_value=result) as worker:
+                    if fails:
+                        with self.assertRaisesRegex(RuntimeError, "monitoring is disabled"):
+                            runner.main()
+                    else:
+                        runner.main()
+                    self.assertEqual(worker.call_args.args[3]["thread"], "saved-session")
+                    checks.assert_not_called()
+
     def test_routing_reviews_first_and_bounds_time_between_reviews(self):
         self.assertEqual(runner.choose_role({}, True, True, 4), "review")
         state = {"review_initialized": True, "units_since_review": 0}
