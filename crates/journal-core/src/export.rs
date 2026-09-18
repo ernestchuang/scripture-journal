@@ -1,12 +1,15 @@
 use super::*;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
+#[cfg(not(unix))]
+use std::io::Write;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::Read,
     path::PathBuf,
 };
+#[cfg(not(unix))]
 use tempfile::NamedTempFile;
 
 #[cfg(unix)]
@@ -143,10 +146,15 @@ fn export_one(
     manifest_bytes: &mut Option<Vec<u8>>,
 ) -> Result<bool> {
     validate_id(&revision.entry_id)?;
-    let target = directory.join(format!("{}.md", revision.entry_id));
+    let name = format!("{}.md", revision.entry_id);
+    let target = directory.join(&name);
     let output = render(revision, published)?;
     let expected = digest(output.as_bytes());
-    let existing = read_optional(&target)?;
+    #[cfg(unix)]
+    let read_target = || manifest_directory.read_optional(&name);
+    #[cfg(not(unix))]
+    let read_target = || read_optional(&target);
+    let existing = read_target()?;
     let receipt = manifest.receipts.get(&revision.entry_id);
     match (&existing, receipt) {
         (Some(_), None) => bail!("Unowned file collision; file preserved"),
@@ -176,11 +184,17 @@ fn export_one(
         .or_default()
         .pending_hash = Some(expected.clone());
     write_manifest(manifest_directory, manifest, manifest_bytes)?;
-    let mut temp = NamedTempFile::new_in(directory)?;
-    temp.write_all(output.as_bytes())?;
-    temp.as_file().sync_all()?;
+    #[cfg(unix)]
+    let temp = manifest_directory.stage(output.as_bytes())?;
+    #[cfg(not(unix))]
+    let temp = {
+        let mut temp = NamedTempFile::new_in(directory)?;
+        temp.write_all(output.as_bytes())?;
+        temp.as_file().sync_all()?;
+        temp
+    };
     ensure!(
-        read_optional(&target)? == existing,
+        read_target()? == existing,
         "Destination changed during export; file preserved"
     );
     if let Some(old_bytes) = &existing {
@@ -202,10 +216,16 @@ fn export_one(
             );
         }
     }
-    temp.persist_noclobber(&target)
-        .map_err(|e| e.error)
+    #[cfg(unix)]
+    temp.install_noclobber(&name)
         .context("Destination appeared during export; recovery copy preserved")?;
-    File::open(directory)?.sync_all()?;
+    #[cfg(not(unix))]
+    {
+        temp.persist_noclobber(&target)
+            .map_err(|e| e.error)
+            .context("Destination appeared during export; recovery copy preserved")?;
+        File::open(directory)?.sync_all()?;
+    }
     let receipt = manifest.receipts.get_mut(&revision.entry_id).unwrap();
     receipt.hash = Some(expected);
     receipt.pending_hash = None;
@@ -472,6 +492,98 @@ mod manifest_tests {
         fs::write(&path, b"external manifest").unwrap();
         assert!(install_manifest(temp, directory, None).is_err());
         assert_eq!(fs::read(path).unwrap(), b"external manifest");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn entry_creation_reads_and_conflicts_stay_pinned_after_directory_swap() {
+        for state in ["new", "unchanged", "edited"] {
+            let root = tempfile::tempdir().unwrap();
+            let base = root.path().canonicalize().unwrap();
+            let selected = base.join("selected");
+            let moved = base.join("moved");
+            let outside = base.join("outside");
+            let handle = ManifestDirectory::open(&selected).unwrap();
+            let revision = Revision {
+                id: Uuid::new_v4().to_string(),
+                entry_id: Uuid::new_v4().to_string(),
+                parent_id: None,
+                restored_from_id: None,
+                created_at: "2026-09-17T00:00:00Z".into(),
+                content: EntryContent {
+                    body: "Synthetic private reflection".into(),
+                    ..Default::default()
+                },
+            };
+            let published = std::slice::from_ref(&revision);
+            let name = format!("{}.md", revision.entry_id);
+            let output = render(&revision, published).unwrap();
+            let mut manifest = Manifest {
+                version: 1,
+                journal_id: "synthetic journal".into(),
+                installation_id: "synthetic installation".into(),
+                receipts: BTreeMap::new(),
+            };
+            let mut previous = None;
+            if state != "new" {
+                assert!(export_one(
+                    &selected,
+                    &handle,
+                    &revision,
+                    published,
+                    &mut manifest,
+                    &mut previous
+                )
+                .unwrap());
+            }
+            if state == "edited" {
+                fs::write(selected.join(&name), b"retained external edit").unwrap();
+            }
+            fs::create_dir(&outside).unwrap();
+            fs::write(outside.join(&name), b"outside entry").unwrap();
+            fs::write(outside.join(MANIFEST), b"outside manifest").unwrap();
+            fs::rename(&selected, &moved).unwrap();
+            std::os::unix::fs::symlink(&outside, &selected).unwrap();
+            let result = export_one(
+                &selected,
+                &handle,
+                &revision,
+                published,
+                &mut manifest,
+                &mut previous,
+            );
+            if state == "edited" {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("changed externally"));
+                assert_eq!(
+                    fs::read(moved.join(&name)).unwrap(),
+                    b"retained external edit"
+                );
+            } else {
+                assert_eq!(result.unwrap(), state == "new");
+                assert_eq!(fs::read(moved.join(&name)).unwrap(), output.as_bytes());
+                let saved: Manifest =
+                    serde_json::from_slice(&fs::read(moved.join(MANIFEST)).unwrap()).unwrap();
+                assert_eq!(
+                    saved.receipts[&revision.entry_id].hash.as_deref(),
+                    Some(digest(output.as_bytes()).as_str())
+                );
+                assert!(saved.receipts[&revision.entry_id].pending_hash.is_none());
+            }
+            assert_eq!(fs::read(outside.join(&name)).unwrap(), b"outside entry");
+            assert_eq!(
+                fs::read(outside.join(MANIFEST)).unwrap(),
+                b"outside manifest"
+            );
+            assert_eq!(fs::read_dir(&outside).unwrap().count(), 2);
+            assert!(!fs::read_dir(&moved).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".scripture-journal-stage-")));
+        }
     }
 
     #[cfg(unix)]
