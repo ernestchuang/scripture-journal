@@ -133,4 +133,22 @@ describe('native application close lifecycle', () => {
     fireEvent.change(editor, { target: { value: 'Editing can continue' } });
     expect((editor as HTMLTextAreaElement).value).toBe('Editing can continue');
   });
+
+  it('keeps a dirty editor intact while browsing retained plan assignments', async () => {
+    native.listPlanEnrollments.mockResolvedValueOnce([
+      { id: 'enrollment-1', definitionVersionId: 'version-1', createdAt: '2026-09-18T00:00:00Z' },
+      { id: 'enrollment-2', definitionVersionId: 'version-2', createdAt: '2026-09-18T00:00:01Z' },
+    ]);
+    native.getPlanDefinitionVersion.mockImplementation(async (id: string) => ({ id, planId: 'plan', version: 1, createdAt: '2026-09-18T00:00:00Z', definition: { schemaVersion: 1, name: id, schedule: { kind: 'chapterStreams', streams: [] } } }));
+    native.activePlanAssignments.mockResolvedValue([]);
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    fireEvent.change(editor, { target: { value: 'Keep this draft' } });
+    const select = await screen.findByLabelText('Retained enrollment');
+    fireEvent.change(select, { target: { value: 'enrollment-2' } });
+    await screen.findByText('version-2');
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this draft');
+    expect(native.saveEntry).not.toHaveBeenCalled();
+  });
 });

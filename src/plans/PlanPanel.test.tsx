@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { PlanDefinitionApi, PlanEnrollment } from '../platform/plans';
 import { PlanPanel } from './PlanPanel';
 
@@ -24,10 +24,19 @@ describe('retained plan panel', () => {
     expect(plans.activePlanAssignments).toHaveBeenCalledWith(first.id);
   });
 
-  it('distinguishes an empty retained list from a failed load', async () => {
+  it('renders an empty retained list', async () => {
     const plans = api(); vi.mocked(plans.listPlanEnrollments).mockResolvedValueOnce([]);
     render(<PlanPanel api={plans} />);
     expect(await screen.findByText('No retained plan enrollments yet.')).toBeTruthy();
+  });
+
+  it('reports a rejected list and retries without falsely showing empty', async () => {
+    const plans = api(); vi.mocked(plans.listPlanEnrollments).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce([first]);
+    render(<PlanPanel api={plans} />);
+    expect(await screen.findByText(/Could not load retained plans: Error: offline/)).toBeTruthy();
+    expect(screen.queryByText('No retained plan enrollments yet.')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry plans' }));
+    expect(await screen.findByText('First plan')).toBeTruthy();
   });
 
   it('reports a missing pinned definition and retries explicitly', async () => {
@@ -39,6 +48,16 @@ describe('retained plan panel', () => {
     expect(await screen.findByText('Recovered plan')).toBeTruthy();
   });
 
+  it('reports a rejected assignment without falsely reporting exhaustion and retries', async () => {
+    const plans = api(); vi.mocked(plans.listPlanEnrollments).mockResolvedValueOnce([first]);
+    vi.mocked(plans.activePlanAssignments).mockRejectedValueOnce(new Error('assignment unavailable')).mockResolvedValueOnce([]);
+    render(<PlanPanel api={plans} />);
+    expect(await screen.findByText(/assignment unavailable/)).toBeTruthy();
+    expect(screen.queryByText(/enrollment is exhausted/i)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry selection' }));
+    expect(await screen.findByText(/enrollment is exhausted/i)).toBeTruthy();
+  });
+
   it('ignores late detail responses after selecting another enrollment', async () => {
     let resolveFirst!: (value: ReturnType<typeof definition>) => void;
     const plans = api();
@@ -48,7 +67,28 @@ describe('retained plan panel', () => {
     const select = await screen.findByLabelText('Retained enrollment');
     fireEvent.change(select, { target: { value: second.id } });
     expect(await screen.findByText('Second plan')).toBeTruthy();
-    resolveFirst(definition(first.definitionVersionId, 'Stale first plan'));
-    await waitFor(() => expect(screen.queryByText('Stale first plan')).toBeNull());
+    await act(async () => { resolveFirst(definition(first.definitionVersionId, 'Stale first plan')); });
+    expect(screen.getByText('Second plan')).toBeTruthy();
+    expect(screen.queryByText('Stale first plan')).toBeNull();
+  });
+
+  it('discards pending list and detail responses after unmount', async () => {
+    let resolveList!: (value: PlanEnrollment[]) => void;
+    const plans = api(); vi.mocked(plans.listPlanEnrollments).mockImplementationOnce(() => new Promise(resolve => { resolveList = resolve; }));
+    const listView = render(<PlanPanel api={plans} />); listView.unmount();
+    await act(async () => { resolveList([first]); });
+
+    let resolveDefinition!: (value: ReturnType<typeof definition>) => void;
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValueOnce([first]);
+    vi.mocked(plans.getPlanDefinitionVersion).mockImplementationOnce(() => new Promise(resolve => { resolveDefinition = resolve; }));
+    const detailView = render(<PlanPanel api={plans} />);
+    await screen.findByLabelText('Retained enrollment'); detailView.unmount();
+    await act(async () => { resolveDefinition(definition(first.definitionVersionId, 'Late plan')); });
+    expect(screen.queryByText('Late plan')).toBeNull();
+  });
+
+  it('identifies browser preview plans as native-only', () => {
+    render(<PlanPanel />);
+    expect(screen.getByText('Plans are available in the native desktop app.')).toBeTruthy();
   });
 });
