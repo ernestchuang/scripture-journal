@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CalendarEnrollmentRequest, CalendarPlanEnrollment, CalendarScheduleMode, DatedPlanAssignment, PlanAssignment, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, StreamEnrollment } from '../platform/plans';
 import type { PlanDefinitionApi } from '../platform/plans';
 import { formatPassage } from '../scripture/books';
@@ -185,6 +185,9 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const readyHistory = useRef(new Map<string, ReadyPlanHistory>());
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
+  const streamEnrollments = useMemo(() => enrollments !== null && calendarEnrollments?.kind === 'ready'
+    ? enrollments.filter(enrollment => !calendarEnrollments.items.some(calendar => calendar.id === enrollment.id))
+    : null, [calendarEnrollments, enrollments]);
 
   useEffect(() => () => {
     actionEpoch.current += 1;
@@ -242,6 +245,13 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     });
     return () => { active = false; };
   }, [api, enrollments, calendarEnrollmentAttempt]);
+
+  useEffect(() => {
+    if (streamEnrollments === null) return;
+    setSelectedId(current => streamEnrollments.some(enrollment => enrollment.id === current)
+      ? current
+      : (streamEnrollments[0]?.id ?? ''));
+  }, [streamEnrollments]);
 
   useEffect(() => {
     if (!api || !selectedCalendarEnrollmentId) { setCalendarAssignments(null); return; }
@@ -384,8 +394,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   }, [api, attempt]);
 
   useEffect(() => {
-    const enrollment = enrollments?.find(item => item.id === selectedId);
-    if (!api || !enrollment) return;
+    const enrollment = streamEnrollments?.find(item => item.id === selectedId);
+    if (!api || !enrollment) { setDetails(null); return; }
     let active = true;
     const epoch = ++detailEpoch.current;
     setDetails({ kind: 'loading' });
@@ -405,11 +415,11 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       setDetails(ready);
     }).catch(error => { if (active && epoch === detailEpoch.current) setDetails({ kind: 'error', message: String(error) }); });
     return () => { active = false; };
-  }, [api, detailAttempt, enrollments, selectedId]);
+  }, [api, detailAttempt, selectedId, streamEnrollments]);
 
   useEffect(() => {
-    const enrollment = enrollments?.find(item => item.id === selectedId);
-    if (!api || !enrollment) return;
+    const enrollment = streamEnrollments?.find(item => item.id === selectedId);
+    if (!api || !enrollment) { setHistory(null); return; }
     let active = true;
     const epoch = ++historyEpoch.current;
     const retained = readyHistory.current.get(enrollment.id);
@@ -436,7 +446,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       } else setHistory({ kind: 'error', message: String(error) });
     });
     return () => { active = false; };
-  }, [api, enrollments, historyAttempt, selectedId]);
+  }, [api, historyAttempt, selectedId, streamEnrollments]);
 
   async function prepareEnrollment() {
     if (!api || preparing || enrolling) return;
@@ -850,9 +860,9 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     {calendarEnrollments?.kind === 'loading' && <p role="status">Loading retained calendar enrollments…</p>}
     {calendarEnrollments?.kind === 'error' && <div role="alert" className="plan-error">Could not load retained calendar enrollments: {calendarEnrollments.message}<button onClick={() => setCalendarEnrollmentAttempt(value => value + 1)}>Retry calendar enrollments</button></div>}
     {calendarEnrollments?.kind === 'ready' && calendarEnrollments.items.length > 0 && <CalendarAssignments items={calendarEnrollments.items} selectedId={selectedCalendarEnrollmentId} assignments={calendarAssignments} onSelect={setSelectedCalendarEnrollmentId} onRetry={() => setCalendarAssignmentAttempt(value => value + 1)} />}
-    {enrollments && enrollments.length > 0 && <>
+    {streamEnrollments && streamEnrollments.length > 0 && <>
       <label>Retained enrollment<select value={selectedId} onChange={event => setSelectedId(event.target.value)}>
-        {enrollments.map(enrollment => <option key={enrollment.id} value={enrollment.id}>{enrollment.id}</option>)}
+        {streamEnrollments.map(enrollment => <option key={enrollment.id} value={enrollment.id}>{enrollment.id}</option>)}
       </select></label>
       {details?.kind === 'loading' && <p role="status">Loading current assignments…</p>}
       {details?.kind === 'error' && <div role="alert" className="plan-error">Could not load this retained plan: {details.message}<button onClick={() => setDetailAttempt(value => value + 1)}>Retry selection</button></div>}

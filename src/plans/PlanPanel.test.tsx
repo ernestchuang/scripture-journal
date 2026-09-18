@@ -469,6 +469,60 @@ describe('retained plan panel', () => {
     expect(vi.mocked(plans.listPlanEnrollments).mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('keeps a calendar-only restart out of stream exhaustion, completion, and history UI', async () => {
+    const retained = { ...calendarEnrollment, id: 'calendar-only' };
+    const enrollment: PlanEnrollment = { id: retained.id, definitionVersionId: retained.definitionVersionId, createdAt: retained.createdAt };
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValue([enrollment]);
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedCalendar]);
+    vi.mocked(plans.getCalendarPlanEnrollment).mockResolvedValue(retained);
+    vi.mocked(plans.calendarPlanAssignments).mockResolvedValue([{ id: 'dated-only', enrollmentId: retained.id, definitionVersionId: retained.definitionVersionId, definitionDay: 60, localDate: retained.startDate, passages: [{ book: 2, chapter: 12, startVerse: 21, endVerse: 51 }] }]);
+    render(<PlanPanel api={plans} />);
+    expect(await screen.findByText('2026-03-01')).toBeTruthy();
+    expect(screen.queryByLabelText('Retained enrollment')).toBeNull();
+    expect(screen.queryByText(/enrollment is exhausted/i)).toBeNull();
+    expect(screen.queryByLabelText('Current plan assignments')).toBeNull();
+    expect(screen.queryByLabelText('Retained completion history')).toBeNull();
+    expect(plans.activePlanAssignments).not.toHaveBeenCalled();
+    expect(plans.planCompletionHistory).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button', { name: 'Export retained definition JSON' }));
+    expect((await screen.findByLabelText('Exported retained plan JSON') as HTMLTextAreaElement).value).toBe(`{"versionId":"${retainedCalendar.id}"}`);
+  });
+
+  it('keeps calendar enrollments out of mixed stream selection while preserving stream controls', async () => {
+    const retained = { ...calendarEnrollment, id: 'calendar-mixed' };
+    const calendar: PlanEnrollment = { id: retained.id, definitionVersionId: retained.definitionVersionId, createdAt: retained.createdAt };
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValue([calendar, first]);
+    vi.mocked(plans.getCalendarPlanEnrollment).mockImplementation(async id => id === calendar.id ? retained : null);
+    vi.mocked(plans.calendarPlanAssignments).mockResolvedValue([]);
+    render(<PlanPanel api={plans} />);
+    expect(await screen.findByText('No retained calendar assignments.')).toBeTruthy();
+    const selector = await screen.findByLabelText('Retained enrollment') as HTMLSelectElement;
+    expect(Array.from(selector.options, option => option.value)).toEqual([first.id]);
+    expect(await screen.findByLabelText('Current plan assignments')).toBeTruthy();
+    expect(await screen.findByLabelText('Retained completion history')).toBeTruthy();
+    expect(plans.activePlanAssignments).toHaveBeenCalledWith(first.id);
+    expect(plans.planCompletionHistory).toHaveBeenCalledWith(first.id);
+    expect(plans.activePlanAssignments).not.toHaveBeenCalledWith(calendar.id);
+    expect(plans.planCompletionHistory).not.toHaveBeenCalledWith(calendar.id);
+  });
+
+  it('keeps a confirmed calendar creation out of stream UI after discovery refresh', async () => {
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedCalendar]);
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValue([]);
+    vi.mocked(plans.getCalendarPlanEnrollment).mockImplementation(async id => id === calendarEnrollment.id ? calendarEnrollment : null);
+    vi.mocked(plans.calendarPlanAssignments).mockResolvedValue([]);
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Create calendar enrollment' }));
+    expect(await screen.findByText('No retained calendar assignments.')).toBeTruthy();
+    expect(screen.queryByLabelText('Retained enrollment')).toBeNull();
+    expect(screen.queryByText(/enrollment is exhausted/i)).toBeNull();
+    expect(plans.activePlanAssignments).not.toHaveBeenCalled();
+    expect(plans.planCompletionHistory).not.toHaveBeenCalled();
+  });
+
   it('retries retained calendar discovery and assignment reads after failures', async () => {
     const retained = { ...calendarEnrollment, id: 'calendar-retry' };
     const enrollment: PlanEnrollment = { id: retained.id, definitionVersionId: retained.definitionVersionId, createdAt: retained.createdAt };
@@ -1000,7 +1054,7 @@ describe('retained plan panel', () => {
       { streamId: 'short', startingPosition: 0, loopAfterEnd: false },
     ]);
     expect(await screen.findByText(/Custom-plan enrollment custom-enrollment was created for definition version custom-version/)).toBeTruthy();
-    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(customEnrollment.id);
+    expect((await screen.findByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(customEnrollment.id);
   });
 
   it('reports custom enrollment rejection, retains choices, and permits one explicit retry', async () => {
