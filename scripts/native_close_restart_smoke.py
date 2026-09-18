@@ -32,7 +32,7 @@ except (ImportError, ValueError) as error:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "src-tauri" / "target" / "debug" / "scripture-journal"
+BINARY = Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "src-tauri" / "target"))) / "debug" / "scripture-journal"
 BODY = "Native close restart synthetic draft"
 DIRTY_BODY = "Dirty"
 
@@ -58,7 +58,9 @@ def wait_for_window(pid: int) -> dict[str, object]:
 def prepare_window(window: dict[str, object]) -> dict[str, object]:
     address = window["address"]
     run("hyprctl", "dispatch", f'hl.dsp.focus({{ window = "address:{address}" }})')
-    run("hyprctl", "dispatch", f'hl.dsp.window.fullscreen({{ window = "address:{address}", mode = 0 }})')
+    current = next((item for item in clients() if item.get("address") == address), window)
+    if not current.get("fullscreen"):
+        run("hyprctl", "dispatch", f'hl.dsp.window.fullscreen({{ window = "address:{address}", mode = "fullscreen" }})')
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         for current in clients():
@@ -103,7 +105,12 @@ def wait_for_accessible(
 
 def named(node: object, value: str) -> bool:
     try:
-        return value.casefold() in (node.get_name() or "").casefold()
+        if value.casefold() in (node.get_name() or "").casefold():
+            return True
+        if node.get_state_set().contains(Atspi.StateType.EDITABLE):
+            text = node.get_text_iface()
+            return text is not None and value.casefold() in text.get_text(0, -1).casefold()
+        return False
     except Exception:
         return False
 
@@ -137,6 +144,12 @@ def send_text(window: dict[str, object], value: str) -> None:
 
 
 def focus_accessible_with_tabs(pid: int, window: dict[str, object], expected: str) -> object:
+    try:
+        return wait_for_accessible(pid, lambda node: named(node, expected)
+                                   and node.get_state_set().contains(Atspi.StateType.FOCUSED),
+                                   f"already focused {expected}", timeout=0.1)
+    except RuntimeError:
+        pass
     for _ in range(30):
         send_shortcut(window, "TAB")
         try:
@@ -229,17 +242,21 @@ def assert_working_head(database: Path, entry_id: str, expected_body: str) -> No
         )
 
 
-def reopen_saved_entry(pid: int, expected_body: str) -> None:
+def reopen_saved_entry(pid: int, window: dict[str, object], expected_body: str) -> None:
     entry = wait_for_accessible(
         pid,
         lambda node: node.get_role_name() == "button" and named(node, "John 1") and named(node, "Draft"),
         "recovered draft in the journal list",
     )
     activate(entry, "recovered draft")
-    body = wait_for_accessible(pid, lambda node: named(node, expected_body), "recovered draft body")
-    state = body.get_state_set()
-    if not state.contains(Atspi.StateType.VISIBLE) or not state.contains(Atspi.StateType.SHOWING):
-        raise RuntimeError("Recovered draft body exists but is not visibly showing in the native editor")
+    # Additional journal controls can put the body below the fold. Keyboard focus
+    # scrolls the real editor into view before asserting rendered recovery.
+    focus_accessible_with_tabs(pid, window, expected_body)
+    wait_for_accessible(pid, lambda node: named(node, expected_body)
+                        and node.get_state_set().contains(Atspi.StateType.FOCUSED)
+                        and node.get_state_set().contains(Atspi.StateType.VISIBLE)
+                        and node.get_state_set().contains(Atspi.StateType.SHOWING),
+                        "visibly focused recovered draft body")
 
 
 def start(environment: dict[str, str]) -> subprocess.Popen[str]:
@@ -272,7 +289,7 @@ def main() -> int:
             try:
                 second_window = prepare_window(wait_for_window(second.pid))
                 assert_working_head(database, entry_id, BODY)
-                reopen_saved_entry(second.pid, BODY)
+                reopen_saved_entry(second.pid, second_window, BODY)
                 replace_body_without_waiting_for_autosave(second.pid, second_window)
                 # This is state evidence, not an inference from elapsed time: the
                 # webview exposes the new body while SQLite still has the prior head.
@@ -284,7 +301,7 @@ def main() -> int:
                 try:
                     third_window = prepare_window(wait_for_window(third.pid))
                     assert_working_head(database, entry_id, DIRTY_BODY)
-                    reopen_saved_entry(third.pid, DIRTY_BODY)
+                    reopen_saved_entry(third.pid, third_window, DIRTY_BODY)
                     close_window(third_window)
                     third.wait(timeout=15)
                 finally:
