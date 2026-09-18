@@ -29,6 +29,8 @@ version eligible for export. Restoring history creates a new unfinished revision
 
 Use **Appearance** in the header to select **System**, **Light**, or **Dark**.
 System follows the device appearance; explicit choices persist on this device.
+Use **Import theme** for a custom [TOML palette](docs/THEMES.md). Linux also offers
+**Follow Omarchy**, which follows its active palette without changing OS settings.
 The app initializes its colors before showing the native window. Browser tests
 run headlessly with a dark default, and the isolated native debug smoke requests
 dark mode. Native smoke automation still temporarily focuses its test window;
@@ -47,6 +49,10 @@ from retained recovery files instead of initializing a new manifest. Concurrent
 edits cannot be made atomic with unrelated editors; displaced files are retained
 for recovery. Keep the original app in use
 until the release and migration checks are complete.
+
+See [changes worth knowing about](docs/CHANGES.md) for delivered behavior and
+helpful additions, including recovery of conflicting drafts and saving during
+continuous typing.
 
 On Unix, export holds directory handles for the destination and recovery folder;
 subsequent reads, staging, installation, and recovery use those handles. Replacing
