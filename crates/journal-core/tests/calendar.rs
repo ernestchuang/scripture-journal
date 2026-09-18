@@ -1,8 +1,9 @@
 use chrono::NaiveDate;
 use journal_core::{
     expand_calendar_assignments, four_stream_plan_definition, mcheyne_plan_definition,
-    CalendarScheduleMode, ChapterStream, EntryContent, ExplicitScheduleDay, JournalStore, Passage,
-    PlanDefinition, PlanDefinitionVersion, PlanSchedule, SaveRequest, StreamEnrollment,
+    CalendarScheduleMode, ChapterRef, ChapterStream, CompleteStreamRequest, EntryContent,
+    ExplicitScheduleDay, JournalStore, Passage, PlanDefinition, PlanDefinitionVersion,
+    PlanSchedule, SaveRequest, StreamEnrollment,
 };
 use tempfile::TempDir;
 
@@ -287,20 +288,44 @@ fn calendar_rows_are_immutable_retained_and_version_owned() {
             .contains(expected));
         assert_eq!(calendar_fingerprint(&path), retained);
     }
-    let error = conn
-        .execute(
-            "INSERT INTO plan_calendar_assignments(id,enrollment_id,definition_version_id,definition_day,local_date,passages) VALUES(?1,?2,?3,366,'2026-01-01',?4)",
-            rusqlite::params![
-                "00000000-0000-4000-8000-000000000099",
-                enrollment.id,
-                other.id,
-                serde_json::to_string(&assignment.passages).unwrap(),
-            ],
-        )
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("Calendar assignment must belong to its enrollment version"));
+    let day_one_passages = definition_day(&version.definition, 1).passages.clone();
+    for (id, definition_version_id, definition_day, passages) in [
+        (
+            "00000000-0000-4000-8000-000000000097",
+            other.id.as_str(),
+            365,
+            assignment.passages.clone(),
+        ),
+        (
+            "00000000-0000-4000-8000-000000000098",
+            version.id.as_str(),
+            1,
+            assignment.passages.clone(),
+        ),
+        (
+            "00000000-0000-4000-8000-000000000099",
+            version.id.as_str(),
+            365,
+            day_one_passages,
+        ),
+    ] {
+        let error = conn
+            .execute(
+                "INSERT INTO plan_calendar_assignments(id,enrollment_id,definition_version_id,definition_day,local_date,passages) VALUES(?1,?2,?3,?4,'2026-01-01',?5)",
+                rusqlite::params![
+                    id,
+                    enrollment.id,
+                    definition_version_id,
+                    definition_day,
+                    serde_json::to_string(&passages).unwrap(),
+                ],
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Calendar assignment must belong to its enrollment version"));
+        assert_eq!(calendar_fingerprint(&path), retained);
+    }
     drop(conn);
     assert_eq!(calendar_fingerprint(&path), retained);
     assert_eq!(
@@ -317,7 +342,7 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
     let mut store = JournalStore::open(&path).unwrap();
-    let entry = store
+    let published_target = store
         .save_entry(SaveRequest {
             entry_id: "00000000-0000-4000-8000-000000000010".into(),
             expected_revision_id: None,
@@ -331,7 +356,48 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
             finish: true,
         })
         .unwrap();
+    let working_target = store
+        .save_entry(SaveRequest {
+            entry_id: published_target.id.clone(),
+            expected_revision_id: Some(published_target.working_revision_id.clone()),
+            content: EntryContent {
+                title: "Migration fixture draft".into(),
+                body: "Retained unfinished edit".into(),
+                passages: vec![whole_chapter(43, 3)],
+                tags: vec!["retained".into()],
+                links: vec![],
+            },
+            finish: false,
+        })
+        .unwrap();
+    store
+        .save_entry(SaveRequest {
+            entry_id: "00000000-0000-4000-8000-000000000011".into(),
+            expected_revision_id: None,
+            content: EntryContent {
+                title: "Linked source".into(),
+                body: "Retained link".into(),
+                passages: vec![],
+                tags: vec![],
+                links: vec![working_target.id.clone()],
+            },
+            finish: true,
+        })
+        .unwrap();
     let version = store.create_plan_definition(stream_definition()).unwrap();
+    let mut changed = stream_definition();
+    changed.name = "Synthetic stream version two".into();
+    let PlanSchedule::ChapterStreams { streams } = &mut changed.schedule else {
+        unreachable!();
+    };
+    streams[0].chapters.push(ChapterRef {
+        book: 1,
+        chapter: 2,
+    });
+    let second_version = store
+        .create_plan_definition_version(&version.plan_id, changed)
+        .unwrap();
+    let built_in = store.register_mcheyne_plan().unwrap();
     let enrollment = store
         .enroll_in_chapter_streams(
             &version.id,
@@ -342,7 +408,16 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
             }],
         )
         .unwrap();
-    let assignments = store.active_plan_assignments(&enrollment.id).unwrap();
+    let assignment = store.active_plan_assignments(&enrollment.id).unwrap()[0].clone();
+    let completion = store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: assignment.stream_id,
+            expected_assignment_id: assignment.id,
+            expected_progress_id: assignment.progress_id,
+        })
+        .unwrap();
+    store.undo_plan_completion(&completion.id).unwrap();
     drop(store);
 
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -354,29 +429,82 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
     .unwrap();
     drop(conn);
 
+    let retained = schema_seven_fingerprint(&path);
     let reopened = JournalStore::open(&path).unwrap();
-    assert_eq!(reopened.list_entries().unwrap()[0].id, entry.id);
+    assert_eq!(schema_seven_fingerprint(&path), retained);
+    assert_eq!(reopened.get_history(&working_target.id).unwrap().len(), 2);
     assert_eq!(
         reopened
             .list_plan_definition_versions(&version.plan_id)
             .unwrap(),
-        vec![version]
+        vec![version, second_version]
     );
+    drop(reopened);
+    assert_database_integrity(&path, 8);
+
+    let mut reopened_again = JournalStore::open(&path).unwrap();
+    assert_eq!(schema_seven_fingerprint(&path), retained);
+    assert_database_integrity(&path, 8);
+    let calendar = reopened_again
+        .enroll_in_calendar(
+            &built_in.id,
+            date(2025, 12, 31),
+            CalendarScheduleMode::CalendarAligned,
+        )
+        .unwrap();
     assert_eq!(
-        reopened.active_plan_assignments(&enrollment.id).unwrap(),
-        assignments
-    );
-    assert!(reopened
-        .calendar_plan_assignments(&enrollment.id)
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        rusqlite::Connection::open(path)
+        reopened_again
+            .calendar_plan_assignments(&calendar.id)
             .unwrap()
-            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
-            .unwrap(),
-        8
+            .len(),
+        1
     );
+}
+
+fn assert_database_integrity(path: &std::path::Path, version: u32) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        version
+    );
+    assert_eq!(
+        conn.pragma_query_value::<String, _>(None, "quick_check", |row| row.get(0))
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, u32>(0)
+        })
+        .unwrap(),
+        0
+    );
+}
+
+fn schema_seven_fingerprint(path: &std::path::Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    [
+        "SELECT group_concat(id||':'||created_at||':'||updated_at||':'||working_revision_id||':'||COALESCE(published_revision_id,'null'),'|') FROM (SELECT * FROM entries ORDER BY id)",
+        "SELECT group_concat(id||':'||entry_id||':'||COALESCE(parent_id,'null')||':'||COALESCE(restored_from_id,'null')||':'||created_at||':'||content,'|') FROM (SELECT * FROM revisions ORDER BY id)",
+        "SELECT group_concat(sequence||':'||operation_id||':'||entry_id||':'||kind||':'||revision_id,'|') FROM (SELECT * FROM changes ORDER BY sequence)",
+        "SELECT group_concat(id||':'||created_at,'|') FROM (SELECT * FROM plans ORDER BY id)",
+        "SELECT group_concat(id||':'||plan_id||':'||version||':'||created_at||':'||definition,'|') FROM (SELECT * FROM plan_definition_versions ORDER BY plan_id,version)",
+        "SELECT group_concat(built_in_id||':'||definition_version_id,'|') FROM (SELECT * FROM built_in_plan_registrations ORDER BY built_in_id)",
+        "SELECT group_concat(id||':'||definition_version_id||':'||created_at,'|') FROM (SELECT * FROM plan_enrollments ORDER BY id)",
+        "SELECT group_concat(enrollment_id||':'||stream_id||':'||loop_after_end,'|') FROM (SELECT * FROM plan_enrollment_streams ORDER BY enrollment_id,stream_id)",
+        "SELECT group_concat(id||':'||enrollment_id||':'||stream_id||':'||ordinal||':'||cycle||':'||passage||':'||COALESCE(stream_position,'null'),'|') FROM (SELECT * FROM plan_assignments ORDER BY id)",
+        "SELECT group_concat(id||':'||assignment_id||':'||completed_at,'|') FROM (SELECT * FROM reading_completions ORDER BY id)",
+        "SELECT group_concat(id||':'||completion_id||':'||undone_at,'|') FROM (SELECT * FROM reading_completion_undos ORDER BY id)",
+        "SELECT group_concat(id||':'||enrollment_id||':'||stream_id||':'||sequence||':'||assignment_id||':'||created_at,'|') FROM (SELECT * FROM plan_stream_progress_epochs ORDER BY id)",
+    ]
+    .into_iter()
+    .map(|query| {
+        conn.query_row(query, [], |row| row.get::<_, Option<String>>(0))
+            .unwrap()
+            .unwrap_or_default()
+    })
+    .collect()
 }
 
 fn calendar_fingerprint(path: &std::path::Path) -> Vec<String> {
