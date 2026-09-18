@@ -195,15 +195,31 @@ fn invalid_links_and_schema_fail_without_partial_entries() {
 
 #[cfg(unix)]
 #[test]
-fn symlink_destinations_are_rejected() {
+fn selected_symlink_destinations_are_rejected_without_touching_outside_files() {
     use std::os::unix::fs::symlink;
     let dir = TempDir::new().unwrap();
-    let store = JournalStore::open(&dir.path().join("j.db")).unwrap();
-    let real = dir.path().join("real");
+    let base = dir.path().canonicalize().unwrap();
+    let mut store = JournalStore::open(&base.join("j.db")).unwrap();
+    store.save_entry(request("Published", true)).unwrap();
+    let real = base.join("real");
     fs::create_dir(&real).unwrap();
-    let link = dir.path().join("link");
-    symlink(&real, &link).unwrap();
+    assert_eq!(store.export_journal(&real).unwrap().written, 1);
+
+    let outside = base.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("external.md"), b"outside bytes").unwrap();
+    let link = base.join("link");
+    symlink(&outside, &link).unwrap();
     assert!(store.export_journal(&link).is_err());
+    let ancestor = base.join("ancestor");
+    symlink(&outside, &ancestor).unwrap();
+    assert!(store.export_journal(&ancestor.join("nested")).is_err());
+
+    assert_eq!(
+        fs::read(outside.join("external.md")).unwrap(),
+        b"outside bytes"
+    );
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
 }
 
 #[test]
