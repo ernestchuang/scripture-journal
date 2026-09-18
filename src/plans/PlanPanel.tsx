@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CalendarEnrollmentRequest, CalendarPlanEnrollment, CalendarScheduleMode, DatedPlanAssignment, PlanAssignment, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, StreamEnrollment } from '../platform/plans';
+import type { CalendarAssignmentCompletion, CalendarEnrollmentRequest, CalendarPlanEnrollment, CalendarScheduleMode, DatedPlanAssignment, PlanAssignment, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, StreamEnrollment } from '../platform/plans';
 import type { PlanDefinitionApi } from '../platform/plans';
 import { formatPassage } from '../scripture/books';
 import './plans.css';
@@ -16,12 +16,17 @@ type PlanHistory =
 type ReadyPlanHistory = Extract<PlanHistory, { kind: 'ready' }>;
 type CalendarRead<T> = { kind: 'loading' } | { kind: 'error'; message: string } | { kind: 'ready'; items: T[] };
 
-function CalendarAssignments({ items, selectedId, assignments, onSelect, onRetry }: {
+function CalendarAssignments({ items, selectedId, assignments, history, completingId, completionError, onSelect, onRetry, onRetryHistory, onComplete }: {
   items: CalendarPlanEnrollment[];
   selectedId: string;
   assignments: CalendarRead<DatedPlanAssignment> | null;
+  history: CalendarRead<CalendarAssignmentCompletion> | null;
+  completingId: string;
+  completionError: string;
   onSelect: (id: string) => void;
   onRetry: () => void;
+  onRetryHistory: () => void;
+  onComplete: (assignment: DatedPlanAssignment) => void;
 }) {
   const selected = items.find(item => item.id === selectedId);
   return <section className="plan-history" aria-label="Retained calendar assignments">
@@ -30,7 +35,10 @@ function CalendarAssignments({ items, selectedId, assignments, onSelect, onRetry
     {selected && <p>Calendar policy {selected.scheduleMode}, starting {selected.startDate}; definition version {selected.definitionVersionId}.</p>}
     {assignments?.kind === 'loading' && <p role="status">Loading dated calendar assignments…</p>}
     {assignments?.kind === 'error' && <div role="alert" className="plan-error">Could not load dated calendar assignments: {assignments.message}<button onClick={onRetry}>Retry calendar assignments</button></div>}
-    {assignments?.kind === 'ready' && (assignments.items.length === 0 ? <p>No retained calendar assignments.</p> : <ol>{assignments.items.map(assignment => <li key={assignment.id}><strong>{assignment.localDate}</strong><span>Definition day {assignment.definitionDay}</span><span>{assignment.passages.map(formatPassage).join('; ')}</span><small>Assignment {assignment.id} · Definition version {assignment.definitionVersionId}</small></li>)}</ol>)}
+    {history?.kind === 'loading' && <p role="status">Loading calendar completion history…</p>}
+    {history?.kind === 'error' && <div role="alert" className="plan-error">Could not load calendar completion history: {history.message}<button onClick={onRetryHistory}>Retry calendar completion history</button></div>}
+    {completionError && <div role="alert" className="plan-error">Could not complete calendar assignment: {completionError}</div>}
+    {assignments?.kind === 'ready' && history?.kind === 'ready' && (assignments.items.length === 0 ? <p>No retained calendar assignments.</p> : <ol>{assignments.items.map(assignment => { const completion = history.items.find(item => item.assignmentId === assignment.id); return <li key={assignment.id}><strong>{assignment.localDate}</strong><span>Definition day {assignment.definitionDay}</span><span>{assignment.passages.map(formatPassage).join('; ')}</span><small>Assignment {assignment.id} · Definition version {assignment.definitionVersionId}</small>{completion ? <span>Completed {completion.completedAt} · Completion {completion.id}</span> : <button disabled={!!completingId} onClick={() => onComplete(assignment)}>{completingId === assignment.id ? 'Completing calendar assignment…' : 'Complete calendar assignment'}</button>}</li>; })}</ol>)}
   </section>;
 }
 
@@ -44,7 +52,7 @@ function defaultCalendarScheduleMode(definition: PlanDefinitionVersion): Calenda
 }
 type ChapterStreams = Extract<PlanDefinition['schedule'], { kind: 'chapterStreams' }>['streams'];
 
-type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'enrollInCalendar' | 'getCalendarPlanEnrollment' | 'calendarPlanAssignments' | 'completePlanStream' | 'undoPlanCompletion'>;
+type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'enrollInCalendar' | 'getCalendarPlanEnrollment' | 'calendarPlanAssignments' | 'completeCalendarAssignment' | 'calendarCompletionHistory' | 'completePlanStream' | 'undoPlanCompletion'>;
 
 function localToday() {
   const now = new Date();
@@ -152,6 +160,10 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [calendarEnrollmentAttempt, setCalendarEnrollmentAttempt] = useState(0);
   const [calendarAssignments, setCalendarAssignments] = useState<CalendarRead<DatedPlanAssignment> | null>(null);
   const [calendarAssignmentAttempt, setCalendarAssignmentAttempt] = useState(0);
+  const [calendarHistory, setCalendarHistory] = useState<CalendarRead<CalendarAssignmentCompletion> | null>(null);
+  const [calendarHistoryAttempt, setCalendarHistoryAttempt] = useState(0);
+  const [completingCalendarId, setCompletingCalendarId] = useState('');
+  const [calendarCompletionError, setCalendarCompletionError] = useState('');
   const [versionEditTarget, setVersionEditTarget] = useState<PlanDefinitionVersion | null>(null);
   const [versionEditJson, setVersionEditJson] = useState('');
   const [versionEditing, setVersionEditing] = useState(false);
@@ -171,6 +183,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const calendarEnrollmentEpoch = useRef(0);
   const calendarDiscoveryEpoch = useRef(0);
   const calendarAssignmentEpoch = useRef(0);
+  const calendarHistoryEpoch = useRef(0);
+  const calendarCompletionEpoch = useRef(0);
   const calendarPendingEpoch = useRef(0);
   const versionEditEpoch = useRef(0);
   const retainedChoiceDefinitionId = useRef('');
@@ -202,6 +216,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     calendarEnrollmentEpoch.current += 1;
     calendarDiscoveryEpoch.current += 1;
     calendarAssignmentEpoch.current += 1;
+    calendarHistoryEpoch.current += 1;
+    calendarCompletionEpoch.current += 1;
     calendarPendingEpoch.current = 0;
     versionEditEpoch.current += 1;
     retainedChoiceDefinitionId.current = '';
@@ -223,6 +239,9 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     setCalendarEnrollments(null);
     setSelectedCalendarEnrollmentId('');
     setCalendarAssignments(null);
+    setCalendarHistory(null);
+    setCompletingCalendarId('');
+    setCalendarCompletionError('');
     setVersionEditTarget(null);
     setVersionEditJson('');
     setVersionEditing(false);
@@ -266,6 +285,39 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     });
     return () => { active = false; };
   }, [api, selectedCalendarEnrollmentId, calendarAssignmentAttempt]);
+
+  useEffect(() => {
+    if (!api || !selectedCalendarEnrollmentId) { setCalendarHistory(null); return; }
+    let active = true;
+    const enrollmentId = selectedCalendarEnrollmentId;
+    const epoch = ++calendarHistoryEpoch.current;
+    setCalendarHistory({ kind: 'loading' });
+    api.calendarCompletionHistory(enrollmentId).then(items => {
+      if (active && epoch === calendarHistoryEpoch.current && selectedCalendarEnrollmentId === enrollmentId) setCalendarHistory({ kind: 'ready', items });
+    }).catch(error => {
+      if (active && epoch === calendarHistoryEpoch.current && selectedCalendarEnrollmentId === enrollmentId) setCalendarHistory({ kind: 'error', message: String(error) });
+    });
+    return () => { active = false; };
+  }, [api, selectedCalendarEnrollmentId, calendarHistoryAttempt]);
+
+  async function completeCalendar(assignment: DatedPlanAssignment) {
+    if (!api || completingCalendarId) return;
+    const enrollmentId = selectedCalendarEnrollmentId;
+    const epoch = ++calendarCompletionEpoch.current;
+    setCompletingCalendarId(assignment.id);
+    setCalendarCompletionError('');
+    try {
+      await api.completeCalendarAssignment({ enrollmentId, assignmentId: assignment.id });
+      if (epoch !== calendarCompletionEpoch.current || selectedCalendarEnrollmentId !== enrollmentId) return;
+      setCompletingCalendarId('');
+      setCalendarHistoryAttempt(value => value + 1);
+    } catch (error) {
+      if (epoch === calendarCompletionEpoch.current && selectedCalendarEnrollmentId === enrollmentId) {
+        setCompletingCalendarId('');
+        setCalendarCompletionError(String(error));
+      }
+    }
+  }
 
   function selectRetainedDefinition(id: string) {
     if (!selectRetainedExportDefinition(retainedExportLifecycle.current, id)) return;
@@ -859,7 +911,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     {enrollments?.length === 0 && <p>No retained plan enrollments yet.</p>}
     {calendarEnrollments?.kind === 'loading' && <p role="status">Loading retained calendar enrollments…</p>}
     {calendarEnrollments?.kind === 'error' && <div role="alert" className="plan-error">Could not load retained calendar enrollments: {calendarEnrollments.message}<button onClick={() => setCalendarEnrollmentAttempt(value => value + 1)}>Retry calendar enrollments</button></div>}
-    {calendarEnrollments?.kind === 'ready' && calendarEnrollments.items.length > 0 && <CalendarAssignments items={calendarEnrollments.items} selectedId={selectedCalendarEnrollmentId} assignments={calendarAssignments} onSelect={setSelectedCalendarEnrollmentId} onRetry={() => setCalendarAssignmentAttempt(value => value + 1)} />}
+    {calendarEnrollments?.kind === 'ready' && calendarEnrollments.items.length > 0 && <CalendarAssignments items={calendarEnrollments.items} selectedId={selectedCalendarEnrollmentId} assignments={calendarAssignments} history={calendarHistory} completingId={completingCalendarId} completionError={calendarCompletionError} onSelect={id => { calendarCompletionEpoch.current += 1; setCompletingCalendarId(''); setCalendarCompletionError(''); setSelectedCalendarEnrollmentId(id); }} onRetry={() => setCalendarAssignmentAttempt(value => value + 1)} onRetryHistory={() => setCalendarHistoryAttempt(value => value + 1)} onComplete={assignment => void completeCalendar(assignment)} />}
     {streamEnrollments && streamEnrollments.length > 0 && <>
       <label>Retained enrollment<select value={selectedId} onChange={event => setSelectedId(event.target.value)}>
         {streamEnrollments.map(enrollment => <option key={enrollment.id} value={enrollment.id}>{enrollment.id}</option>)}
