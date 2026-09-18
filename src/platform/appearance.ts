@@ -1,9 +1,9 @@
-import { useLayoutEffect, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { isDesktop } from './journal';
 import { parseOmarchyTheme, parsePortableTheme, type PortableTheme } from './themes';
 
-export type Appearance = 'system' | 'light' | 'dark' | 'omarchy' | `theme:${string}`;
+export type Appearance = 'system' | 'light' | 'dark' | `theme:${string}`;
 declare global {
   interface Window {
     scriptureAppearance: {
@@ -13,9 +13,24 @@ declare global {
       getThemes(): PortableTheme[];
       setPreference(value: Appearance): boolean;
       saveTheme(theme: PortableTheme): boolean;
-      setOmarchyTheme(theme: PortableTheme): boolean;
+      setSystemTheme(theme: PortableTheme | null): boolean;
     };
   }
+}
+
+/**
+ * Reads the optional desktop palette only while System is active. The palette
+ * remains in memory: its absence, a malformed file, or a failed read restores
+ * the normal OS light/dark result instead of retaining old Linux colors.
+ */
+export async function refreshSystemTheme(isCurrent = () => window.scriptureAppearance.getPreference() === 'system') {
+  if (!isDesktop || !isCurrent()) return;
+  let theme: PortableTheme | null = null;
+  try {
+    const source = await invoke<string | null>('read_omarchy_theme');
+    if (source) theme = parseOmarchyTheme(source);
+  } catch { /* System intentionally falls back to the OS appearance. */ }
+  if (isCurrent()) window.scriptureAppearance.setSystemTheme(theme);
 }
 
 export function useAppearance() {
@@ -24,11 +39,12 @@ export function useAppearance() {
   const [storageError, setStorageError] = useState('');
   const [nativeError, setNativeError] = useState('');
   const [importError, setImportError] = useState('');
-  const supportsOmarchy = isDesktop && /Linux/i.test(navigator.userAgent);
+  const probeEpoch = useRef(0);
   useLayoutEffect(() => {
     let active = true;
     let nativeUpdates = Promise.resolve();
     const update = () => {
+      probeEpoch.current += 1;
       setPreference(window.scriptureAppearance.getPreference());
       if (isDesktop) {
         const theme = window.scriptureAppearance.getResolved();
@@ -43,31 +59,51 @@ export function useAppearance() {
     };
     update();
     window.addEventListener('appearancechange', update);
-    return () => { active = false; window.removeEventListener('appearancechange', update); };
+    return () => {
+      active = false;
+      // Invalidate an immediate System probe started by change(), which is not
+      // owned by the polling effect below.
+      probeEpoch.current += 1;
+      window.removeEventListener('appearancechange', update);
+    };
   }, []);
   useLayoutEffect(() => {
-    if (!supportsOmarchy || preference !== 'omarchy') return;
+    if (!isDesktop || preference !== 'system') return;
     let active = true;
+    // Keep one read in flight. This avoids a delayed filesystem read building a
+    // burst of stale queued polls. The current-preference guard makes unmount
+    // and explicit overrides authoritative over that one callback.
+    let refreshing = false;
     const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      const epoch = probeEpoch.current;
       try {
-        const source = await invoke<string | null>('read_omarchy_theme');
-        if (active && source) {
-          window.scriptureAppearance.setOmarchyTheme(parseOmarchyTheme(source));
-          setNativeError('');
-        }
-      } catch {
-        if (active) setNativeError('The active Omarchy palette is unavailable; the last usable colors remain active.');
+        await refreshSystemTheme(() => active
+          && probeEpoch.current === epoch
+          && window.scriptureAppearance.getPreference() === 'system');
+      } finally {
+        refreshing = false;
       }
     };
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 3000);
+    const timer = window.setInterval(refresh, 3000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [preference, supportsOmarchy]);
+  }, [preference]);
   return {
-    preference, themes, supportsOmarchy,
+    preference, themes,
     error: [storageError, nativeError, importError].filter(Boolean).join(' '),
     change(value: Appearance) {
+      // Never revive a previous desktop palette while a fresh System probe is
+      // pending after an explicit override.
+      if (value === 'system') window.scriptureAppearance.setSystemTheme(null);
       setStorageError(window.scriptureAppearance.setPreference(value) ? '' : 'Appearance changed, but this device could not save your preference.');
+      // A return to System should not wait for the next polling interval.
+      // The appearancechange listener advances the epoch before this starts.
+      if (value === 'system') {
+        const epoch = probeEpoch.current;
+        void refreshSystemTheme(() => probeEpoch.current === epoch
+          && window.scriptureAppearance.getPreference() === 'system');
+      }
     },
     async importTheme(file: File) {
       try {

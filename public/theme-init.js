@@ -2,37 +2,40 @@
 (() => {
   const preferenceKey = 'scripture-journal.appearance';
   const themesKey = 'scripture-journal.custom-themes';
-  const omarchyKey = 'scripture-journal.omarchy-theme';
   const tokens = ['app-background', 'paper', 'surface', 'surface-raised', 'surface-subtle', 'surface-active', 'ink', 'muted', 'placeholder', 'line', 'line-strong', 'accent', 'accent-hover', 'accent-contrast', 'focus', 'selection', 'error-ink', 'error-surface', 'error-line'];
   const hex = /^#[0-9a-fA-F]{6}$/;
   const media = window.matchMedia('(prefers-color-scheme: dark)');
   let themes = [];
-  let omarchyTheme = null;
+  // This palette is intentionally memory-only. A palette read on one desktop
+  // must never color a browser session or a different operating system later.
+  let systemTheme = null;
   let preference = 'system';
   const validTheme = value => value && value.schemaVersion === 1
     && /^[a-z0-9][a-z0-9-]{0,63}$/.test(value.id)
     && typeof value.name === 'string' && value.name.length > 0 && value.name.length <= 80
     && ['light', 'dark'].includes(value.mode)
     && value.colors && tokens.every(token => hex.test(value.colors[token] || ''));
-  const validPreference = value => ['system', 'light', 'dark', 'omarchy'].includes(value)
+  const validPreference = value => ['system', 'light', 'dark'].includes(value)
     || (typeof value === 'string' && /^theme:[a-z0-9][a-z0-9-]{0,63}$/.test(value));
   try {
     const savedThemes = JSON.parse(localStorage.getItem(themesKey) || '[]');
     if (Array.isArray(savedThemes)) themes = savedThemes.filter(validTheme);
   } catch { /* A damaged optional palette must not hide a saved dark preference. */ }
   try {
-    const savedOmarchy = JSON.parse(localStorage.getItem(omarchyKey) || 'null');
-    if (validTheme(savedOmarchy)) omarchyTheme = savedOmarchy;
-  } catch { /* Fall back to built-in colors when the optional cache is damaged. */ }
-  try {
     const savedPreference = localStorage.getItem(preferenceKey);
-    if (validPreference(savedPreference)) preference = savedPreference;
+    // Follow Omarchy was folded into System. Retain the user's intent while
+    // dropping the old cached palette, which may be stale or from Linux.
+    if (savedPreference === 'omarchy') {
+      preference = 'system';
+      try { localStorage.setItem(preferenceKey, preference); } catch { /* Optional migration. */ }
+    } else if (validPreference(savedPreference)) preference = savedPreference;
+    try { localStorage.removeItem('scripture-journal.omarchy-theme'); } catch { /* Optional stale cache cleanup. */ }
   } catch { /* Restricted or damaged storage must not prevent startup. */ }
-  const selectedTheme = () => preference === 'omarchy'
-    ? omarchyTheme
+  const selectedTheme = () => preference === 'system'
+    ? systemTheme
     : preference.startsWith('theme:') ? themes.find(theme => theme.id === preference.slice(6)) : null;
   const resolved = () => selectedTheme()?.mode
-    || (preference === 'system' || preference === 'omarchy' || preference.startsWith('theme:')
+    || (preference === 'system' || preference.startsWith('theme:')
       ? (media.matches ? 'dark' : 'light') : preference);
   function apply() {
     const theme = selectedTheme();
@@ -66,20 +69,19 @@
       themes = candidate;
       return true;
     },
-    setOmarchyTheme(theme) {
-      if (!validTheme(theme)) return false;
-      omarchyTheme = theme;
-      try { localStorage.setItem(omarchyKey, JSON.stringify(theme)); } catch { /* Cache is optional. */ }
-      if (preference === 'omarchy') apply();
+    setSystemTheme(theme) {
+      if (theme !== null && !validTheme(theme)) return false;
+      systemTheme = theme;
+      if (preference === 'system') apply();
       return true;
     },
   };
   media.addEventListener('change', () => {
-    if (preference === 'system' || (!selectedTheme() && (preference === 'omarchy' || preference.startsWith('theme:')))) apply();
+    if (preference === 'system' || (!selectedTheme() && preference.startsWith('theme:'))) apply();
   });
   window.addEventListener('storage', event => {
     if (event.key === preferenceKey || event.key === null) {
-      preference = validPreference(event.newValue) ? event.newValue : 'system';
+      preference = event.newValue === 'omarchy' ? 'system' : validPreference(event.newValue) ? event.newValue : 'system';
       apply();
     }
   });

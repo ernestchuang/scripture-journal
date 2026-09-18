@@ -71,7 +71,6 @@ export function App() {
           <label className="theme-control">Appearance
             <select value={appearance.preference} onChange={event => appearance.change(event.target.value as Appearance)}>
               <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
-              {appearance.supportsOmarchy && <option value="omarchy">Follow Omarchy</option>}
               {appearance.themes.map(theme => <option key={theme.id} value={`theme:${theme.id}`}>{theme.name}</option>)}
             </select>
           </label>

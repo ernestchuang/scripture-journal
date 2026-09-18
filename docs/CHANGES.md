@@ -6,13 +6,15 @@ holds implementation status and remaining acceptance work.
 ## 2026-09-18
 
 - Light, Dark, and System appearance apply before the desktop window appears.
-  The choice persists on the device, and System follows OS light/dark changes.
-  Automated browser tests run headlessly with dark appearance by default.
+  System uses a compatible active desktop palette when its bounded source file is
+  available, otherwise follows OS light/dark changes. The palette is memory-only:
+  a removed or malformed source falls back to the OS rather than retaining stale
+  colors. Explicit choices persist on the device. Automated browser tests run
+  headlessly with dark appearance by default.
 - Import your own color palettes through **Import theme** using the documented
-  [TOML format and example](THEMES.md). Linux can optionally **Follow Omarchy**,
-  checking its active palette every three seconds without modifying OS settings.
-  Damaged palettes retain a usable fallback, and failed preference saves are
-  reported. Custom colors are restored before application rendering.
+  [TOML format and example](THEMES.md). System checks a compatible active desktop
+  palette every three seconds without changing OS settings. Failed preference saves
+  are reported. Custom colors are restored before application rendering.
 - **Additional draft protection:** continuous typing now triggers a save at least
   every five seconds while storage is responding normally, alongside the existing
   600 ms idle save. A failed save stays visible and does not repeatedly retry in

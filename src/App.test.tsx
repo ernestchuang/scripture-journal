@@ -49,7 +49,7 @@ beforeEach(() => {
     getThemes: () => [],
     setPreference: () => true,
     saveTheme: () => true,
-    setOmarchyTheme: () => true,
+    setSystemTheme: () => true,
   };
   native.closeHandler = undefined;
   native.onCloseRequested.mockReset().mockImplementation(async handler => {

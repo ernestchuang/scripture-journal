@@ -28,9 +28,9 @@ journal. Drafts autosave after 600 ms of inactivity. Finish makes the current
 version eligible for export. Restoring history creates a new unfinished revision.
 
 Use **Appearance** in the header to select **System**, **Light**, or **Dark**.
-System follows the device appearance; explicit choices persist on this device.
-Use **Import theme** for a custom [TOML palette](docs/THEMES.md). Linux also offers
-**Follow Omarchy**, which follows its active palette without changing OS settings.
+System follows a compatible active desktop palette when its bounded palette file
+is available; otherwise it follows the device appearance. Explicit choices persist
+on this device. Use **Import theme** for a custom [TOML palette](docs/THEMES.md).
 The app initializes its colors before showing the native window. Browser tests
 run headlessly with a dark default, and the isolated native debug smoke requests
 dark mode. Native smoke automation still temporarily focuses its test window;

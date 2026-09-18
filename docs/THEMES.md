@@ -16,8 +16,11 @@ table, double-quoted single-line strings, and whole-line comments. Use the examp
 as a starting point; arbitrary TOML tables, multiline values, and inline comments
 are not part of this version of the portable format.
 
-On Linux desktop installations, **Follow Omarchy** reads the active palette from
-`~/.local/state/omarchy/current/theme/colors.toml`. It never changes Omarchy. The
-app checks for changes every three seconds while that choice is active and keeps
-the last usable palette if a new file is missing or malformed. Portable imported
-themes work on Linux and macOS and do not depend on Omarchy.
+With **System** selected, the desktop app reads a compatible active palette from
+`~/.local/state/omarchy/current/theme/colors.toml`, falling back to the legacy
+`~/.config/omarchy/current/theme/colors.toml` location only when the primary file
+is absent. It never changes Omarchy or identifies the OS by branding. The app
+checks while System is active every three seconds. An absent, unreadable, or
+malformed source falls back to OS light/dark; desktop palettes are memory-only and
+never carried into a browser session or another operating system. Portable imported
+themes work on Linux and macOS and do not depend on the desktop palette source.
