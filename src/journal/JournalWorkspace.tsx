@@ -30,6 +30,8 @@ export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceCh
   const [chapterFilter, setChapterFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [templateId, setTemplateId] = useState('blank');
+  const [trash, setTrash] = useState<Entry[] | null>(null);
+  const [confirmation, setConfirmation] = useState<{ entry: Entry; revision?: Revision } | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [operationError, setOperationError] = useState('');
@@ -75,6 +77,7 @@ export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceCh
     if (mounted.current) setEntries(items => [entry, ...items.filter(item => item.id !== entry.id)]);
   };
   const open = (entry?: Entry, passages: Passage[] = []) => {
+    setConfirmation(null);
     if (entry) entry = committedEntries.current.get(entry.id) ?? entry;
     sessionRef.current = new SaveCoordinator(entry?.id ?? crypto.randomUUID(), api,
       entry?.content ?? contentFromTemplate(writingTemplates.find(item => item.id === templateId) ?? writingTemplates[0], passages), entry, refresh, committed);
@@ -167,6 +170,35 @@ export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceCh
     const restored = await api.restoreRevision(current.id, revision.id, current.revisionId);
     committed(restored); open(restored);
   });
+  const moveToTrash = () => navigate(async () => {
+    const current = sessionRef.current;
+    if (!current?.revisionId) return;
+    await api.setEntryTrashed(current.id, current.revisionId, true);
+    committedEntries.current.delete(current.id);
+    setEntries(items => items.filter(item => item.id !== current.id));
+    sessionRef.current = null; setHistory(null); setInspected(null); refresh();
+    setTrash(await api.listTrash());
+  });
+  const restoreTrash = (entry: Entry) => navigate(async () => {
+    const restored = await api.setEntryTrashed(entry.id, entry.workingRevisionId, false);
+    committed(restored); setTrash(items => items?.filter(item => item.id !== entry.id) ?? null);
+  });
+  const confirmDeletion = () => {
+    const selected = confirmation;
+    if (!selected) return;
+    navigate(async () => {
+      if (selected.revision) {
+        await api.purgeRevision(selected.entry.id, selected.revision.id, selected.entry.workingRevisionId);
+        const remaining = await api.getHistory(selected.entry.id);
+        if (sessionRef.current?.id === selected.entry.id) { setHistory(remaining); setInspected(null); }
+      } else {
+        await api.purgeEntry(selected.entry.id, selected.entry.workingRevisionId);
+        setTrash(items => items?.filter(item => item.id !== selected.entry.id) ?? null);
+        committedEntries.current.delete(selected.entry.id);
+      }
+      setConfirmation(null);
+    });
+  };
   const matches = entries.filter(entry => {
     const needle = query.trim().toLowerCase();
     if (tagFilter && !entry.content.tags.some(tag => tag.trim() === tagFilter)) return false;
@@ -185,6 +217,15 @@ export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceCh
       <div className="journal-template"><label>Writing template<select value={templateId} onChange={event => setTemplateId(event.target.value)} disabled={busy}>{writingTemplates.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <button onClick={() => navigate(() => open())} disabled={busy}>{templateId === 'blank' ? 'New blank entry' : 'New entry from template'}</button></div>
     </header>
+    <button disabled={busy} onClick={() => navigate(async () => { setTrash(trash ? null : await api.listTrash()); })}>{trash ? 'Hide Trash' : 'View Trash'}</button>
+    {trash && <section aria-label="Trash" className="journal-history"><h3>Trash</h3><p>Entries and every version stay here until you explicitly delete them. Previously exported notes become placeholders on the next export.</p>
+      {trash.length === 0 ? <p>Trash is empty.</p> : <ul>{trash.map(entry => <li key={entry.id}>{title(entry)} <button disabled={busy} onClick={() => restoreTrash(entry)}>Restore entry</button> <button disabled={busy} onClick={() => setConfirmation({ entry })}>Delete entry permanently</button></li>)}</ul>}
+    </section>}
+    {confirmation && <section role="alertdialog" aria-label="Confirm permanent deletion" className="journal-error"><h3>Delete {confirmation.revision ? 'this version' : 'this entry and all its versions'} permanently?</h3>
+      <p><strong>{title(confirmation.entry)}</strong>{confirmation.revision && <> · Version saved {date(confirmation.revision.createdAt)} ({confirmation.revision.id})</>}</p>
+      <p>This cannot be undone. Other entries keep their connections, shown as unavailable when an entry is deleted. Existing backups and exported recovery files may still contain earlier copies.</p>
+      <button disabled={busy} onClick={confirmDeletion}>Confirm permanent deletion</button><button disabled={busy} onClick={() => setConfirmation(null)}>Cancel deletion</button>
+    </section>}
     {loadError && <div role="alert" className="journal-error">Could not load your journal: {loadError}
       <button onClick={() => { setLoadError(''); api.listEntries().then(items => { setEntries(items); setLoaded(true); }).catch(error => setLoadError(String(error))); }}>Retry loading</button>
     </div>}
@@ -232,8 +273,11 @@ export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceCh
       </fieldset>
       <div className="journal-backlinks"><h3>Referenced by</h3>{backlinks.length ? <ul>{backlinks.map(entry => <li key={entry.id}><button disabled={busy} onClick={() => navigate(() => open(entry))}>{title(entry)}</button></li>)}</ul> : <p>No other entries link here yet.</p>}</div>
       <button disabled={busy} onClick={showHistory}>View revision history</button>
+      <button disabled={busy || !session.revisionId} onClick={moveToTrash}>Move entry to Trash</button>
       {history && <section className="journal-history" aria-label="Revision history"><h3>Revision history</h3><p>Restoring creates a new version. Earlier versions are kept.</p>
-        <ol>{history.map((revision, index) => <li key={revision.id}><button onClick={() => setInspected(revision)}>Version {history.length - index} · {date(revision.createdAt)}</button>{revision.id === session.revisionId && <small> Current</small>}</li>)}</ol>
+        <ol>{history.map((revision, index) => <li key={revision.id}><button onClick={() => setInspected(revision)}>Version {history.length - index} · {date(revision.createdAt)}</button>{revision.id === session.revisionId && <small> Current</small>}
+          {revision.id !== session.revisionId && revision.id !== entries.find(entry => entry.id === session.id)?.publishedRevisionId && <button disabled={busy} onClick={() => { const entry = entries.find(item => item.id === session.id); if (entry) setConfirmation({ entry, revision }); }}>Delete this version</button>}
+        </li>)}</ol>
         {inspected && <article><h4>{inspected.content.title || 'Untitled reflection'}</h4><p>{inspected.content.passages.map(passageLabel).join(' · ')}</p><pre>{inspected.content.body || '(Blank reflection)'}</pre><p>Tags: {inspected.content.tags.join(', ') || 'None'}</p><p>Connections: {inspected.content.links.map(id => entries.find(entry => entry.id === id)?.content.title || id).join(', ') || 'None'}</p><button disabled={busy || inspected.id === session.revisionId} onClick={() => restore(inspected)}>Restore this version</button></article>}
       </section>}
     </div>}

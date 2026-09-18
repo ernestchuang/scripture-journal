@@ -1,3 +1,4 @@
+mod journal_deletion;
 use journal_core::{
     CalendarAssignmentCompletion, CalendarPlanEnrollment, CalendarScheduleMode,
     CompleteStreamRequest, DatedPlanAssignment, Entry, ExportReport, JournalStore, PlanAssignment,
@@ -1737,6 +1738,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            journal_deletion::list_trash,
+            journal_deletion::set_entry_trashed,
+            journal_deletion::purge_entry,
+            journal_deletion::purge_revision,
             list_entries,
             save_entry,
             register_four_stream_plan,

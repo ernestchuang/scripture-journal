@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 use uuid::Uuid;
 
+mod deletion;
 mod export;
+pub const CURRENT_SCHEMA: u32 = 14;
 #[cfg(unix)]
 mod export_directory;
 mod plans;
@@ -54,6 +56,7 @@ pub struct Entry {
     pub working_revision_id: String,
     pub published_revision_id: Option<String>,
     pub content: EntryContent,
+    pub trashed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,7 +90,7 @@ impl JournalStore {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(
-            (0..=12).contains(&version),
+            (0..=14).contains(&version),
             "Unsupported journal schema version {version}"
         );
         if version == 0 {
@@ -205,6 +208,10 @@ impl JournalStore {
             tx.pragma_update(None, "user_version", 12)?;
             tx.commit()?;
         }
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version == 12 || version == 13 {
+            deletion::migrate(&mut conn)?;
+        }
         let store = Self { conn };
         validate_id(&store.identity("journal_id")?)?;
         validate_id(&store.identity("installation_id")?)?;
@@ -225,9 +232,9 @@ impl JournalStore {
     }
 
     pub fn list_entries(&self) -> Result<Vec<Entry>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM entries ORDER BY updated_at DESC,id")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM entries WHERE trashed_at IS NULL ORDER BY updated_at DESC,id",
+        )?;
         let ids = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -244,13 +251,34 @@ impl JournalStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let old = entry(&tx, &request.entry_id)?;
         ensure!(
+            old.as_ref().is_none_or(|e| e.trashed_at.is_none()),
+            "Restore this entry from Trash before editing"
+        );
+        let purged: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM purged_entries WHERE entry_id=?1)",
+            [&request.entry_id],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            !purged,
+            "This entry was permanently deleted; save as a new entry"
+        );
+        ensure!(
             old.as_ref().map(|e| e.working_revision_id.as_str())
                 == request.expected_revision_id.as_deref(),
             "Conflict: entry changed since it was loaded; reload before saving"
         );
         for link in &request.content.links {
+            let purged_target: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM purged_entries WHERE entry_id=?1)",
+                [link],
+                |r| r.get(0),
+            )?;
             ensure!(
-                link == &request.entry_id || entry(&tx, link)?.is_some(),
+                link == &request.entry_id
+                    || entry(&tx, link)?.is_some()
+                    || purged_target
+                    || old.as_ref().is_some_and(|e| e.content.links.contains(link)),
                 "Linked entry does not exist: {link}"
             );
         }
@@ -265,7 +293,7 @@ impl JournalStore {
             tx.execute("INSERT INTO entries(id,created_at,updated_at,working_revision_id) VALUES(?1,?2,?2,?3)", params![request.entry_id, now, revision_id])?;
         }
         if changed {
-            tx.execute("INSERT INTO revisions(id,entry_id,parent_id,created_at,content) VALUES(?1,?2,?3,?4,?5)", params![revision_id, request.entry_id, request.expected_revision_id, now, serde_json::to_string(&request.content)?])?;
+            tx.execute("INSERT INTO revisions(id,entry_id,parent_id,parent_ref_id,created_at,content) VALUES(?1,?2,?3,?3,?4,?5)", params![revision_id, request.entry_id, request.expected_revision_id, now, serde_json::to_string(&request.content)?])?;
             tx.execute(
                 "UPDATE entries SET working_revision_id=?1,updated_at=?2 WHERE id=?3",
                 params![revision_id, now, request.entry_id],
@@ -312,13 +340,17 @@ impl JournalStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = entry(&tx, entry_id)?.context("Entry not found")?;
         ensure!(
+            current.trashed_at.is_none(),
+            "Restore this entry from Trash before restoring a version"
+        );
+        ensure!(
             Some(current.working_revision_id.as_str()) == expected_revision_id,
             "Conflict: entry changed since it was loaded; reload before restoring"
         );
         let original = tx.query_row("SELECT id,entry_id,parent_id,restored_from_id,created_at,content FROM revisions WHERE id=?1 AND entry_id=?2", params![revision_id, entry_id], revision_row).optional()?.context("Revision not found for this entry")?;
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        tx.execute("INSERT INTO revisions(id,entry_id,parent_id,restored_from_id,created_at,content) VALUES(?1,?2,?3,?4,?5,?6)", params![id, entry_id, current.working_revision_id, revision_id, now, serde_json::to_string(&original.content)?])?;
+        tx.execute("INSERT INTO revisions(id,entry_id,parent_id,restored_from_id,parent_ref_id,restored_from_ref_id,created_at,content) VALUES(?1,?2,?3,?4,?3,?4,?5,?6)", params![id, entry_id, current.working_revision_id, revision_id, now, serde_json::to_string(&original.content)?])?;
         tx.execute(
             "UPDATE entries SET working_revision_id=?1,updated_at=?2 WHERE id=?3",
             params![id, now, entry_id],
@@ -580,7 +612,7 @@ pub(crate) fn validate_passage(p: &Passage) -> Result<()> {
 }
 
 fn entry(conn: &Connection, id: &str) -> Result<Option<Entry>> {
-    Ok(conn.query_row("SELECT e.id,e.created_at,e.updated_at,e.working_revision_id,e.published_revision_id,r.content FROM entries e JOIN revisions r ON r.id=e.working_revision_id WHERE e.id=?1", [id], |r| Ok(Entry { id:r.get(0)?, created_at:r.get(1)?, updated_at:r.get(2)?, working_revision_id:r.get(3)?, published_revision_id:r.get(4)?, content:decode(r,5)? })).optional()?)
+    Ok(conn.query_row("SELECT e.id,e.created_at,e.updated_at,e.working_revision_id,e.published_revision_id,r.content,e.trashed_at FROM entries e JOIN revisions r ON r.id=e.working_revision_id WHERE e.id=?1", [id], |r| Ok(Entry { id:r.get(0)?, created_at:r.get(1)?, updated_at:r.get(2)?, working_revision_id:r.get(3)?, published_revision_id:r.get(4)?, content:decode(r,5)?,trashed_at:r.get(6)? })).optional()?)
 }
 
 fn decode<T: serde::de::DeserializeOwned>(

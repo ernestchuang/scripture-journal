@@ -7,6 +7,7 @@ import { JournalWorkspace } from './JournalWorkspace';
 
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 const fakeApi = (): JournalApi => ({
+  listTrash: vi.fn(async () => []), setEntryTrashed: vi.fn(), purgeEntry: vi.fn(), purgeRevision: vi.fn(),
   listEntries: vi.fn(async () => []),
   saveEntry: vi.fn(async (request: SaveRequest): Promise<Entry> => ({
     id: request.entryId, createdAt: '2026-09-17T00:00:00Z', updatedAt: '2026-09-17T00:00:00Z',

@@ -21,6 +21,7 @@ export interface Entry {
   workingRevisionId: string;
   publishedRevisionId: string | null;
   content: EntryContent;
+  trashedAt?: string | null;
 }
 
 export interface Revision {

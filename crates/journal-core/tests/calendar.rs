@@ -1,3 +1,4 @@
+mod support;
 use chrono::NaiveDate;
 use journal_core::{
     expand_calendar_assignments, four_stream_plan_definition, mcheyne_plan_definition,
@@ -691,7 +692,7 @@ fn schema_eight_migration_preserves_populated_calendar_rows() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        12
+        journal_core::CURRENT_SCHEMA
     );
     assert_eq!(
         conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
@@ -969,11 +970,11 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
         "plan_calendar_assignment_owner"
     ));
     drop(migrated);
-    assert_database_integrity(&path, 12);
+    assert_database_integrity(&path, journal_core::CURRENT_SCHEMA);
 
     let mut reopened_again = JournalStore::open(&path).unwrap();
     assert_eq!(schema_seven_fingerprint(&path), retained);
-    assert_database_integrity(&path, 12);
+    assert_database_integrity(&path, journal_core::CURRENT_SCHEMA);
     let calendar = reopened_again
         .enroll_in_calendar(
             &built_in.id,
@@ -1038,6 +1039,7 @@ fn schema_seven_fingerprint(path: &std::path::Path) -> Vec<String> {
 
 fn downgrade_stream_provenance_to_v11(path: &std::path::Path) {
     let conn = rusqlite::Connection::open(path).unwrap();
+    support::remove_deletion_schema(&conn);
     conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
     conn.execute_batch(
         "DROP TRIGGER plan_assignment_successors_ordered;

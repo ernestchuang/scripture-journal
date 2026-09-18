@@ -104,7 +104,7 @@ impl JournalStore {
         let mut manifest_bytes = initial;
         write_manifest(manifest_directory, &manifest, &mut manifest_bytes)?;
         // One SELECT pins the published snapshot set, including link eligibility.
-        let mut stmt = self.conn.prepare("SELECT r.id,r.entry_id,r.parent_id,r.restored_from_id,r.created_at,r.content FROM entries e JOIN revisions r ON e.published_revision_id=r.id ORDER BY e.id")?;
+        let mut stmt = self.conn.prepare("SELECT r.id,r.entry_id,r.parent_id,r.restored_from_id,r.created_at,r.content FROM entries e JOIN revisions r ON e.published_revision_id=r.id WHERE e.trashed_at IS NULL ORDER BY e.id")?;
         let revisions = stmt
             .query_map([], revision_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -122,8 +122,44 @@ impl JournalStore {
                 &revisions,
                 &mut manifest,
                 &mut manifest_bytes,
+                None,
             );
             match result {
+                Ok(true) => report.written += 1,
+                Ok(false) => report.unchanged += 1,
+                Err(error) => report
+                    .conflicts
+                    .push(format!("{}: {error:#}", revision.entry_id)),
+            }
+        }
+        // Only replace notes that this destination previously owned. A deleted
+        // reflection must not disclose even its existence in a fresh export.
+        let mut stmt = self.conn.prepare("SELECT id,working_revision_id FROM entries WHERE trashed_at IS NOT NULL UNION ALL SELECT entry_id,coalesce(last_published_revision_id,entry_id) FROM purged_entries")?;
+        let removed = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (entry_id, revision_id) in removed {
+            if !manifest.receipts.contains_key(&entry_id) {
+                continue;
+            }
+            let revision = Revision {
+                id: revision_id,
+                entry_id,
+                parent_id: None,
+                restored_from_id: None,
+                created_at: String::new(),
+                content: EntryContent::default(),
+            };
+            let tombstone = format!("---\nentry_id: {}\ndeleted: true\n---\n\nThis reflection has been removed from Scripture Journal.\n", revision.entry_id);
+            match export_one(
+                directory,
+                manifest_directory,
+                &revision,
+                &revisions,
+                &mut manifest,
+                &mut manifest_bytes,
+                Some(tombstone),
+            ) {
                 Ok(true) => report.written += 1,
                 Ok(false) => report.unchanged += 1,
                 Err(error) => report
@@ -142,12 +178,17 @@ fn export_one(
     published: &[Revision],
     manifest: &mut Manifest,
     manifest_bytes: &mut Option<Vec<u8>>,
+    replacement: Option<String>,
 ) -> Result<bool> {
     validate_id(&revision.entry_id)?;
     let name = format!("{}.md", revision.entry_id);
     #[cfg(not(unix))]
     let target = directory.join(&name);
-    let output = render(revision, published)?;
+    let output = if let Some(output) = replacement {
+        output
+    } else {
+        render(revision, published)?
+    };
     let expected = digest(output.as_bytes());
     #[cfg(unix)]
     let read_target = || manifest_directory.read_optional(&name);
@@ -613,7 +654,8 @@ mod manifest_tests {
                     &revision,
                     published,
                     &mut manifest,
-                    &mut previous
+                    &mut previous,
+                    None
                 )
                 .unwrap());
             }
@@ -641,6 +683,7 @@ mod manifest_tests {
                 published,
                 &mut manifest,
                 &mut previous,
+                None,
             );
             if state == "edited" {
                 assert!(result
@@ -675,7 +718,8 @@ mod manifest_tests {
                     &revision,
                     published,
                     &mut manifest,
-                    &mut previous
+                    &mut previous,
+                    None
                 )
                 .unwrap());
             }

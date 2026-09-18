@@ -1,8 +1,8 @@
 # Development and resumption
 
-This repository currently contains specifications and task definitions, not an
-application scaffold. No install/build command is claimed until the native spike
-selects and validates the stack. Read [PRODUCT.md](PRODUCT.md),
+This repository contains a Tauri desktop application with a React/TypeScript UI
+and a Rust/SQLite journal core. Run `npm ci` and `npm run desktop` for the native
+app, or `npm run dev` for the separate browser preview. Read [PRODUCT.md](PRODUCT.md),
 [ARCHITECTURE.md](ARCHITECTURE.md), and [DATA-MODEL.md](DATA-MODEL.md) first.
 
 ## Worktrees
@@ -78,10 +78,15 @@ memory. Agents do not continue through exhausted service access.
 
 ## Validation boundary
 
-For this documentation foundation, check local links, JSONL validity, issue
-dependency references/cycles, and consistency of confirmed/proposed language.
-There is no application test suite yet. Future checks are specified in the
-architecture and the relevant Bead. Native Linux/macOS behavior cannot be claimed
+Run `npm test`, `npm run build`, `npm run test:native`, and the relevant headless
+Playwright scenarios. Native adapters also have tests in `src-tauri`; run
+`cargo test --manifest-path src-tauri/Cargo.toml` when changing them. Rust changes
+must pass formatting and Clippy with warnings denied. Coordinate Playwright's
+port 1420 between worktrees. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` when using an
+installed Chromium instead of Playwright's downloaded browser.
+
+Check documentation links and Beads snapshot validity when changing them.
+Native Linux/macOS behavior cannot be claimed
 from a browser-only test or a successful compiler run.
 
 Use synthetic fixtures, not personal journals. Read-only import fixtures should
