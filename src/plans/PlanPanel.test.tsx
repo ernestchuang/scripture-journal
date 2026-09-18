@@ -387,6 +387,8 @@ describe('retained plan panel', () => {
     const defaultDate = await screen.findByLabelText('Calendar start date') as HTMLInputElement;
     expect(defaultDate.value).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect((screen.getByLabelText('Calendar schedule policy') as HTMLSelectElement).value).toBe('calendarAligned');
+    expect(screen.getByText(/On February 29, it schedules no set so the day is available for catch-up or rest/)).toBeTruthy();
+    expect(screen.getByText(/Start from day one schedules all 365 sets.*February 29 as an ordinary scheduled day/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Calendar start date'), { target: { value: '2026-03-01' } });
     const create = screen.getByRole('button', { name: 'Create calendar enrollment' });
     fireEvent.click(create); fireEvent.click(create);
@@ -438,6 +440,7 @@ describe('retained plan panel', () => {
     vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedExplicit]);
     render(<PlanPanel api={plans} />);
     expect(await screen.findByText(/This 1-set calendar starts from day one/)).toBeTruthy();
+    expect(screen.getByText(/Calendar alignment is available only for an exact 365-day schedule; February 29 is an ordinary scheduled day/)).toBeTruthy();
     const policy = screen.getByLabelText('Calendar schedule policy') as HTMLSelectElement;
     expect(policy.value).toBe('dayOne');
     expect(Array.from(policy.options, option => option.value)).toEqual(['dayOne']);
