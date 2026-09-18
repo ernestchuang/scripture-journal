@@ -443,13 +443,14 @@ describe('retained plan panel', () => {
     const plans = api();
     vi.mocked(plans.listPlanEnrollments).mockResolvedValue([enrollment, second]);
     vi.mocked(plans.getCalendarPlanEnrollment).mockImplementation(async id => id === retained.id ? retained : null);
-    vi.mocked(plans.calendarPlanAssignments).mockResolvedValue([{ id: 'dated-1', enrollmentId: retained.id, definitionVersionId: retained.definitionVersionId, definitionDay: 60, localDate: '2026-03-01', passages: [{ book: 1, chapter: 1 }, { book: 40, chapter: 1 }] }]);
+    vi.mocked(plans.calendarPlanAssignments).mockResolvedValue([{ id: 'dated-1', enrollmentId: retained.id, definitionVersionId: retained.definitionVersionId, definitionDay: 60, localDate: '2026-03-01', passages: [{ book: 1, chapter: 1 }, { book: 43, chapter: 3, startVerse: 16, endVerse: 16 }, { book: 2, chapter: 12, startVerse: 21, endVerse: 51 }] }]);
     render(<PlanPanel api={plans} />);
     expect(await screen.findByLabelText('Retained calendar enrollment')).toBeTruthy();
     expect(screen.getByText(/Calendar policy calendarAligned, starting 2026-03-01/)).toBeTruthy();
     expect(await screen.findByText('2026-03-01')).toBeTruthy();
     expect(screen.getByText('Definition day 60')).toBeTruthy();
-    expect(screen.getByText('Book 1 · Chapter 1; Book 40 · Chapter 1')).toBeTruthy();
+    expect(screen.getByText('Genesis 1; John 3:16; Exodus 12:21–51')).toBeTruthy();
+    expect(screen.getByText('Assignment dated-1 · Definition version retained-calendar-version')).toBeTruthy();
     expect(plans.enrollInCalendar).not.toHaveBeenCalled();
   });
 

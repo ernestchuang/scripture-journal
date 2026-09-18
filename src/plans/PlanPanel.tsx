@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CalendarEnrollmentRequest, CalendarPlanEnrollment, CalendarScheduleMode, DatedPlanAssignment, PlanAssignment, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, StreamEnrollment } from '../platform/plans';
 import type { PlanDefinitionApi } from '../platform/plans';
+import { formatPassage } from '../scripture/books';
 import './plans.css';
 
 type PlanDetails =
@@ -29,7 +30,7 @@ function CalendarAssignments({ items, selectedId, assignments, onSelect, onRetry
     {selected && <p>Calendar policy {selected.scheduleMode}, starting {selected.startDate}; definition version {selected.definitionVersionId}.</p>}
     {assignments?.kind === 'loading' && <p role="status">Loading dated calendar assignments…</p>}
     {assignments?.kind === 'error' && <div role="alert" className="plan-error">Could not load dated calendar assignments: {assignments.message}<button onClick={onRetry}>Retry calendar assignments</button></div>}
-    {assignments?.kind === 'ready' && (assignments.items.length === 0 ? <p>No retained calendar assignments.</p> : <ol>{assignments.items.map(assignment => <li key={assignment.id}><strong>{assignment.localDate}</strong><span>Definition day {assignment.definitionDay}</span><span>{assignment.passages.map(passage => `Book ${passage.book} · Chapter ${passage.chapter}`).join('; ')}</span><small>Assignment {assignment.id} · Definition version {assignment.definitionVersionId}</small></li>)}</ol>)}
+    {assignments?.kind === 'ready' && (assignments.items.length === 0 ? <p>No retained calendar assignments.</p> : <ol>{assignments.items.map(assignment => <li key={assignment.id}><strong>{assignment.localDate}</strong><span>Definition day {assignment.definitionDay}</span><span>{assignment.passages.map(formatPassage).join('; ')}</span><small>Assignment {assignment.id} · Definition version {assignment.definitionVersionId}</small></li>)}</ol>)}
   </section>;
 }
 
