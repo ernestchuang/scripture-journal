@@ -3,7 +3,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const native = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 
-import { nativePlans, type PlanDefinitionVersion } from './plans';
+import {
+  nativePlans,
+  type CompleteStreamRequest,
+  type PlanAssignment,
+  type PlanDefinitionVersion,
+  type PlanEnrollment,
+  type StreamEnrollment,
+} from './plans';
 
 const version: PlanDefinitionVersion = {
   id: 'version-1',
@@ -29,6 +36,34 @@ const streamVersion: PlanDefinitionVersion = {
       streams: [{ id: 'stream-1', name: 'Stream 1', chapters: [{ book: 1, chapter: 1 }] }],
     },
   },
+};
+
+const streams: StreamEnrollment[] = [
+  { streamId: 'old-testament', startingPosition: 0, loopAfterEnd: true },
+];
+
+const enrollment: PlanEnrollment = {
+  id: 'enrollment-1',
+  definitionVersionId: 'version-1',
+  createdAt: '2026-09-18T00:00:00Z',
+};
+
+const assignment: PlanAssignment = {
+  id: 'assignment-1',
+  enrollmentId: enrollment.id,
+  streamId: 'old-testament',
+  ordinal: 1,
+  cycle: 1,
+  passage: { book: 1, chapter: 1 },
+  streamPosition: null,
+  progressId: 'progress-1',
+};
+
+const completionRequest: CompleteStreamRequest = {
+  enrollmentId: enrollment.id,
+  streamId: assignment.streamId,
+  expectedAssignmentId: assignment.id,
+  expectedProgressId: assignment.progressId,
 };
 
 describe('native plan-definition adapter', () => {
@@ -60,5 +95,49 @@ describe('native plan-definition adapter', () => {
     await expect(nativePlans.importPlanDefinitionJson('{')).rejects.toBe(error);
     expect(native.invoke).toHaveBeenCalledTimes(1);
     expect(native.invoke).toHaveBeenCalledWith('import_plan_definition_json', { input: '{' });
+  });
+
+  it('maps stream progress operations with the complete stale-completion precondition', async () => {
+    native.invoke
+      .mockResolvedValueOnce(enrollment)
+      .mockResolvedValueOnce([assignment])
+      .mockResolvedValueOnce({
+        id: 'completion-1',
+        assignmentId: assignment.id,
+        completedAt: '2026-09-18T00:00:01Z',
+      })
+      .mockResolvedValueOnce(undefined);
+
+    await expect(nativePlans.enrollInChapterStreams('version-1', streams)).resolves.toEqual(enrollment);
+    await expect(nativePlans.activePlanAssignments(enrollment.id)).resolves.toEqual([assignment]);
+    await expect(nativePlans.completePlanStream(completionRequest)).resolves.toMatchObject({
+      assignmentId: assignment.id,
+    });
+    await expect(nativePlans.undoPlanCompletion('completion-1')).resolves.toBeUndefined();
+
+    expect(native.invoke).toHaveBeenNthCalledWith(1, 'enroll_in_chapter_streams', {
+      definitionVersionId: 'version-1',
+      streams,
+    });
+    expect(native.invoke).toHaveBeenNthCalledWith(2, 'active_plan_assignments', {
+      enrollmentId: enrollment.id,
+    });
+    expect(native.invoke).toHaveBeenNthCalledWith(3, 'complete_plan_stream', {
+      request: completionRequest,
+    });
+    expect(native.invoke).toHaveBeenNthCalledWith(4, 'undo_plan_completion', {
+      completionId: 'completion-1',
+    });
+  });
+
+  it('propagates a stale completion error without retrying or reporting success', async () => {
+    const error = new Error('Conflict: assignment changed since it was loaded');
+    native.invoke.mockRejectedValueOnce(error);
+
+    await expect(nativePlans.completePlanStream(completionRequest)).rejects.toBe(error);
+    expect(native.invoke).toHaveBeenCalledTimes(1);
+    expect(native.invoke).toHaveBeenCalledWith('complete_plan_stream', {
+      request: completionRequest,
+    });
   });
 });
