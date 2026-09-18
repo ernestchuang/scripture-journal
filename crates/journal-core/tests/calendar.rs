@@ -541,6 +541,105 @@ fn schema_ten_migration_refuses_cross_owned_retained_undo() {
 }
 
 #[test]
+fn schema_ten_migration_serializes_with_cross_owned_writer() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(mcheyne_plan_definition())
+        .unwrap();
+    let first = store
+        .enroll_in_calendar(&version.id, date(2026, 1, 1), CalendarScheduleMode::DayOne)
+        .unwrap();
+    let second = store
+        .enroll_in_calendar(&version.id, date(2026, 2, 1), CalendarScheduleMode::DayOne)
+        .unwrap();
+    let first_assignment = store.calendar_plan_assignments(&first.id).unwrap()[0].clone();
+    let second_assignment = store.calendar_plan_assignments(&second.id).unwrap()[0].clone();
+    let completion = store
+        .complete_calendar_assignment(&first.id, &first_assignment.id)
+        .unwrap();
+    drop(store);
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute_batch("DROP TRIGGER plan_calendar_completion_undos_match; PRAGMA user_version=10; BEGIN IMMEDIATE;").unwrap();
+    let open_path = path.clone();
+    let opener = std::thread::spawn(move || {
+        JournalStore::open(&open_path)
+            .err()
+            .map(|error| error.to_string())
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    writer.execute(
+        "INSERT INTO plan_calendar_completion_undos(id,completion_id,enrollment_id,assignment_id,undone_at) VALUES('00000000-0000-4000-8000-000000000094',?1,?2,?3,'2026-01-01T00:00:00Z')",
+        rusqlite::params![completion.id, second.id, second_assignment.id],
+    ).unwrap();
+    writer.execute_batch("COMMIT;").unwrap();
+    assert!(opener
+        .join()
+        .unwrap()
+        .unwrap()
+        .contains("ownership mismatch"));
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        10
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM plan_calendar_completion_undos",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn schema_ten_migration_preserves_valid_populated_undo_history() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(mcheyne_plan_definition())
+        .unwrap();
+    let enrollment = store
+        .enroll_in_calendar(&version.id, date(2026, 1, 1), CalendarScheduleMode::DayOne)
+        .unwrap();
+    let assignment = store.calendar_plan_assignments(&enrollment.id).unwrap()[0].clone();
+    let completion = store
+        .complete_calendar_assignment(&enrollment.id, &assignment.id)
+        .unwrap();
+    store
+        .undo_calendar_completion(&enrollment.id, &assignment.id, &completion.id)
+        .unwrap();
+    let retained = store.calendar_completion_history(&enrollment.id).unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER plan_calendar_completion_undos_match; PRAGMA user_version=10;",
+    )
+    .unwrap();
+    drop(conn);
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .calendar_completion_history(&enrollment.id)
+            .unwrap(),
+        retained
+    );
+    drop(reopened);
+    let reopened_again = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        reopened_again
+            .calendar_completion_history(&enrollment.id)
+            .unwrap(),
+        retained
+    );
+}
+
+#[test]
 fn schema_eight_migration_preserves_populated_calendar_rows() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");

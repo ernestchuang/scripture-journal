@@ -175,14 +175,14 @@ impl JournalStore {
             tx.pragma_update(None, "user_version", 11)?;
             tx.commit()?;
         } else if version == 10 {
-            let mismatches: i64 = conn.query_row(
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mismatches: i64 = tx.query_row(
                 "SELECT count(*) FROM plan_calendar_completion_undos u WHERE NOT EXISTS(SELECT 1 FROM plan_calendar_completions c WHERE c.id=u.completion_id AND c.assignment_id=u.assignment_id AND c.enrollment_id=u.enrollment_id)",
                 [], |row| row.get(0))?;
             ensure!(
                 mismatches == 0,
                 "Calendar undo ownership mismatch; refusing migration"
             );
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
             tx.pragma_update(None, "user_version", 11)?;
             tx.commit()?;
