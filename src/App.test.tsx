@@ -501,5 +501,13 @@ describe('native application close lifecycle', () => {
     expect(await screen.findByRole('button', { name: 'Apply restored appearance/reading preferences' })).toBeTruthy();
     expect(values.get('scripture-journal.appearance')).toBe('light');
     expect(values.get('scripture-journal.reader-location')).toBeUndefined();
+
+    native.saveEntry.mockRejectedValueOnce(new Error('Synthetic save failure'));
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    fireEvent.change(await screen.findByLabelText(/Reflection Markdown/), { target: { value: 'Unsaved before preference reload' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply restored appearance/reading preferences' }));
+    expect(await screen.findByText(/preferences could not be applied.*Synthetic save failure/i)).toBeTruthy();
+    expect(values.get('scripture-journal.appearance')).toBe('light');
+    expect(native.invoke.mock.calls.some(([command]) => command === 'acknowledge_restored_preferences')).toBe(false);
   });
 });

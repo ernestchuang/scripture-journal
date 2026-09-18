@@ -102,6 +102,7 @@ export function App() {
 
   async function applyRestoredPreferences() {
     try {
+      await persistence.current?.flush();
       for (const key of portablePreferenceKeys) {
         const value = restoredPreferences[key];
         if (value !== undefined) localStorage.setItem(key, value);

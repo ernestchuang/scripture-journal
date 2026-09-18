@@ -36,6 +36,7 @@ fn open_startup_journal(
     let pending_preferences = root.join("restore-preferences-pending.json");
     let restored_preferences = root.join("restore-preferences-restored.json");
     let mut outcome = StartupRestoreOutcome::default();
+    let mut restore_failed = false;
     match journal_core::backup::activate_pending(&journal_path, &staged) {
         Ok(true) => {
             if pending_preferences.exists() {
@@ -49,6 +50,7 @@ fn open_startup_journal(
         }
         Ok(false) => {}
         Err(error) => {
+            restore_failed = true;
             let _ = std::fs::remove_file(&pending_preferences);
             outcome.notice = Some(format!(
                 "Restore failed; the current journal was retained. {error:#}"
@@ -62,13 +64,14 @@ fn open_startup_journal(
         {
             Ok(preferences) => {
                 outcome.preferences = preferences;
-                if !outcome.preferences.is_empty() {
+                if !outcome.preferences.is_empty() && !restore_failed {
                     outcome.notice = Some("Backup restored. Restored appearance and reading preferences are ready to apply.".into());
                 }
             }
-            Err(error) => {
+            Err(error) if !restore_failed => {
                 outcome.notice = Some(format!("The journal was restored, but its optional preferences could not be read. The restored journal remains active. {error}"));
             }
+            Err(_) => {}
         }
     }
     Ok((
@@ -1983,5 +1986,23 @@ mod backup_startup_tests {
             .notice
             .unwrap()
             .contains("current journal was retained"));
+    }
+
+    #[test]
+    fn failed_new_restore_is_not_hidden_by_an_older_preferences_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        drop(JournalStore::open(&root.path().join("journal.sqlite3")).unwrap());
+        std::fs::write(root.path().join("restore-pending.sqlite3"), b"invalid").unwrap();
+        std::fs::write(
+            root.path().join("restore-preferences-restored.json"),
+            br#"{"scripture-journal.appearance":"dark"}"#,
+        )
+        .unwrap();
+        let (_, _, outcome) = open_startup_journal(root.path()).unwrap();
+        assert!(outcome
+            .notice
+            .unwrap()
+            .contains("current journal was retained"));
+        assert_eq!(outcome.preferences["scripture-journal.appearance"], "dark");
     }
 }
