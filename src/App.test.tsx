@@ -16,6 +16,7 @@ const native = vi.hoisted(() => ({
   registerFourStreamPlan: vi.fn(),
   enrollInChapterStreams: vi.fn(),
   completePlanStream: vi.fn(),
+  undoPlanCompletion: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
@@ -42,6 +43,7 @@ vi.mock('./platform/plans', () => ({
     registerFourStreamPlan: native.registerFourStreamPlan,
     enrollInChapterStreams: native.enrollInChapterStreams,
     completePlanStream: native.completePlanStream,
+    undoPlanCompletion: native.undoPlanCompletion,
   },
 }));
 vi.mock('./scripture/Reader', () => ({ Reader: () => null }));
@@ -83,6 +85,7 @@ beforeEach(() => {
   native.registerFourStreamPlan.mockReset();
   native.enrollInChapterStreams.mockReset();
   native.completePlanStream.mockReset();
+  native.undoPlanCompletion.mockReset();
 });
 
 afterEach(() => {
@@ -244,5 +247,29 @@ describe('native application close lifecycle', () => {
     expect(native.saveEntry).toHaveBeenCalledTimes(1);
     expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while completing' } });
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this while completing');
+  });
+
+  it('preserves and autosaves dirty writing while explicitly undoing a completion', async () => {
+    const enrollment = { id: 'enrollment-1', definitionVersionId: 'version-1', createdAt: '2026-09-18T00:00:00Z' };
+    const completion = { id: 'completion-1', assignmentId: 'assignment-1', enrollmentId: enrollment.id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, completedAt: '2026-09-18T00:00:01Z', undone: false };
+    native.listPlanEnrollments.mockResolvedValue([enrollment]);
+    native.getPlanDefinitionVersion.mockResolvedValue({ id: 'version-1', planId: 'plan-1', version: 1, createdAt: enrollment.createdAt, definition: { schemaVersion: 1, name: 'Four streams', schedule: { kind: 'chapterStreams', streams: [] } } });
+    native.activePlanAssignments.mockResolvedValue([]);
+    native.planCompletionHistory.mockResolvedValueOnce([completion]).mockResolvedValueOnce([{ ...completion, undone: true }]);
+    native.undoPlanCompletion.mockResolvedValue(undefined);
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    const undo = await screen.findByRole('button', { name: 'Undo completion completion-1' });
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Keep this while undoing' } });
+    fireEvent.click(undo);
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(native.undoPlanCompletion).toHaveBeenCalledWith(completion.id);
+    expect(native.saveEntry).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while undoing' } });
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this while undoing');
   });
 });

@@ -12,8 +12,9 @@ type PlanHistory =
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
   | { kind: 'ready'; items: PlanCompletionHistoryItem[] };
+type ReadyPlanHistory = Extract<PlanHistory, { kind: 'ready' }>;
 
-type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream'>;
+type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'>;
 
 export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [enrollments, setEnrollments] = useState<PlanEnrollment[] | null>(null);
@@ -31,23 +32,32 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [enrolling, setEnrolling] = useState(false);
   const [completingId, setCompletingId] = useState('');
   const [completionMessage, setCompletionMessage] = useState('');
+  const [undoingId, setUndoingId] = useState('');
+  const [undoMessage, setUndoMessage] = useState('');
+  const [undoRefreshFailed, setUndoRefreshFailed] = useState(false);
   const detailEpoch = useRef(0);
   const historyEpoch = useRef(0);
   const actionEpoch = useRef(0);
   const completionEpoch = useRef(0);
+  const undoEpoch = useRef(0);
   const discoveryEpoch = useRef(0);
   const confirmedEnrollment = useRef<PlanEnrollment | null>(null);
   const confirmedCompletions = useRef(new Map<string, string>());
+  const confirmedUndos = useRef(new Map<string, string>());
   const readyDetails = useRef(new Map<string, ReadyPlanDetails>());
+  const readyHistory = useRef(new Map<string, ReadyPlanHistory>());
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
 
   useEffect(() => () => {
     actionEpoch.current += 1;
     completionEpoch.current += 1;
+    undoEpoch.current += 1;
     confirmedEnrollment.current = null;
     confirmedCompletions.current.clear();
+    confirmedUndos.current.clear();
     readyDetails.current.clear();
+    readyHistory.current.clear();
   }, [api]);
 
   useEffect(() => {
@@ -95,11 +105,28 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     if (!api || !enrollment) return;
     let active = true;
     const epoch = ++historyEpoch.current;
-    setHistory({ kind: 'loading' });
+    const retained = readyHistory.current.get(enrollment.id);
+    const hasConfirmedUndo = [...confirmedUndos.current.values()].includes(enrollment.id);
+    setHistory(hasConfirmedUndo && retained ? retained : { kind: 'loading' });
+    setUndoMessage('');
+    setUndoRefreshFailed(false);
     api.planCompletionHistory(enrollment.id).then(items => {
-      if (active && epoch === historyEpoch.current) setHistory({ kind: 'ready', items });
+      if (!active || epoch !== historyEpoch.current) return;
+      const visible = items.map(item => confirmedUndos.current.has(item.id) ? { ...item, undone: true } : item);
+      for (const [completionId, enrollmentId] of confirmedUndos.current) {
+        if (enrollmentId === enrollment.id && items.some(item => item.id === completionId && item.undone)) confirmedUndos.current.delete(completionId);
+      }
+      const ready: ReadyPlanHistory = { kind: 'ready', items: visible };
+      readyHistory.current.set(enrollment.id, ready);
+      setHistory(ready);
     }).catch(error => {
-      if (active && epoch === historyEpoch.current) setHistory({ kind: 'error', message: String(error) });
+      if (!active || epoch !== historyEpoch.current) return;
+      const recovered = hasConfirmedUndo ? readyHistory.current.get(enrollment.id) : undefined;
+      if (recovered) {
+        setHistory(recovered);
+        setUndoMessage(`Completion history could not be refreshed: ${String(error)}`);
+        setUndoRefreshFailed(true);
+      } else setHistory({ kind: 'error', message: String(error) });
     });
     return () => { active = false; };
   }, [api, enrollments, historyAttempt, selectedId]);
@@ -155,7 +182,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   }
 
   async function complete(assignment: PlanAssignment, definition: PlanDefinitionVersion) {
-    if (!api || completingId) return;
+    if (!api || completingId || undoingId) return;
     const epoch = ++completionEpoch.current;
     setCompletingId(assignment.id); setCompletionMessage('');
     try {
@@ -200,6 +227,34 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     }
   }
 
+  async function undo(item: PlanCompletionHistoryItem) {
+    if (!api || completingId || undoingId || item.undone) return;
+    const epoch = ++undoEpoch.current;
+    setUndoingId(item.id); setUndoMessage(''); setUndoRefreshFailed(false);
+    try {
+      await api.undoPlanCompletion(item.id);
+      if (epoch !== undoEpoch.current) return;
+      confirmedUndos.current.set(item.id, item.enrollmentId);
+      if (selectedIdRef.current !== item.enrollmentId) return;
+      setHistory(current => {
+        const retained = current?.kind === 'ready' ? current : readyHistory.current.get(item.enrollmentId);
+        if (!retained) return current;
+        const ready: ReadyPlanHistory = { kind: 'ready', items: retained.items.map(value => value.id === item.id ? { ...value, undone: true } : value) };
+        readyHistory.current.set(item.enrollmentId, ready);
+        return ready;
+      });
+      setHistoryAttempt(value => value + 1);
+      setDetailAttempt(value => value + 1);
+    } catch (error) {
+      if (epoch === undoEpoch.current && selectedIdRef.current === item.enrollmentId) {
+        setUndoMessage(`Could not undo completion. Later active completions must be undone first. ${String(error)}`);
+        setUndoRefreshFailed(false);
+      }
+    } finally {
+      if (epoch === undoEpoch.current) setUndoingId('');
+    }
+  }
+
   if (!api) return <aside className="plan-panel" aria-label="Reading plans"><h2>Reading plans</h2><p>Plans are available in the native desktop app.</p></aside>;
   return <aside className="plan-panel" aria-label="Reading plans">
     <header><div><span>READING PLANS</span><h2>Retained plans</h2></div></header>
@@ -230,7 +285,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       {details?.kind === 'error' && <div role="alert" className="plan-error">Could not load this retained plan: {details.message}<button onClick={() => setDetailAttempt(value => value + 1)}>Retry selection</button></div>}
       {details?.kind === 'ready' && <section className="plan-details" aria-label="Current plan assignments">
         <h3>{details.definition.definition.name}</h3>
-        {details.assignments.length === 0 ? <p>This enrollment is exhausted; it has no active assignments.</p> : <ul>{details.assignments.map(assignment => <li key={assignment.id}><strong>{assignment.streamId}</strong><span>Book {assignment.passage.book} · Chapter {assignment.passage.chapter}</span><button disabled={!!completingId} onClick={() => void complete(assignment, details.definition)}>{completingId === assignment.id ? 'Completing…' : `Complete ${assignment.streamId}`}</button></li>)}</ul>}
+        {details.assignments.length === 0 ? <p>This enrollment is exhausted; it has no active assignments.</p> : <ul>{details.assignments.map(assignment => <li key={assignment.id}><strong>{assignment.streamId}</strong><span>Book {assignment.passage.book} · Chapter {assignment.passage.chapter}</span><button disabled={!!completingId || !!undoingId} onClick={() => void complete(assignment, details.definition)}>{completingId === assignment.id ? 'Completing…' : `Complete ${assignment.streamId}`}</button></li>)}</ul>}
         {completionMessage && <div role="alert" className="plan-error">{completionMessage}<button onClick={() => setDetailAttempt(value => value + 1)}>Retry assignments</button></div>}
       </section>}
       {history?.kind === 'loading' && <p role="status">Loading completion history…</p>}
@@ -238,8 +293,9 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       {history?.kind === 'ready' && <section className="plan-history" aria-label="Retained completion history">
         <h3>Completion history</h3>
         {history.items.length === 0 ? <p>No retained completions yet.</p> : <ol>{history.items.map(item => <li key={item.id}>
-          <strong>{item.streamId}</strong><span>Book {item.passage.book} · Chapter {item.passage.chapter} · Cycle {item.cycle}</span><span>Completed {item.completedAt}</span><small>Completion {item.id} · Assignment {item.assignmentId}</small><em>{item.undone ? 'Undone' : 'Current completion'}</em>
+          <strong>{item.streamId}</strong><span>Book {item.passage.book} · Chapter {item.passage.chapter} · Cycle {item.cycle}</span><span>Completed {item.completedAt}</span><small>Completion {item.id} · Assignment {item.assignmentId}</small><em>{item.undone ? 'Undone' : 'Current completion'}</em>{!item.undone && <button disabled={!!undoingId || !!completingId} onClick={() => void undo(item)}>{undoingId === item.id ? 'Undoing…' : `Undo completion ${item.id}`}</button>}
         </li>)}</ol>}
+        {undoMessage && <div role="alert" className="plan-error">{undoMessage}{undoRefreshFailed && <button onClick={() => setHistoryAttempt(value => value + 1)}>Retry completion history</button>}</div>}
       </section>}
     </>}
   </aside>;

@@ -19,7 +19,7 @@ const fourStream = {
 };
 const created: PlanEnrollment = { id: 'enrollment-new', definitionVersionId: fourStream.id, createdAt: '2026-09-18T00:00:02Z' };
 const history = (id: string, enrollmentId = first.id, undone = false) => ({ id, assignmentId: 'assignment-1', enrollmentId, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, completedAt: '2026-09-18T00:00:03Z', undone });
-const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream'> => ({
+const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
   activePlanAssignments: vi.fn(async id => id === first.id ? [{ id: 'assignment-1', enrollmentId: id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' }] : []),
@@ -27,6 +27,7 @@ const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefiniti
   registerFourStreamPlan: vi.fn(async () => fourStream),
   enrollInChapterStreams: vi.fn(async () => created),
   completePlanStream: vi.fn(async request => ({ id: 'completion-1', assignmentId: request.expectedAssignmentId, completedAt: '2026-09-18T00:00:03Z' })),
+  undoPlanCompletion: vi.fn(async () => undefined),
 });
 
 describe('retained plan panel', () => {
@@ -561,5 +562,95 @@ describe('retained plan panel', () => {
     expect(await screen.findByText('Book 19 · Chapter 2')).toBeTruthy();
     expect(screen.getByText('Book 1 · Chapter 1')).toBeTruthy();
     expect(plans.completePlanStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('undoes the exact displayed completion once and refreshes history and assignments independently', async () => {
+    let resolveUndo!: () => void;
+    const plans = api();
+    const item = history('completion-current');
+    const restored = { id: 'assignment-restored', enrollmentId: first.id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-restored' };
+    vi.mocked(plans.planCompletionHistory).mockResolvedValueOnce([item]).mockResolvedValueOnce([{ ...item, undone: true }]);
+    vi.mocked(plans.activePlanAssignments).mockResolvedValueOnce([]).mockResolvedValueOnce([restored]);
+    vi.mocked(plans.undoPlanCompletion).mockImplementationOnce(() => new Promise(resolve => { resolveUndo = resolve; }));
+    render(<PlanPanel api={plans} />);
+    const button = await screen.findByRole('button', { name: 'Undo completion completion-current' });
+    fireEvent.click(button); fireEvent.click(button);
+    expect((screen.getByRole('button', { name: 'Undoing…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(plans.undoPlanCompletion).toHaveBeenCalledTimes(1);
+    expect(plans.undoPlanCompletion).toHaveBeenCalledWith(item.id);
+    await act(async () => { resolveUndo(); });
+    await waitFor(() => expect(plans.planCompletionHistory).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(plans.activePlanAssignments).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('Undone')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Undo completion completion-current' })).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Complete psalms' })).toBeTruthy();
+  });
+
+  it('explains causal undo rejection without changing history or retrying mutation', async () => {
+    const plans = api();
+    vi.mocked(plans.planCompletionHistory).mockResolvedValueOnce([history('completion-current')]);
+    vi.mocked(plans.undoPlanCompletion).mockRejectedValueOnce(new Error('Undo later completions first'));
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo completion completion-current' }));
+    expect(await screen.findByText(/Later active completions must be undone first.*Undo later completions first/)).toBeTruthy();
+    expect(screen.getByText('Current completion')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Undo completion completion-current' })).toBeTruthy();
+    expect(plans.undoPlanCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains confirmed undo when history and assignment refresh fail, then recovers reads only', async () => {
+    const plans = api();
+    const item = history('completion-current');
+    vi.mocked(plans.planCompletionHistory)
+      .mockResolvedValueOnce([item])
+      .mockRejectedValueOnce(new Error('history refresh failed'))
+      .mockResolvedValueOnce([{ ...item, undone: true }]);
+    vi.mocked(plans.activePlanAssignments).mockResolvedValueOnce([]).mockRejectedValueOnce(new Error('assignment refresh failed')).mockResolvedValueOnce([]);
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo completion completion-current' }));
+    expect(await screen.findByText(/Completion history could not be refreshed: Error: history refresh failed/)).toBeTruthy();
+    expect(screen.getByText('Undone')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Undo completion completion-current' })).toBeNull();
+    expect(await screen.findByText(/assignment refresh failed/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry completion history' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry selection' }));
+    await waitFor(() => expect(plans.planCompletionHistory).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(plans.activePlanAssignments).toHaveBeenCalledTimes(3));
+    expect(screen.getByText('Undone')).toBeTruthy();
+    expect(plans.undoPlanCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a late undo rejection after selection changes', async () => {
+    let rejectUndo!: (reason: unknown) => void;
+    const plans = api();
+    vi.mocked(plans.planCompletionHistory).mockResolvedValueOnce([history('completion-current')]).mockResolvedValueOnce([]);
+    vi.mocked(plans.undoPlanCompletion).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectUndo = reject; }));
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo completion completion-current' }));
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: second.id } });
+    expect(await screen.findByText('No retained completions yet.')).toBeTruthy();
+    await act(async () => { rejectUndo(new Error('late undo rejection')); });
+    expect(screen.queryByText(/late undo rejection/)).toBeNull();
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(second.id);
+  });
+
+  it('keeps a confirmed undo when selection changes before success and returns', async () => {
+    let resolveUndo!: () => void;
+    const plans = api();
+    const item = history('completion-current');
+    vi.mocked(plans.planCompletionHistory)
+      .mockResolvedValueOnce([item])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ ...item, undone: false }]);
+    vi.mocked(plans.undoPlanCompletion).mockImplementationOnce(() => new Promise(resolve => { resolveUndo = resolve; }));
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo completion completion-current' }));
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: second.id } });
+    expect(await screen.findByText('No retained completions yet.')).toBeTruthy();
+    await act(async () => { resolveUndo(); });
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: first.id } });
+    expect(await screen.findByText('Undone')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Undo completion completion-current' })).toBeNull();
+    expect(plans.undoPlanCompletion).toHaveBeenCalledTimes(1);
   });
 });
