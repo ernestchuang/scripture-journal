@@ -181,6 +181,24 @@ pub struct PlanCompletion {
     pub completed_at: String,
 }
 
+/// One immutable completion record with the assignment snapshot required to
+/// explain it after an enrollment is reopened. Results are oldest first by
+/// completion timestamp, breaking timestamp ties by completion ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanCompletionHistoryItem {
+    pub id: String,
+    pub assignment_id: String,
+    pub enrollment_id: String,
+    pub stream_id: String,
+    pub ordinal: u32,
+    pub cycle: u32,
+    pub passage: Passage,
+    pub stream_position: Option<u32>,
+    pub completed_at: String,
+    pub undone: bool,
+}
+
 pub(crate) fn enroll(
     conn: &mut Connection,
     version_id: &str,
@@ -271,6 +289,27 @@ pub(crate) fn active_assignments(
         .query_map([enrollment_id], assignment_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(assignments)
+}
+
+/// Returns retained completion records for one enrollment, without changing
+/// progress. An unknown enrollment has no retained assignments and returns an
+/// empty history.
+pub(crate) fn completion_history(
+    conn: &Connection,
+    enrollment_id: &str,
+) -> Result<Vec<PlanCompletionHistoryItem>> {
+    let mut statement = conn.prepare(
+        "SELECT c.id,c.assignment_id,a.enrollment_id,a.stream_id,a.ordinal,a.cycle,a.passage,a.stream_position,c.completed_at,
+                EXISTS(SELECT 1 FROM reading_completion_undos u WHERE u.completion_id=c.id)
+         FROM reading_completions c
+         JOIN plan_assignments a ON a.id=c.assignment_id
+         WHERE a.enrollment_id=?1
+         ORDER BY c.completed_at,c.id",
+    )?;
+    let history = statement
+        .query_map([enrollment_id], completion_history_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(history)
 }
 
 pub(crate) fn complete_stream(
@@ -440,6 +479,25 @@ fn assignment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanAssignment> {
         passage,
         progress_id: row.get(6)?,
         stream_position: row.get(7)?,
+    })
+}
+
+fn completion_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanCompletionHistoryItem> {
+    let text: String = row.get(6)?;
+    let passage = serde_json::from_str(&text).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(PlanCompletionHistoryItem {
+        id: row.get(0)?,
+        assignment_id: row.get(1)?,
+        enrollment_id: row.get(2)?,
+        stream_id: row.get(3)?,
+        ordinal: row.get(4)?,
+        cycle: row.get(5)?,
+        passage,
+        stream_position: row.get(7)?,
+        completed_at: row.get(8)?,
+        undone: row.get(9)?,
     })
 }
 

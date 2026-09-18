@@ -2337,6 +2337,172 @@ fn complete_active(store: &mut JournalStore, enrollment_id: &str) -> journal_cor
         .unwrap()
 }
 
+fn complete_stream(
+    store: &mut JournalStore,
+    enrollment_id: &str,
+    stream_id: &str,
+) -> journal_core::PlanCompletion {
+    let assignment = store
+        .active_plan_assignments(enrollment_id)
+        .unwrap()
+        .into_iter()
+        .find(|assignment| assignment.stream_id == stream_id)
+        .unwrap();
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment_id.into(),
+            stream_id: stream_id.into(),
+            expected_assignment_id: assignment.id,
+            expected_progress_id: assignment.progress_id,
+        })
+        .unwrap()
+}
+
+#[test]
+fn retained_completion_history_is_ordered_isolated_and_survives_undo_recompletion_and_reopen() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Completion history"))
+        .unwrap();
+    let selections = || {
+        vec![
+            StreamEnrollment {
+                stream_id: "old-testament".into(),
+                starting_position: 0,
+                loop_after_end: true,
+            },
+            StreamEnrollment {
+                stream_id: "new-testament".into(),
+                starting_position: 0,
+                loop_after_end: true,
+            },
+        ]
+    };
+    let first = store
+        .enroll_in_chapter_streams(&version.id, selections())
+        .unwrap();
+    let second = store
+        .enroll_in_chapter_streams(&version.id, selections())
+        .unwrap();
+    assert!(store
+        .plan_completion_history(&Uuid::new_v4().to_string())
+        .unwrap()
+        .is_empty());
+    assert!(store.plan_completion_history(&first.id).unwrap().is_empty());
+
+    let first_old = complete_stream(&mut store, &first.id, "old-testament");
+    let first_new = complete_stream(&mut store, &first.id, "new-testament");
+    let first_old_second = complete_stream(&mut store, &first.id, "old-testament");
+    let first_old_cycle_two = complete_stream(&mut store, &first.id, "old-testament");
+    store.undo_plan_completion(&first_old_cycle_two.id).unwrap();
+    store.undo_plan_completion(&first_old_second.id).unwrap();
+    let first_old_recompletion = complete_stream(&mut store, &first.id, "old-testament");
+    assert_eq!(
+        first_old_recompletion.assignment_id,
+        first_old_second.assignment_id
+    );
+
+    let tied_assignments = store.active_plan_assignments(&second.id).unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for (id, assignment) in [
+        ("00000000-0000-4000-8000-000000000001", &tied_assignments[0]),
+        ("00000000-0000-4000-8000-000000000002", &tied_assignments[1]),
+    ] {
+        conn.execute(
+            "INSERT INTO reading_completions(id,assignment_id,completed_at) VALUES(?1,?2,'2100-01-01T00:00:00Z')",
+            [id, assignment.id.as_str()],
+        )
+        .unwrap();
+    }
+    let retained_before: (String, String, String, String) = conn
+        .query_row(
+            "SELECT
+                (SELECT group_concat(id||':'||enrollment_id||':'||stream_id||':'||ordinal||':'||cycle||':'||passage,'|') FROM (SELECT id,enrollment_id,stream_id,ordinal,cycle,passage FROM plan_assignments ORDER BY id)),
+                (SELECT group_concat(id||':'||assignment_id||':'||completed_at,'|') FROM (SELECT id,assignment_id,completed_at FROM reading_completions ORDER BY id)),
+                (SELECT group_concat(completion_id,'|') FROM (SELECT completion_id FROM reading_completion_undos ORDER BY completion_id)),
+                (SELECT group_concat(id||':'||assignment_id||':'||sequence,'|') FROM (SELECT id,assignment_id,sequence FROM plan_stream_progress_epochs ORDER BY id))",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    drop(conn);
+
+    let store = JournalStore::open(&path).unwrap();
+    let history = store.plan_completion_history(&first.id).unwrap();
+    assert_eq!(history.len(), 5);
+    assert!(history.windows(2).all(|items| {
+        (items[0].completed_at.as_str(), items[0].id.as_str())
+            <= (items[1].completed_at.as_str(), items[1].id.as_str())
+    }));
+    assert_eq!(
+        history.iter().map(|item| &item.id).collect::<Vec<_>>(),
+        vec![
+            &first_old.id,
+            &first_new.id,
+            &first_old_second.id,
+            &first_old_cycle_two.id,
+            &first_old_recompletion.id,
+        ]
+    );
+    let old_second = history
+        .iter()
+        .find(|item| item.id == first_old_second.id)
+        .unwrap();
+    assert!(old_second.undone);
+    assert_eq!(
+        (
+            old_second.stream_id.as_str(),
+            old_second.ordinal,
+            old_second.cycle,
+            old_second.passage.chapter
+        ),
+        ("old-testament", 2, 1, 2)
+    );
+    let cycle_two = history
+        .iter()
+        .find(|item| item.id == first_old_cycle_two.id)
+        .unwrap();
+    assert!(cycle_two.undone);
+    assert_eq!(
+        (
+            cycle_two.assignment_id.as_str(),
+            cycle_two.ordinal,
+            cycle_two.cycle,
+            cycle_two.passage.chapter
+        ),
+        (first_old_cycle_two.assignment_id.as_str(), 3, 2, 1)
+    );
+    assert!(history
+        .iter()
+        .any(|item| item.id == first_old_recompletion.id && !item.undone));
+    let tied = store.plan_completion_history(&second.id).unwrap();
+    assert_eq!(
+        tied.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+        vec![
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+        ]
+    );
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let retained_after: (String, String, String, String) = conn
+        .query_row(
+            "SELECT
+                (SELECT group_concat(id||':'||enrollment_id||':'||stream_id||':'||ordinal||':'||cycle||':'||passage,'|') FROM (SELECT id,enrollment_id,stream_id,ordinal,cycle,passage FROM plan_assignments ORDER BY id)),
+                (SELECT group_concat(id||':'||assignment_id||':'||completed_at,'|') FROM (SELECT id,assignment_id,completed_at FROM reading_completions ORDER BY id)),
+                (SELECT group_concat(completion_id,'|') FROM (SELECT completion_id FROM reading_completion_undos ORDER BY completion_id)),
+                (SELECT group_concat(id||':'||assignment_id||':'||sequence,'|') FROM (SELECT id,assignment_id,sequence FROM plan_stream_progress_epochs ORDER BY id))",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(retained_after, retained_before);
+}
+
 #[test]
 fn repeated_chapter_occurrences_stop_loop_reopen_and_recomplete_in_order() {
     let dir = TempDir::new().unwrap();

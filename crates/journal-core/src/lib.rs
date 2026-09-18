@@ -15,8 +15,8 @@ pub use export::ExportReport;
 pub use plans::{
     four_stream_plan_definition, parse_plan_definition_json, serialize_plan_definition_json,
     ChapterRef, ChapterStream, CompleteStreamRequest, ExplicitScheduleDay, PlanAssignment,
-    PlanCompletion, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, PlanSchedule,
-    StreamEnrollment, MAX_PLAN_DEFINITION_JSON_BYTES,
+    PlanCompletion, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion,
+    PlanEnrollment, PlanSchedule, StreamEnrollment, MAX_PLAN_DEFINITION_JSON_BYTES,
 };
 
 /// A passage in canonical Protestant 66-book order using KJV versification.
@@ -364,6 +364,16 @@ impl JournalStore {
     pub fn active_plan_assignments(&self, enrollment_id: &str) -> Result<Vec<PlanAssignment>> {
         validate_id(enrollment_id)?;
         plans::active_assignments(&self.conn, enrollment_id)
+    }
+
+    /// Lists immutable completion records oldest first by completion timestamp,
+    /// breaking ties by completion ID. Unknown enrollments return no records.
+    pub fn plan_completion_history(
+        &self,
+        enrollment_id: &str,
+    ) -> Result<Vec<PlanCompletionHistoryItem>> {
+        validate_id(enrollment_id)?;
+        plans::completion_history(&self.conn, enrollment_id)
     }
 
     pub fn complete_plan_stream(
