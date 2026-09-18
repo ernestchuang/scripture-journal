@@ -108,7 +108,14 @@ export interface PlanAssignment {
   passage: Passage;
   streamPosition: number | null;
   progressId: string;
+  definitionVersionId?: string;
+  generationId?: string;
 }
+
+export interface StreamAdoptionBoundary { streamId: string; assignmentId: string; progressId: string }
+export interface AdoptStreamPlanRequest { enrollmentId: string; expectedDefinitionVersionId: string; targetDefinitionVersionId: string; streams: StreamAdoptionBoundary[] }
+export interface AdoptCalendarPlanRequest { enrollmentId: string; expectedDefinitionVersionId: string; targetDefinitionVersionId: string; effectiveFromLocalDate: string; expectedAssignmentId: string }
+export interface PlanAdoptionEvent { id: string; enrollmentId: string; previousDefinitionVersionId: string; targetDefinitionVersionId: string; scheduleKind: 'chapter-streams' | 'explicit-schedule'; createdAt: string }
 
 /** Both preconditions identify exactly the assignment epoch the user loaded. */
 export interface CompleteStreamRequest {
@@ -163,6 +170,9 @@ export interface PlanDefinitionApi {
   planCompletionHistory(enrollmentId: string): Promise<PlanCompletionHistoryItem[]>;
   completePlanStream(request: CompleteStreamRequest): Promise<PlanCompletion>;
   undoPlanCompletion(completionId: string): Promise<void>;
+  adoptChapterStreamPlan(request: AdoptStreamPlanRequest): Promise<PlanAdoptionEvent>;
+  adoptCalendarPlan(request: AdoptCalendarPlanRequest): Promise<PlanAdoptionEvent>;
+  planAdoptionHistory(enrollmentId: string): Promise<PlanAdoptionEvent[]>;
 }
 
 export const nativePlans: PlanDefinitionApi = {
@@ -203,4 +213,7 @@ export const nativePlans: PlanDefinitionApi = {
     invoke<PlanCompletion>('complete_plan_stream', { request }),
   undoPlanCompletion: completionId =>
     invoke<void>('undo_plan_completion', { completionId }),
+  adoptChapterStreamPlan: request => invoke<PlanAdoptionEvent>('adopt_chapter_stream_plan', { request }),
+  adoptCalendarPlan: request => invoke<PlanAdoptionEvent>('adopt_calendar_plan', { request }),
+  planAdoptionHistory: enrollmentId => invoke<PlanAdoptionEvent[]>('plan_adoption_history', { enrollmentId }),
 };

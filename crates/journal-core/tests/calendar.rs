@@ -1,10 +1,199 @@
 use chrono::NaiveDate;
 use journal_core::{
     expand_calendar_assignments, four_stream_plan_definition, mcheyne_plan_definition,
-    CalendarScheduleMode, ChapterRef, ChapterStream, CompleteStreamRequest, EntryContent,
-    ExplicitScheduleDay, JournalStore, Passage, PlanDefinition, PlanDefinitionVersion,
-    PlanSchedule, SaveRequest, StreamEnrollment,
+    AdoptCalendarPlanRequest, AdoptStreamPlanRequest, CalendarScheduleMode, ChapterRef,
+    ChapterStream, CompleteStreamRequest, EntryContent, ExplicitScheduleDay, JournalStore, Passage,
+    PlanDefinition, PlanDefinitionVersion, PlanSchedule, SaveRequest, StreamAdoptionBoundary,
+    StreamEnrollment,
 };
+
+#[test]
+fn stream_adoption_changes_only_new_successors_and_reuses_retained_history() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("adopt-stream.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let definition = |chapters: &[u32]| PlanDefinition {
+        schema_version: 1,
+        name: "Adoption stream".into(),
+        description: None,
+        schedule: PlanSchedule::ChapterStreams {
+            streams: vec![ChapterStream {
+                id: "sample".into(),
+                name: "Sample".into(),
+                chapters: chapters
+                    .iter()
+                    .map(|chapter| ChapterRef {
+                        book: 43,
+                        chapter: *chapter,
+                    })
+                    .collect(),
+            }],
+        },
+    };
+    let first = store
+        .create_plan_definition(definition(&[1, 2, 3]))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(
+            &first.id,
+            vec![StreamEnrollment {
+                stream_id: "sample".into(),
+                starting_position: 0,
+                loop_after_end: false,
+            }],
+        )
+        .unwrap();
+    let john1 = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    let completed1 = store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: "sample".into(),
+            expected_assignment_id: john1.id.clone(),
+            expected_progress_id: john1.progress_id,
+        })
+        .unwrap();
+    let john2 = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    let second = store
+        .create_plan_definition_version(&first.plan_id, definition(&[9, 2, 4]))
+        .unwrap();
+    let event = store
+        .adopt_chapter_stream_plan(AdoptStreamPlanRequest {
+            enrollment_id: enrollment.id.clone(),
+            expected_definition_version_id: first.id.clone(),
+            target_definition_version_id: second.id.clone(),
+            streams: vec![StreamAdoptionBoundary {
+                stream_id: "sample".into(),
+                assignment_id: john2.id.clone(),
+                progress_id: john2.progress_id.clone(),
+            }],
+        })
+        .unwrap();
+    store.undo_plan_completion(&completed1.id).unwrap();
+    let replay1 = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: "sample".into(),
+            expected_assignment_id: replay1.id,
+            expected_progress_id: replay1.progress_id,
+        })
+        .unwrap();
+    assert_eq!(
+        store.active_plan_assignments(&enrollment.id).unwrap()[0].id,
+        john2.id
+    );
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: "sample".into(),
+            expected_assignment_id: john2.id,
+            expected_progress_id: store.active_plan_assignments(&enrollment.id).unwrap()[0]
+                .progress_id
+                .clone(),
+        })
+        .unwrap();
+    let john4 = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        (
+            john4.passage.chapter,
+            john4.definition_version_id,
+            john4.generation_id
+        ),
+        (4, second.id, event.id)
+    );
+    drop(store);
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .plan_adoption_history(&enrollment.id)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        reopened.active_plan_assignments(&enrollment.id).unwrap()[0].id,
+        john4.id
+    );
+}
+
+#[test]
+fn calendar_adoption_replaces_only_future_generation_and_rejects_stale_rows() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("adopt-calendar.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let explicit = |chapters: &[u32]| PlanDefinition {
+        schema_version: 1,
+        name: "Short calendar".into(),
+        description: None,
+        schedule: PlanSchedule::ExplicitSchedule {
+            days: chapters
+                .iter()
+                .enumerate()
+                .map(|(index, chapter)| ExplicitScheduleDay {
+                    day: index as u32 + 1,
+                    passages: vec![whole_chapter(43, *chapter)],
+                })
+                .collect(),
+        },
+    };
+    let first = store.create_plan_definition(explicit(&[1, 2, 3])).unwrap();
+    let enrollment = store
+        .enroll_in_calendar(&first.id, date(2026, 1, 1), CalendarScheduleMode::DayOne)
+        .unwrap();
+    let before = store.calendar_plan_assignments(&enrollment.id).unwrap();
+    let target = store
+        .create_plan_definition_version(&first.plan_id, explicit(&[1, 8, 9]))
+        .unwrap();
+    store
+        .adopt_calendar_plan(AdoptCalendarPlanRequest {
+            enrollment_id: enrollment.id.clone(),
+            expected_definition_version_id: first.id,
+            target_definition_version_id: target.id.clone(),
+            effective_from_local_date: date(2026, 1, 2),
+            expected_assignment_id: before[1].id.clone(),
+        })
+        .unwrap();
+    let after = store.calendar_plan_assignments(&enrollment.id).unwrap();
+    assert_eq!(after[0], before[0]);
+    assert_ne!(after[1].id, before[1].id);
+    assert_eq!(
+        (after[1].passages[0].chapter, after[2].passages[0].chapter),
+        (8, 9)
+    );
+    assert!(store
+        .complete_calendar_assignment(&enrollment.id, &before[1].id)
+        .unwrap_err()
+        .to_string()
+        .contains("superseded"));
+    let completion = store
+        .complete_calendar_assignment(&enrollment.id, &after[1].id)
+        .unwrap();
+    drop(store);
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .calendar_completion_history(&enrollment.id)
+            .unwrap()[0]
+            .id,
+        completion.id
+    );
+    assert_eq!(
+        reopened.calendar_plan_assignments(&enrollment.id).unwrap(),
+        after
+    );
+}
 use tempfile::TempDir;
 
 #[test]
@@ -691,7 +880,7 @@ fn schema_eight_migration_preserves_populated_calendar_rows() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        12
+        13
     );
     assert_eq!(
         conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
@@ -969,11 +1158,11 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
         "plan_calendar_assignment_owner"
     ));
     drop(migrated);
-    assert_database_integrity(&path, 12);
+    assert_database_integrity(&path, 13);
 
     let mut reopened_again = JournalStore::open(&path).unwrap();
     assert_eq!(schema_seven_fingerprint(&path), retained);
-    assert_database_integrity(&path, 12);
+    assert_database_integrity(&path, 13);
     let calendar = reopened_again
         .enroll_in_calendar(
             &built_in.id,
@@ -1040,7 +1229,20 @@ fn downgrade_stream_provenance_to_v11(path: &std::path::Path) {
     let conn = rusqlite::Connection::open(path).unwrap();
     conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
     conn.execute_batch(
-        "DROP TRIGGER plan_assignment_successors_ordered;
+        "DROP TRIGGER plan_calendar_assignment_supersessions_immutable;
+         DROP TRIGGER plan_calendar_assignment_supersessions_retained;
+         DROP TRIGGER plan_calendar_assignment_generations_immutable;
+         DROP TRIGGER plan_calendar_assignment_generations_retained;
+         DROP TRIGGER plan_calendar_assignments_match;
+         DROP TRIGGER plan_adoption_events_immutable;
+         DROP TRIGGER plan_adoption_events_retained;
+         DROP TRIGGER plan_stream_adoption_boundaries_immutable;
+         DROP TRIGGER plan_stream_adoption_boundaries_retained;
+         DROP TABLE plan_calendar_assignment_supersessions;
+         DROP TABLE plan_calendar_assignment_generations;
+         DROP TABLE plan_stream_adoption_boundaries;
+         DROP TABLE plan_adoption_events;
+         DROP TRIGGER plan_assignment_successors_ordered;
          DROP TRIGGER plan_assignment_successors_retained;
          DROP TRIGGER plan_assignment_successors_immutable;
          DROP TABLE plan_assignment_successors;

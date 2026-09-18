@@ -1,8 +1,9 @@
 use journal_core::{
-    CalendarAssignmentCompletion, CalendarPlanEnrollment, CalendarScheduleMode,
-    CompleteStreamRequest, DatedPlanAssignment, Entry, ExportReport, JournalStore, PlanAssignment,
-    PlanCompletion, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion,
-    PlanEnrollment, Revision, SaveRequest, StreamEnrollment,
+    AdoptCalendarPlanRequest, AdoptStreamPlanRequest, CalendarAssignmentCompletion,
+    CalendarPlanEnrollment, CalendarScheduleMode, CompleteStreamRequest, DatedPlanAssignment,
+    Entry, ExportReport, JournalStore, PlanAdoptionEvent, PlanAssignment, PlanCompletion,
+    PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, Revision,
+    SaveRequest, StreamEnrollment,
 };
 use serde::Deserialize;
 use std::{
@@ -636,6 +637,66 @@ async fn undo_plan_completion(
     completion_id: String,
 ) -> Result<(), String> {
     undo_plan_completion_for_store(state.journal.clone(), completion_id).await
+}
+
+async fn adopt_chapter_stream_plan_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    request: AdoptStreamPlanRequest,
+) -> Result<PlanAdoptionEvent, String> {
+    run_store(store, move |journal| {
+        journal
+            .adopt_chapter_stream_plan(request)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn adopt_chapter_stream_plan(
+    state: State<'_, AppState>,
+    request: AdoptStreamPlanRequest,
+) -> Result<PlanAdoptionEvent, String> {
+    adopt_chapter_stream_plan_for_store(state.journal.clone(), request).await
+}
+
+async fn adopt_calendar_plan_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    request: AdoptCalendarPlanRequest,
+) -> Result<PlanAdoptionEvent, String> {
+    run_store(store, move |journal| {
+        journal
+            .adopt_calendar_plan(request)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn adopt_calendar_plan(
+    state: State<'_, AppState>,
+    request: AdoptCalendarPlanRequest,
+) -> Result<PlanAdoptionEvent, String> {
+    adopt_calendar_plan_for_store(state.journal.clone(), request).await
+}
+
+async fn plan_adoption_history_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    enrollment_id: String,
+) -> Result<Vec<PlanAdoptionEvent>, String> {
+    run_store(store, move |journal| {
+        journal
+            .plan_adoption_history(&enrollment_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn plan_adoption_history(
+    state: State<'_, AppState>,
+    enrollment_id: String,
+) -> Result<Vec<PlanAdoptionEvent>, String> {
+    plan_adoption_history_for_store(state.journal.clone(), enrollment_id).await
 }
 
 #[tauri::command]
@@ -1759,6 +1820,9 @@ pub fn run() {
             plan_completion_history,
             complete_plan_stream,
             undo_plan_completion,
+            adopt_chapter_stream_plan,
+            adopt_calendar_plan,
+            plan_adoption_history,
             get_history,
             restore_revision,
             choose_export_directory,

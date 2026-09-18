@@ -410,4 +410,16 @@ describe('native plan-definition adapter', () => {
       request: completionRequest,
     });
   });
+
+  it('carries exact adoption boundaries and retained-history identities', async () => {
+    const streamRequest = { enrollmentId: enrollment.id, expectedDefinitionVersionId: 'version-1', targetDefinitionVersionId: 'version-2', streams: [{ streamId: assignment.streamId, assignmentId: assignment.id, progressId: assignment.progressId }] };
+    const calendarAdoption = { enrollmentId: calendarEnrollment.id, expectedDefinitionVersionId: version.id, targetDefinitionVersionId: 'version-3', effectiveFromLocalDate: datedAssignment.localDate, expectedAssignmentId: datedAssignment.id };
+    native.invoke.mockResolvedValueOnce({ id: 'event-1' }).mockResolvedValueOnce({ id: 'event-2' }).mockResolvedValueOnce([{ id: 'event-1' }]);
+    await nativePlans.adoptChapterStreamPlan(streamRequest);
+    await nativePlans.adoptCalendarPlan(calendarAdoption);
+    await nativePlans.planAdoptionHistory(enrollment.id);
+    expect(native.invoke).toHaveBeenNthCalledWith(1, 'adopt_chapter_stream_plan', { request: streamRequest });
+    expect(native.invoke).toHaveBeenNthCalledWith(2, 'adopt_calendar_plan', { request: calendarAdoption });
+    expect(native.invoke).toHaveBeenNthCalledWith(3, 'plan_adoption_history', { enrollmentId: enrollment.id });
+  });
 });

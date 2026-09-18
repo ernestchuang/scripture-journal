@@ -388,6 +388,44 @@ pub struct CompleteStreamRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StreamAdoptionBoundary {
+    pub stream_id: String,
+    pub assignment_id: String,
+    pub progress_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AdoptStreamPlanRequest {
+    pub enrollment_id: String,
+    pub expected_definition_version_id: String,
+    pub target_definition_version_id: String,
+    pub streams: Vec<StreamAdoptionBoundary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AdoptCalendarPlanRequest {
+    pub enrollment_id: String,
+    pub expected_definition_version_id: String,
+    pub target_definition_version_id: String,
+    pub effective_from_local_date: NaiveDate,
+    pub expected_assignment_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanAdoptionEvent {
+    pub id: String,
+    pub enrollment_id: String,
+    pub previous_definition_version_id: String,
+    pub target_definition_version_id: String,
+    pub schedule_kind: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanCompletion {
     pub id: String,
@@ -502,9 +540,13 @@ pub(crate) fn enroll_calendar(
         "INSERT INTO plan_calendar_enrollments(enrollment_id,start_date,schedule_mode) VALUES(?1,?2,?3)",
         params![id, start_date.to_string(), calendar_mode_text(mode)],
     )?;
+    tx.execute(
+        "INSERT INTO plan_calendar_assignment_generations(id,enrollment_id,definition_version_id,created_at) VALUES(?1,?1,?2,?3)",
+        params![id, version_id, now],
+    )?;
     for assignment in assignments {
         tx.execute(
-            "INSERT INTO plan_calendar_assignments(id,enrollment_id,definition_version_id,definition_day,local_date,passages) VALUES(?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO plan_calendar_assignments(id,enrollment_id,definition_version_id,definition_day,local_date,passages,generation_id) VALUES(?1,?2,?3,?4,?5,?6,?2)",
             params![
                 Uuid::new_v4().to_string(),
                 id,
@@ -532,7 +574,9 @@ pub(crate) fn calendar_assignments(
 ) -> Result<Vec<DatedPlanAssignment>> {
     let mut statement = conn.prepare(
         "SELECT id,enrollment_id,definition_version_id,definition_day,local_date,passages
-         FROM plan_calendar_assignments WHERE enrollment_id=?1 ORDER BY local_date,id",
+         FROM plan_calendar_assignments a WHERE enrollment_id=?1
+         AND NOT EXISTS(SELECT 1 FROM plan_calendar_assignment_supersessions s WHERE s.superseded_assignment_id=a.id)
+         ORDER BY local_date,id",
     )?;
     let rows = statement
         .query_map([enrollment_id], |row| {
@@ -581,6 +625,13 @@ pub(crate) fn complete_calendar_assignment(
     ensure!(
         owner.as_deref() == Some(enrollment_id),
         "Calendar assignment does not belong to enrollment"
+    );
+    let superseded: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM plan_calendar_assignment_supersessions WHERE superseded_assignment_id=?1)",
+        [assignment_id], |row| row.get(0))?;
+    ensure!(
+        !superseded,
+        "Calendar assignment was superseded; reload before completing"
     );
     let completion = CalendarAssignmentCompletion {
         id: Uuid::new_v4().to_string(),
@@ -712,6 +763,256 @@ pub(crate) fn enrollments(conn: &Connection) -> Result<Vec<PlanEnrollment>> {
     Ok(enrollments)
 }
 
+pub(crate) fn adoption_history(
+    conn: &Connection,
+    enrollment_id: &str,
+) -> Result<Vec<PlanAdoptionEvent>> {
+    let mut statement = conn.prepare(
+        "SELECT id,enrollment_id,previous_definition_version_id,target_definition_version_id,schedule_kind,created_at
+         FROM plan_adoption_events WHERE enrollment_id=?1 ORDER BY sequence",
+    )?;
+    let result = statement
+        .query_map([enrollment_id], |row| {
+            Ok(PlanAdoptionEvent {
+                id: row.get(0)?,
+                enrollment_id: row.get(1)?,
+                previous_definition_version_id: row.get(2)?,
+                target_definition_version_id: row.get(3)?,
+                schedule_kind: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(result)
+}
+
+fn effective_definition_version_id(conn: &Connection, enrollment_id: &str) -> Result<String> {
+    conn.query_row(
+        "SELECT COALESCE((SELECT target_definition_version_id FROM plan_adoption_events a WHERE a.enrollment_id=e.id ORDER BY sequence DESC LIMIT 1),e.definition_version_id)
+         FROM plan_enrollments e WHERE e.id=?1",
+        [enrollment_id],
+        |row| row.get(0),
+    )
+    .optional()?
+    .context("Plan enrollment not found")
+}
+
+fn validate_adoption_versions(
+    conn: &Connection,
+    enrollment_id: &str,
+    expected_id: &str,
+    target_id: &str,
+) -> Result<(PlanDefinitionVersion, PlanDefinitionVersion)> {
+    ensure!(
+        effective_definition_version_id(conn, enrollment_id)? == expected_id,
+        "Conflict: adopted definition changed since it was loaded; reload before adopting"
+    );
+    let expected =
+        definition_version(conn, expected_id)?.context("Expected definition version not found")?;
+    let target =
+        definition_version(conn, target_id)?.context("Target definition version not found")?;
+    ensure!(
+        expected.plan_id == target.plan_id,
+        "Target definition belongs to another plan"
+    );
+    ensure!(
+        target.version > expected.version,
+        "Target must be a later definition version"
+    );
+    ensure!(
+        std::mem::discriminant(&expected.definition.schedule)
+            == std::mem::discriminant(&target.definition.schedule),
+        "Target schedule kind is incompatible"
+    );
+    Ok((expected, target))
+}
+
+pub(crate) fn adopt_stream_plan(
+    conn: &mut Connection,
+    request: AdoptStreamPlanRequest,
+) -> Result<PlanAdoptionEvent> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (_, target) = validate_adoption_versions(
+        &tx,
+        &request.enrollment_id,
+        &request.expected_definition_version_id,
+        &request.target_definition_version_id,
+    )?;
+    let PlanSchedule::ChapterStreams {
+        streams: target_streams,
+    } = &target.definition.schedule
+    else {
+        anyhow::bail!("Target schedule kind is incompatible")
+    };
+    let active = active_assignments(&tx, &request.enrollment_id)?;
+    ensure!(
+        !active.is_empty(),
+        "Enrollment has no active stream frontier"
+    );
+    ensure!(
+        request.streams.len() == active.len() && target_streams.len() == active.len(),
+        "Target stream set is incompatible"
+    );
+    let mut requested_ids = HashSet::new();
+    for boundary in &request.streams {
+        ensure!(
+            requested_ids.insert(&boundary.stream_id),
+            "Stream boundaries must be unique"
+        );
+        let assignment = active
+            .iter()
+            .find(|item| item.stream_id == boundary.stream_id)
+            .context("Displayed stream boundary is stale or incompatible")?;
+        ensure!(
+            assignment.id == boundary.assignment_id
+                && assignment.progress_id == boundary.progress_id,
+            "Conflict: stream boundary changed since it was loaded; reload before adopting"
+        );
+        let has_successor: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM plan_assignment_successors WHERE predecessor_assignment_id=?1)",
+            [&assignment.id], |row| row.get(0))?;
+        ensure!(
+            !has_successor,
+            "Stream is behind retained work; recomplete to its frontier before adopting"
+        );
+        let position = assignment
+            .stream_position
+            .context("Assignment occurrence is ambiguous; start a new enrollment")?
+            as usize;
+        let target_stream = target_streams
+            .iter()
+            .find(|stream| stream.id == boundary.stream_id)
+            .context("Target stream set is incompatible")?;
+        let chapter = target_stream
+            .chapters
+            .get(position)
+            .context("Target does not contain the displayed stream position")?;
+        ensure!(
+            chapter.book == assignment.passage.book
+                && chapter.chapter == assignment.passage.chapter,
+            "Target changes the displayed stream occurrence"
+        );
+    }
+    let event = PlanAdoptionEvent {
+        id: Uuid::new_v4().to_string(),
+        enrollment_id: request.enrollment_id.clone(),
+        previous_definition_version_id: request.expected_definition_version_id,
+        target_definition_version_id: request.target_definition_version_id,
+        schedule_kind: "chapter-streams".into(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+    tx.execute(
+        "INSERT INTO plan_adoption_events(id,enrollment_id,sequence,previous_definition_version_id,target_definition_version_id,schedule_kind,boundary,created_at)
+         VALUES(?1,?2,(SELECT COALESCE(MAX(sequence),0)+1 FROM plan_adoption_events WHERE enrollment_id=?2),?3,?4,?5,?6,?7)",
+        params![event.id,event.enrollment_id,event.previous_definition_version_id,event.target_definition_version_id,event.schedule_kind,serde_json::to_string(&request.streams)?,event.created_at],
+    )?;
+    tx.execute(
+        "INSERT INTO plan_assignment_generations(id,enrollment_id,definition_version_id,created_at) VALUES(?1,?2,?3,?4)",
+        params![event.id,event.enrollment_id,event.target_definition_version_id,event.created_at],
+    )?;
+    for boundary in &request.streams {
+        tx.execute(
+            "INSERT INTO plan_stream_adoption_boundaries(event_id,stream_id,assignment_id,progress_id) VALUES(?1,?2,?3,?4)",
+            params![event.id,boundary.stream_id,boundary.assignment_id,boundary.progress_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(event)
+}
+
+pub(crate) fn adopt_calendar_plan(
+    conn: &mut Connection,
+    request: AdoptCalendarPlanRequest,
+) -> Result<PlanAdoptionEvent> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (_, target) = validate_adoption_versions(
+        &tx,
+        &request.enrollment_id,
+        &request.expected_definition_version_id,
+        &request.target_definition_version_id,
+    )?;
+    let PlanSchedule::ExplicitSchedule { days } = &target.definition.schedule else {
+        anyhow::bail!("Target schedule kind is incompatible")
+    };
+    let (start_date_text, mode_text): (String, String) = tx
+        .query_row(
+            "SELECT start_date,schedule_mode FROM plan_calendar_enrollments WHERE enrollment_id=?1",
+            [&request.enrollment_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .context("Calendar enrollment not found")?;
+    let mode = calendar_mode_from_text(&mode_text)?;
+    if mode == CalendarScheduleMode::CalendarAligned {
+        ensure!(
+            days.len() == 365,
+            "Calendar-aligned target must contain exactly 365 days"
+        );
+    }
+    let current: (String, u32) = tx.query_row(
+        "SELECT a.id,a.definition_day FROM plan_calendar_assignments a
+         WHERE a.enrollment_id=?1 AND a.local_date=?2
+         AND NOT EXISTS(SELECT 1 FROM plan_calendar_assignment_supersessions s WHERE s.superseded_assignment_id=a.id)",
+        params![request.enrollment_id,request.effective_from_local_date.to_string()], |row| Ok((row.get(0)?,row.get(1)?)))
+        .optional()?.context("No active calendar assignment exists at the cutover date")?;
+    ensure!(
+        current.0 == request.expected_assignment_id,
+        "Conflict: calendar assignment changed since it was loaded; reload before adopting"
+    );
+    let completed_on_or_after: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM plan_calendar_completions c JOIN plan_calendar_assignments a ON a.id=c.assignment_id WHERE a.enrollment_id=?1 AND a.local_date>=?2)",
+        params![request.enrollment_id,request.effective_from_local_date.to_string()], |row| row.get(0))?;
+    ensure!(
+        !completed_on_or_after,
+        "Cutover must be later than every retained completion"
+    );
+    let active_rows: Vec<(String, String, u32)> = {
+        let mut statement = tx.prepare(
+            "SELECT a.id,a.local_date,a.definition_day FROM plan_calendar_assignments a WHERE a.enrollment_id=?1 AND a.local_date>=?2
+             AND NOT EXISTS(SELECT 1 FROM plan_calendar_assignment_supersessions s WHERE s.superseded_assignment_id=a.id) ORDER BY a.local_date")?;
+        let rows = statement
+            .query_map(
+                params![
+                    request.enrollment_id,
+                    request.effective_from_local_date.to_string()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    ensure!(
+        !active_rows.is_empty(),
+        "Calendar cutover has no remaining assignments"
+    );
+    for (_, _, day) in &active_rows {
+        ensure!(
+            days.iter().any(|item| item.day == *day),
+            "Target does not cover every remaining definition day"
+        );
+    }
+    let boundary_json = serde_json::to_string(&request)?;
+    let event = PlanAdoptionEvent {
+        id: Uuid::new_v4().to_string(),
+        enrollment_id: request.enrollment_id.clone(),
+        previous_definition_version_id: request.expected_definition_version_id,
+        target_definition_version_id: request.target_definition_version_id,
+        schedule_kind: "explicit-schedule".into(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+    tx.execute("INSERT INTO plan_adoption_events(id,enrollment_id,sequence,previous_definition_version_id,target_definition_version_id,schedule_kind,boundary,created_at) VALUES(?1,?2,(SELECT COALESCE(MAX(sequence),0)+1 FROM plan_adoption_events WHERE enrollment_id=?2),?3,?4,?5,?6,?7)", params![event.id,event.enrollment_id,event.previous_definition_version_id,event.target_definition_version_id,event.schedule_kind,boundary_json,event.created_at])?;
+    tx.execute("INSERT INTO plan_calendar_assignment_generations(id,enrollment_id,definition_version_id,created_at) VALUES(?1,?2,?3,?4)", params![event.id,event.enrollment_id,event.target_definition_version_id,event.created_at])?;
+    for (old_id, local_date, definition_day) in active_rows {
+        let day = days.iter().find(|item| item.day == definition_day).unwrap();
+        let new_id = Uuid::new_v4().to_string();
+        tx.execute("INSERT INTO plan_calendar_assignments(id,enrollment_id,definition_version_id,definition_day,local_date,passages,generation_id) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![new_id,event.enrollment_id,event.target_definition_version_id,definition_day,local_date,serde_json::to_string(&day.passages)?,event.id])?;
+        tx.execute("INSERT INTO plan_calendar_assignment_supersessions(event_id,superseded_assignment_id,replacement_assignment_id) VALUES(?1,?2,?3)", params![event.id,old_id,new_id])?;
+    }
+    let _ = start_date_text;
+    tx.commit()?;
+    Ok(event)
+}
+
 pub(crate) fn active_assignments(
     conn: &Connection,
     enrollment_id: &str,
@@ -780,9 +1081,64 @@ pub(crate) fn complete_stream(
             completion.completed_at
         ],
     )?;
+    let origin_text: String = tx.query_row(
+        "SELECT definition FROM plan_definition_versions WHERE id=?1",
+        [&active.definition_version_id],
+        |row| row.get(0),
+    )?;
+    let origin: PlanDefinition = serde_json::from_str(&origin_text)?;
+    let PlanSchedule::ChapterStreams { streams } = origin.schedule else {
+        anyhow::bail!("Assignment does not originate from a chapter-stream definition")
+    };
+    let origin_stream = streams
+        .iter()
+        .find(|stream| stream.id == request.stream_id)
+        .context("Assignment stream is missing from its originating definition")?;
+    let origin_position = active
+        .stream_position
+        .context("Legacy assignment has ambiguous occurrence identity; start a new enrollment")?
+        as usize;
+    ensure!(
+        origin_stream
+            .chapters
+            .get(origin_position)
+            .is_some_and(|chapter| chapter.book == active.passage.book
+                && chapter.chapter == active.passage.chapter),
+        "Assignment occurrence does not match its retained passage snapshot"
+    );
+    if let Some((successor_id, successor_position, successor_version, successor_passage)) = tx.query_row(
+        "SELECT s.successor_assignment_id,a.stream_position,a.definition_version_id,a.passage FROM plan_assignment_successors s JOIN plan_assignments a ON a.id=s.successor_assignment_id WHERE s.predecessor_assignment_id=?1",
+        [&active.id], |row| Ok((row.get::<_, String>(0)?,row.get::<_, Option<u32>>(1)?,row.get::<_, String>(2)?,row.get::<_, String>(3)?))).optional()? {
+        let position = successor_position.context("Existing assignment conflicts with pinned plan progress")? as usize;
+        let successor_definition = definition_version(&tx, &successor_version)?.context("Successor definition version not found")?;
+        let PlanSchedule::ChapterStreams { streams } = successor_definition.definition.schedule else { anyhow::bail!("Existing assignment conflicts with pinned plan progress") };
+        let successor_stream = streams.iter().find(|stream| stream.id == request.stream_id).context("Existing assignment conflicts with pinned plan progress")?;
+        let chapter = successor_stream.chapters.get(position).context("Existing assignment conflicts with pinned plan progress")?;
+        let passage: Passage = serde_json::from_str(&successor_passage)?;
+        ensure!(chapter.book == passage.book && chapter.chapter == passage.chapter, "Existing assignment conflicts with pinned plan progress");
+        insert_progress_epoch(&tx, &request.enrollment_id, &request.stream_id, &successor_id)?;
+        tx.commit()?;
+        return Ok(completion);
+    }
+    let adopted: Option<(String, String)> = tx
+        .query_row(
+            "SELECT a.target_definition_version_id,a.id FROM plan_adoption_events a
+         JOIN plan_stream_adoption_boundaries b ON b.event_id=a.id
+         WHERE a.enrollment_id=?1 AND b.stream_id=?2 AND b.assignment_id=?3
+         ORDER BY a.sequence DESC LIMIT 1",
+            params![request.enrollment_id, request.stream_id, active.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (next_version_id, next_generation_id) = adopted.unwrap_or_else(|| {
+        (
+            active.definition_version_id.clone(),
+            active.generation_id.clone(),
+        )
+    });
     let (definition_text, loop_after_end): (String, bool) = tx.query_row(
         "SELECT v.definition,s.loop_after_end FROM plan_definition_versions v JOIN plan_enrollment_streams s ON s.enrollment_id=?1 AND s.stream_id=?2 WHERE v.id=?3",
-        params![request.enrollment_id, request.stream_id, active.definition_version_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        params![request.enrollment_id, request.stream_id, next_version_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
     let definition: PlanDefinition = serde_json::from_str(&definition_text)?;
     let PlanSchedule::ChapterStreams { streams } = definition.schedule else {
         anyhow::bail!("Enrollment no longer references a chapter-stream definition")
@@ -810,8 +1166,8 @@ pub(crate) fn complete_stream(
             active.cycle,
             (current + 1) as u32,
             AssignmentProvenance {
-                definition_version_id: &active.definition_version_id,
-                generation_id: &active.generation_id,
+                definition_version_id: &next_version_id,
+                generation_id: &next_generation_id,
             },
         )?;
         insert_assignment_successor(&tx, &active, &next_id)?;
@@ -825,8 +1181,8 @@ pub(crate) fn complete_stream(
             active.cycle + 1,
             0,
             AssignmentProvenance {
-                definition_version_id: &active.definition_version_id,
-                generation_id: &active.generation_id,
+                definition_version_id: &next_version_id,
+                generation_id: &next_generation_id,
             },
         )?;
         insert_assignment_successor(&tx, &active, &next_id)?;
@@ -1518,4 +1874,90 @@ WHEN NOT EXISTS(
  AND p.stream_id=NEW.stream_id AND s.stream_id=NEW.stream_id AND s.ordinal=p.ordinal+1
 )
 BEGIN SELECT RAISE(ABORT,'Assignment successor must be the next owned ordinal'); END;
+";
+
+pub(crate) const PLAN_ADOPTION_SCHEMA: &str = "
+CREATE TABLE plan_adoption_events(
+ id TEXT PRIMARY KEY,
+ enrollment_id TEXT NOT NULL REFERENCES plan_enrollments(id),
+ sequence INTEGER NOT NULL CHECK(sequence>0),
+ previous_definition_version_id TEXT NOT NULL REFERENCES plan_definition_versions(id),
+ target_definition_version_id TEXT NOT NULL REFERENCES plan_definition_versions(id),
+ schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('chapter-streams','explicit-schedule')),
+ boundary TEXT NOT NULL CHECK(json_valid(boundary)),
+ created_at TEXT NOT NULL,
+ UNIQUE(enrollment_id,sequence)
+);
+CREATE TABLE plan_stream_adoption_boundaries(
+ event_id TEXT NOT NULL REFERENCES plan_adoption_events(id),
+ stream_id TEXT NOT NULL,
+ assignment_id TEXT NOT NULL REFERENCES plan_assignments(id),
+ progress_id TEXT NOT NULL REFERENCES plan_stream_progress_epochs(id),
+ PRIMARY KEY(event_id,stream_id)
+);
+CREATE TRIGGER plan_adoption_events_immutable BEFORE UPDATE ON plan_adoption_events BEGIN SELECT RAISE(ABORT,'Plan adoption events are immutable'); END;
+CREATE TRIGGER plan_adoption_events_retained BEFORE DELETE ON plan_adoption_events BEGIN SELECT RAISE(ABORT,'Plan adoption history is retained'); END;
+CREATE TRIGGER plan_stream_adoption_boundaries_immutable BEFORE UPDATE ON plan_stream_adoption_boundaries BEGIN SELECT RAISE(ABORT,'Plan adoption boundaries are immutable'); END;
+CREATE TRIGGER plan_stream_adoption_boundaries_retained BEFORE DELETE ON plan_stream_adoption_boundaries BEGIN SELECT RAISE(ABORT,'Plan adoption history is retained'); END;
+
+DROP TRIGGER plan_calendar_completion_undos_match;
+DROP TRIGGER plan_calendar_completion_undos_retained;
+DROP TRIGGER plan_calendar_completion_undos_immutable;
+DROP TRIGGER plan_calendar_completion_active;
+DROP TRIGGER plan_calendar_completions_retained;
+DROP TRIGGER plan_calendar_completions_immutable;
+DROP TRIGGER plan_calendar_assignments_match;
+DROP TRIGGER plan_calendar_assignments_retained;
+DROP TRIGGER plan_calendar_assignments_immutable;
+DROP INDEX plan_calendar_assignment_owner;
+ALTER TABLE plan_calendar_completion_undos RENAME TO plan_calendar_completion_undos_v12;
+ALTER TABLE plan_calendar_completions RENAME TO plan_calendar_completions_v12;
+ALTER TABLE plan_calendar_assignments RENAME TO plan_calendar_assignments_v12;
+CREATE TABLE plan_calendar_assignment_generations(
+ id TEXT PRIMARY KEY,
+ enrollment_id TEXT NOT NULL REFERENCES plan_calendar_enrollments(enrollment_id),
+ definition_version_id TEXT NOT NULL REFERENCES plan_definition_versions(id),
+ created_at TEXT NOT NULL,
+ UNIQUE(id,enrollment_id,definition_version_id)
+);
+INSERT INTO plan_calendar_assignment_generations(id,enrollment_id,definition_version_id,created_at)
+SELECT e.enrollment_id,e.enrollment_id,p.definition_version_id,p.created_at FROM plan_calendar_enrollments e JOIN plan_enrollments p ON p.id=e.enrollment_id;
+CREATE TABLE plan_calendar_assignments(
+ id TEXT PRIMARY KEY,
+ enrollment_id TEXT NOT NULL REFERENCES plan_calendar_enrollments(enrollment_id),
+ definition_version_id TEXT NOT NULL REFERENCES plan_definition_versions(id),
+ definition_day INTEGER NOT NULL CHECK(definition_day>0),
+ local_date TEXT NOT NULL CHECK(local_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+ passages TEXT NOT NULL CHECK(json_valid(passages) AND json_type(passages)='array' AND json_array_length(passages)>0),
+ generation_id TEXT NOT NULL,
+ UNIQUE(enrollment_id,local_date,generation_id),
+ FOREIGN KEY(generation_id,enrollment_id,definition_version_id) REFERENCES plan_calendar_assignment_generations(id,enrollment_id,definition_version_id)
+);
+INSERT INTO plan_calendar_assignments SELECT id,enrollment_id,definition_version_id,definition_day,local_date,passages,enrollment_id FROM plan_calendar_assignments_v12;
+CREATE UNIQUE INDEX plan_calendar_assignment_owner ON plan_calendar_assignments(id,enrollment_id);
+CREATE TABLE plan_calendar_completions(id TEXT PRIMARY KEY,assignment_id TEXT NOT NULL REFERENCES plan_calendar_assignments(id),enrollment_id TEXT NOT NULL REFERENCES plan_calendar_enrollments(enrollment_id),completed_at TEXT NOT NULL,FOREIGN KEY(assignment_id,enrollment_id) REFERENCES plan_calendar_assignments(id,enrollment_id));
+INSERT INTO plan_calendar_completions SELECT * FROM plan_calendar_completions_v12;
+CREATE TABLE plan_calendar_completion_undos(id TEXT PRIMARY KEY,completion_id TEXT NOT NULL UNIQUE REFERENCES plan_calendar_completions(id),enrollment_id TEXT NOT NULL,assignment_id TEXT NOT NULL,undone_at TEXT NOT NULL,FOREIGN KEY(assignment_id,enrollment_id) REFERENCES plan_calendar_assignments(id,enrollment_id));
+INSERT INTO plan_calendar_completion_undos SELECT * FROM plan_calendar_completion_undos_v12;
+DROP TABLE plan_calendar_completion_undos_v12;
+DROP TABLE plan_calendar_completions_v12;
+DROP TABLE plan_calendar_assignments_v12;
+CREATE TABLE plan_calendar_assignment_supersessions(
+ event_id TEXT NOT NULL REFERENCES plan_adoption_events(id),
+ superseded_assignment_id TEXT PRIMARY KEY REFERENCES plan_calendar_assignments(id),
+ replacement_assignment_id TEXT NOT NULL UNIQUE REFERENCES plan_calendar_assignments(id)
+);
+CREATE TRIGGER plan_calendar_assignment_generations_immutable BEFORE UPDATE ON plan_calendar_assignment_generations BEGIN SELECT RAISE(ABORT,'Calendar generations are immutable'); END;
+CREATE TRIGGER plan_calendar_assignment_generations_retained BEFORE DELETE ON plan_calendar_assignment_generations BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER plan_calendar_assignments_immutable BEFORE UPDATE ON plan_calendar_assignments BEGIN SELECT RAISE(ABORT,'Calendar assignments are immutable'); END;
+CREATE TRIGGER plan_calendar_assignments_retained BEFORE DELETE ON plan_calendar_assignments BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER plan_calendar_completions_immutable BEFORE UPDATE ON plan_calendar_completions BEGIN SELECT RAISE(ABORT,'Calendar completions are immutable'); END;
+CREATE TRIGGER plan_calendar_completions_retained BEFORE DELETE ON plan_calendar_completions BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER plan_calendar_completion_active BEFORE INSERT ON plan_calendar_completions WHEN EXISTS(SELECT 1 FROM plan_calendar_completions c WHERE c.assignment_id=NEW.assignment_id AND NOT EXISTS(SELECT 1 FROM plan_calendar_completion_undos u WHERE u.completion_id=c.id)) BEGIN SELECT RAISE(ABORT,'Calendar assignment already has an active completion'); END;
+CREATE TRIGGER plan_calendar_completion_undos_immutable BEFORE UPDATE ON plan_calendar_completion_undos BEGIN SELECT RAISE(ABORT,'Calendar completion undos are immutable'); END;
+CREATE TRIGGER plan_calendar_completion_undos_retained BEFORE DELETE ON plan_calendar_completion_undos BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER plan_calendar_completion_undos_match BEFORE INSERT ON plan_calendar_completion_undos WHEN NOT EXISTS(SELECT 1 FROM plan_calendar_completions c WHERE c.id=NEW.completion_id AND c.assignment_id=NEW.assignment_id AND c.enrollment_id=NEW.enrollment_id) BEGIN SELECT RAISE(ABORT,'Calendar undo must match completion ownership'); END;
+CREATE TRIGGER plan_calendar_assignments_match BEFORE INSERT ON plan_calendar_assignments WHEN NOT EXISTS(SELECT 1 FROM plan_calendar_assignment_generations g JOIN plan_definition_versions v ON v.id=g.definition_version_id WHERE g.id=NEW.generation_id AND g.enrollment_id=NEW.enrollment_id AND g.definition_version_id=NEW.definition_version_id AND json_extract(v.definition,'$.schedule.kind')='explicitSchedule' AND json_extract(v.definition,'$.schedule.days['||(NEW.definition_day-1)||'].day')=NEW.definition_day AND json_extract(v.definition,'$.schedule.days['||(NEW.definition_day-1)||'].passages')=json(NEW.passages)) BEGIN SELECT RAISE(ABORT,'Calendar assignment must belong to its enrollment version'); END;
+CREATE TRIGGER plan_calendar_assignment_supersessions_immutable BEFORE UPDATE ON plan_calendar_assignment_supersessions BEGIN SELECT RAISE(ABORT,'Calendar cutovers are immutable'); END;
+CREATE TRIGGER plan_calendar_assignment_supersessions_retained BEFORE DELETE ON plan_calendar_assignment_supersessions BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
 ";
