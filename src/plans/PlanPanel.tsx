@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { PlanAssignment, PlanDefinitionVersion, PlanEnrollment, StreamEnrollment } from '../platform/plans';
+import type { PlanAssignment, PlanCompletionHistoryItem, PlanDefinitionVersion, PlanEnrollment, StreamEnrollment } from '../platform/plans';
 import type { PlanDefinitionApi } from '../platform/plans';
 import './plans.css';
 
@@ -8,8 +8,12 @@ type PlanDetails =
   | { kind: 'error'; message: string }
   | { kind: 'ready'; definition: PlanDefinitionVersion; assignments: PlanAssignment[] };
 type ReadyPlanDetails = Extract<PlanDetails, { kind: 'ready' }>;
+type PlanHistory =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; items: PlanCompletionHistoryItem[] };
 
-type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream'>;
+type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream'>;
 
 export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [enrollments, setEnrollments] = useState<PlanEnrollment[] | null>(null);
@@ -18,6 +22,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [attempt, setAttempt] = useState(0);
   const [detailAttempt, setDetailAttempt] = useState(0);
   const [details, setDetails] = useState<PlanDetails | null>(null);
+  const [history, setHistory] = useState<PlanHistory | null>(null);
+  const [historyAttempt, setHistoryAttempt] = useState(0);
   const [offer, setOffer] = useState<PlanDefinitionVersion | null>(null);
   const [choices, setChoices] = useState<StreamEnrollment[]>([]);
   const [offerError, setOfferError] = useState('');
@@ -26,6 +32,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [completingId, setCompletingId] = useState('');
   const [completionMessage, setCompletionMessage] = useState('');
   const detailEpoch = useRef(0);
+  const historyEpoch = useRef(0);
   const actionEpoch = useRef(0);
   const completionEpoch = useRef(0);
   const discoveryEpoch = useRef(0);
@@ -82,6 +89,20 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     }).catch(error => { if (active && epoch === detailEpoch.current) setDetails({ kind: 'error', message: String(error) }); });
     return () => { active = false; };
   }, [api, detailAttempt, enrollments, selectedId]);
+
+  useEffect(() => {
+    const enrollment = enrollments?.find(item => item.id === selectedId);
+    if (!api || !enrollment) return;
+    let active = true;
+    const epoch = ++historyEpoch.current;
+    setHistory({ kind: 'loading' });
+    api.planCompletionHistory(enrollment.id).then(items => {
+      if (active && epoch === historyEpoch.current) setHistory({ kind: 'ready', items });
+    }).catch(error => {
+      if (active && epoch === historyEpoch.current) setHistory({ kind: 'error', message: String(error) });
+    });
+    return () => { active = false; };
+  }, [api, enrollments, historyAttempt, selectedId]);
 
   async function prepareEnrollment() {
     if (!api || preparing || enrolling) return;
@@ -147,6 +168,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       if (epoch !== completionEpoch.current) return;
       confirmedCompletions.current.set(assignment.id, assignment.enrollmentId);
       if (selectedIdRef.current !== assignment.enrollmentId) return;
+      setHistoryAttempt(current => current + 1);
       const refreshEpoch = ++detailEpoch.current;
       setDetails(current => {
         const retained = current?.kind === 'ready' ? current : readyDetails.current.get(assignment.enrollmentId);
@@ -210,6 +232,14 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
         <h3>{details.definition.definition.name}</h3>
         {details.assignments.length === 0 ? <p>This enrollment is exhausted; it has no active assignments.</p> : <ul>{details.assignments.map(assignment => <li key={assignment.id}><strong>{assignment.streamId}</strong><span>Book {assignment.passage.book} · Chapter {assignment.passage.chapter}</span><button disabled={!!completingId} onClick={() => void complete(assignment, details.definition)}>{completingId === assignment.id ? 'Completing…' : `Complete ${assignment.streamId}`}</button></li>)}</ul>}
         {completionMessage && <div role="alert" className="plan-error">{completionMessage}<button onClick={() => setDetailAttempt(value => value + 1)}>Retry assignments</button></div>}
+      </section>}
+      {history?.kind === 'loading' && <p role="status">Loading completion history…</p>}
+      {history?.kind === 'error' && <div role="alert" className="plan-error">Could not load completion history: {history.message}<button onClick={() => setHistoryAttempt(value => value + 1)}>Retry completion history</button></div>}
+      {history?.kind === 'ready' && <section className="plan-history" aria-label="Retained completion history">
+        <h3>Completion history</h3>
+        {history.items.length === 0 ? <p>No retained completions yet.</p> : <ol>{history.items.map(item => <li key={item.id}>
+          <strong>{item.streamId}</strong><span>Book {item.passage.book} · Chapter {item.passage.chapter} · Cycle {item.cycle}</span><span>Completed {item.completedAt}</span><small>Completion {item.id} · Assignment {item.assignmentId}</small><em>{item.undone ? 'Undone' : 'Current completion'}</em>
+        </li>)}</ol>}
       </section>}
     </>}
   </aside>;

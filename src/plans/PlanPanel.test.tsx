@@ -18,10 +18,12 @@ const fourStream = {
   ] } },
 };
 const created: PlanEnrollment = { id: 'enrollment-new', definitionVersionId: fourStream.id, createdAt: '2026-09-18T00:00:02Z' };
-const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream'> => ({
+const history = (id: string, enrollmentId = first.id, undone = false) => ({ id, assignmentId: 'assignment-1', enrollmentId, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, completedAt: '2026-09-18T00:00:03Z', undone });
+const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
   activePlanAssignments: vi.fn(async id => id === first.id ? [{ id: 'assignment-1', enrollmentId: id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' }] : []),
+  planCompletionHistory: vi.fn(async () => []),
   registerFourStreamPlan: vi.fn(async () => fourStream),
   enrollInChapterStreams: vi.fn(async () => created),
   completePlanStream: vi.fn(async request => ({ id: 'completion-1', assignmentId: request.expectedAssignmentId, completedAt: '2026-09-18T00:00:03Z' })),
@@ -41,6 +43,73 @@ describe('retained plan panel', () => {
     const plans = api(); vi.mocked(plans.listPlanEnrollments).mockResolvedValueOnce([]);
     render(<PlanPanel api={plans} />);
     expect(await screen.findByText('No retained plan enrollments yet.')).toBeTruthy();
+  });
+
+  it('shows retained completion identity, passage, timestamp, and undone state', async () => {
+    const plans = api();
+    vi.mocked(plans.planCompletionHistory).mockResolvedValueOnce([
+      history('completion-undone', first.id, true), history('completion-current'),
+    ]);
+    render(<PlanPanel api={plans} />);
+    expect(await screen.findByLabelText('Retained completion history')).toBeTruthy();
+    expect(screen.getByText('Completion completion-undone · Assignment assignment-1')).toBeTruthy();
+    expect(screen.getAllByText('Completed 2026-09-18T00:00:03Z')).toHaveLength(2);
+    expect(screen.getByText('Undone')).toBeTruthy();
+    expect(screen.getByText('Current completion')).toBeTruthy();
+    expect(plans.planCompletionHistory).toHaveBeenCalledWith(first.id);
+  });
+
+  it('shows empty completion history and retries a rejected read', async () => {
+    const plans = api();
+    vi.mocked(plans.planCompletionHistory).mockRejectedValueOnce(new Error('history offline')).mockResolvedValueOnce([]);
+    render(<PlanPanel api={plans} />);
+    expect(await screen.findByText(/Could not load completion history: Error: history offline/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry completion history' }));
+    expect(await screen.findByText('No retained completions yet.')).toBeTruthy();
+  });
+
+  it('ignores late history success and failure after selecting another enrollment', async () => {
+    let resolveFirst!: (value: Awaited<ReturnType<PlanDefinitionApi['planCompletionHistory']>>) => void;
+    let rejectFirst!: (reason: unknown) => void;
+    const plans = api();
+    vi.mocked(plans.planCompletionHistory)
+      .mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce([history('completion-second', second.id)])
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }))
+      .mockResolvedValueOnce([history('completion-second', second.id)]);
+    render(<PlanPanel api={plans} />);
+    const select = await screen.findByLabelText('Retained enrollment');
+    fireEvent.change(select, { target: { value: second.id } });
+    expect(await screen.findByText('Completion completion-second · Assignment assignment-1')).toBeTruthy();
+    await act(async () => { resolveFirst([history('stale-success')]); });
+    expect(screen.queryByText('Completion stale-success · Assignment assignment-1')).toBeNull();
+    fireEvent.change(select, { target: { value: first.id } });
+    expect(await screen.findByText('Loading completion history…')).toBeTruthy();
+    fireEvent.change(select, { target: { value: second.id } });
+    expect(await screen.findByText('Completion completion-second · Assignment assignment-1')).toBeTruthy();
+    await act(async () => { rejectFirst(new Error('stale failure')); });
+    expect(screen.queryByText(/stale failure/)).toBeNull();
+  });
+
+  it('refreshes history after a confirmed completion without overwriting a newer selection', async () => {
+    let resolveCompletion!: (value: { id: string; assignmentId: string; completedAt: string }) => void;
+    let resolveRefresh!: (value: Awaited<ReturnType<PlanDefinitionApi['planCompletionHistory']>>) => void;
+    const plans = api();
+    vi.mocked(plans.planCompletionHistory)
+      .mockResolvedValueOnce([history('completion-initial')])
+      .mockImplementationOnce(() => new Promise(resolve => { resolveRefresh = resolve; }))
+      .mockResolvedValueOnce([history('completion-second', second.id)]);
+    vi.mocked(plans.completePlanStream).mockImplementationOnce(() => new Promise(resolve => { resolveCompletion = resolve; }));
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete psalms' }));
+    await act(async () => { resolveCompletion({ id: 'completion-result', assignmentId: 'assignment-1', completedAt: '2026-09-18T00:00:04Z' }); });
+    await waitFor(() => expect(plans.planCompletionHistory).toHaveBeenCalledTimes(2));
+    expect(screen.getByText('Loading completion history…')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: second.id } });
+    expect(await screen.findByText('Completion completion-second · Assignment assignment-1')).toBeTruthy();
+    await act(async () => { resolveRefresh([history('stale-refresh')]); });
+    expect(screen.getByText('Completion completion-second · Assignment assignment-1')).toBeTruthy();
+    expect(screen.queryByText('Completion stale-refresh · Assignment assignment-1')).toBeNull();
   });
 
   it('shows loading and retains the enrollment order returned by the core', async () => {

@@ -12,6 +12,7 @@ const native = vi.hoisted(() => ({
   listPlanEnrollments: vi.fn(),
   getPlanDefinitionVersion: vi.fn(),
   activePlanAssignments: vi.fn(),
+  planCompletionHistory: vi.fn(),
   registerFourStreamPlan: vi.fn(),
   enrollInChapterStreams: vi.fn(),
   completePlanStream: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock('./platform/plans', () => ({
     listPlanEnrollments: native.listPlanEnrollments,
     getPlanDefinitionVersion: native.getPlanDefinitionVersion,
     activePlanAssignments: native.activePlanAssignments,
+    planCompletionHistory: native.planCompletionHistory,
     registerFourStreamPlan: native.registerFourStreamPlan,
     enrollInChapterStreams: native.enrollInChapterStreams,
     completePlanStream: native.completePlanStream,
@@ -77,6 +79,7 @@ beforeEach(() => {
   native.listPlanEnrollments.mockReset().mockResolvedValue([]);
   native.getPlanDefinitionVersion.mockReset();
   native.activePlanAssignments.mockReset();
+  native.planCompletionHistory.mockReset().mockResolvedValue([]);
   native.registerFourStreamPlan.mockReset();
   native.enrollInChapterStreams.mockReset();
   native.completePlanStream.mockReset();
