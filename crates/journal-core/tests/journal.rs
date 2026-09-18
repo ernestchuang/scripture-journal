@@ -105,6 +105,114 @@ fn portable_plan_definition_json_codecs_round_trip_and_reject_invalid_input() {
     assert!(serialize_plan_definition_json(&invalid_definition).is_err());
 }
 
+fn valid_explicit_definition_json() -> &'static str {
+    "{\"schemaVersion\":1,\"name\":\"Valid\",\"schedule\":{\"kind\":\"explicitSchedule\",\"days\":[{\"day\":1,\"passages\":[{\"book\":43,\"chapter\":3}]}]}}"
+}
+
+#[test]
+fn portable_plan_definition_json_rejections_are_isolated_and_strict() {
+    let valid = valid_explicit_definition_json();
+    assert!(parse_plan_definition_json(valid).is_ok());
+
+    let unsupported_schema = valid.replacen("\"schemaVersion\":1", "\"schemaVersion\":2", 1);
+    let error = parse_plan_definition_json(&unsupported_schema)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Unsupported plan definition schema version 2"));
+
+    let error = parse_plan_definition_json(&format!("{valid} null")).unwrap_err();
+    assert!(error
+        .chain()
+        .any(|cause| cause.to_string().contains("trailing characters")));
+
+    for invalid in [
+        "{\"schemaVersion\":1,\"name\":\"Valid\",\"unknown\":true,\"schedule\":{\"kind\":\"explicitSchedule\",\"days\":[{\"day\":1,\"passages\":[{\"book\":43,\"chapter\":3}]}]}}",
+        "{\"schemaVersion\":1,\"name\":\"Valid\",\"schedule\":{\"kind\":\"explicitSchedule\",\"unknown\":true,\"days\":[{\"day\":1,\"passages\":[{\"book\":43,\"chapter\":3}]}]}}",
+        "{\"schemaVersion\":1,\"name\":\"Valid\",\"schedule\":{\"kind\":\"explicitSchedule\",\"days\":[{\"day\":1,\"unknown\":true,\"passages\":[{\"book\":43,\"chapter\":3}]}]}}",
+        "{\"schemaVersion\":1,\"name\":\"Valid\",\"schedule\":{\"kind\":\"explicitSchedule\",\"days\":[{\"day\":1,\"passages\":[{\"book\":43,\"chapter\":3,\"unknown\":true}]}]}}",
+        "{\"schemaVersion\":1,\"name\":\"Valid\",\"schedule\":{\"kind\":\"chapterStreams\",\"streams\":[{\"id\":\"stream\",\"name\":\"Stream\",\"unknown\":true,\"chapters\":[{\"book\":43,\"chapter\":3}]}]}}",
+        "{\"schemaVersion\":1,\"name\":\"Valid\",\"schedule\":{\"kind\":\"chapterStreams\",\"streams\":[{\"id\":\"stream\",\"name\":\"Stream\",\"chapters\":[{\"book\":43,\"chapter\":3,\"unknown\":true}]}]}}",
+    ] {
+        let error = parse_plan_definition_json(invalid).unwrap_err();
+        assert!(error
+            .chain()
+            .any(|cause| cause.to_string().contains("unknown field")));
+    }
+}
+
+#[test]
+fn portable_plan_definition_json_uses_exact_utf8_byte_limit_before_parsing() {
+    let size_error = format!("{MAX_PLAN_DEFINITION_JSON_BYTES}-byte limit");
+    let unicode_definition = PlanDefinition {
+        name: "é".repeat(100),
+        ..stream_definition("Byte boundary")
+    };
+    let compact = serialize_plan_definition_json(&unicode_definition).unwrap();
+    let exact_limit = format!(
+        "{compact}{}",
+        " ".repeat(MAX_PLAN_DEFINITION_JSON_BYTES - compact.len())
+    );
+    assert_eq!(exact_limit.len(), MAX_PLAN_DEFINITION_JSON_BYTES);
+    assert!(exact_limit.chars().count() < MAX_PLAN_DEFINITION_JSON_BYTES);
+    assert_eq!(
+        parse_plan_definition_json(&exact_limit).unwrap(),
+        unicode_definition
+    );
+
+    let one_byte_too_large = format!("{exact_limit} ");
+    let error = parse_plan_definition_json(&one_byte_too_large)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&size_error));
+
+    let character_count_within_limit = format!(
+        "{compact}{}",
+        " ".repeat(MAX_PLAN_DEFINITION_JSON_BYTES - compact.chars().count() - 1)
+    );
+    assert!(character_count_within_limit.chars().count() < MAX_PLAN_DEFINITION_JSON_BYTES);
+    assert!(character_count_within_limit.len() > MAX_PLAN_DEFINITION_JSON_BYTES);
+    let error = parse_plan_definition_json(&character_count_within_limit)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&size_error));
+
+    let error = parse_plan_definition_json(&"{".repeat(MAX_PLAN_DEFINITION_JSON_BYTES + 1))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&size_error));
+}
+
+#[test]
+fn portable_plan_definition_json_rejects_domain_valid_oversized_serialization() {
+    let size_error = format!("{MAX_PLAN_DEFINITION_JSON_BYTES}-byte limit");
+    let passage = Passage {
+        book: 1,
+        chapter: 1,
+        start_verse: None,
+        end_verse: None,
+    };
+    let definition = PlanDefinition {
+        schema_version: 1,
+        name: "Largest valid explicit schedule".into(),
+        description: None,
+        schedule: PlanSchedule::ExplicitSchedule {
+            days: (1..=1_000)
+                .map(|day| ExplicitScheduleDay {
+                    day,
+                    passages: vec![passage.clone(); 100],
+                })
+                .collect(),
+        },
+    };
+    let error = serialize_plan_definition_json(&definition).unwrap_err();
+    assert!(
+        error
+            .chain()
+            .any(|cause| cause.to_string().contains(&size_error)),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn built_in_four_stream_definition_covers_every_canonical_chapter_and_enrolls() {
     let definition = four_stream_plan_definition();
