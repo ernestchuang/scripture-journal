@@ -87,7 +87,7 @@ impl JournalStore {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(
-            (0..=10).contains(&version),
+            (0..=11).contains(&version),
             "Unsupported journal schema version {version}"
         );
         if version == 0 {
@@ -109,7 +109,7 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 10)?;
+            tx.pragma_update(None, "user_version", 11)?;
             tx.commit()?;
         } else if version == 1 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -120,7 +120,7 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 10)?;
+            tx.pragma_update(None, "user_version", 11)?;
             tx.commit()?;
         } else if version == 2 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -130,7 +130,7 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 10)?;
+            tx.pragma_update(None, "user_version", 11)?;
             tx.commit()?;
         } else if version == 3 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -139,7 +139,7 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 10)?;
+            tx.pragma_update(None, "user_version", 11)?;
             tx.commit()?;
         } else if version == 4 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -147,7 +147,7 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 10)?;
+            tx.pragma_update(None, "user_version", 11)?;
             tx.commit()?;
         } else if version == 5 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -155,24 +155,36 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 10)?;
+            tx.pragma_update(None, "user_version", 11)?;
             tx.commit()?;
         } else if version == 6 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 10)?;
+            tx.pragma_update(None, "user_version", 11)?;
             tx.commit()?;
         } else if version == 7 || version == 8 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 10)?;
+            tx.pragma_update(None, "user_version", 11)?;
             tx.commit()?;
         } else if version == 9 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::PLAN_CALENDAR_COMPLETION_V10_MIGRATION)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 10)?;
+            tx.pragma_update(None, "user_version", 11)?;
+            tx.commit()?;
+        } else if version == 10 {
+            let mismatches: i64 = conn.query_row(
+                "SELECT count(*) FROM plan_calendar_completion_undos u WHERE NOT EXISTS(SELECT 1 FROM plan_calendar_completions c WHERE c.id=u.completion_id AND c.assignment_id=u.assignment_id AND c.enrollment_id=u.enrollment_id)",
+                [], |row| row.get(0))?;
+            ensure!(
+                mismatches == 0,
+                "Calendar undo ownership mismatch; refusing migration"
+            );
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 11)?;
             tx.commit()?;
         }
         let store = Self { conn };

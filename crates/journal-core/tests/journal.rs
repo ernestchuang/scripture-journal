@@ -990,7 +990,7 @@ fn schema_six_registration_migration_preserves_existing_plan_progress() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        10
+        11
     );
 }
 
@@ -1454,7 +1454,7 @@ fn schema_one_journal_data_survives_plan_migration() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        10
+        11
     );
 }
 
@@ -2257,7 +2257,7 @@ fn populated_schema_two_journal_and_plan_versions_survive_migration_and_reopen()
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        10
+        11
     );
     assert_eq!(
         conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
@@ -2333,7 +2333,7 @@ fn schema_three_progress_migration_preserves_history_and_adds_command_epoch() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        10
+        11
     );
 }
 

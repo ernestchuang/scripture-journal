@@ -1315,6 +1315,9 @@ CREATE TRIGGER IF NOT EXISTS plan_calendar_completion_undos_immutable BEFORE UPD
 BEGIN SELECT RAISE(ABORT,'Calendar completion undos are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS plan_calendar_completion_undos_retained BEFORE DELETE ON plan_calendar_completion_undos
 BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER IF NOT EXISTS plan_calendar_completion_undos_match BEFORE INSERT ON plan_calendar_completion_undos
+WHEN NOT EXISTS(SELECT 1 FROM plan_calendar_completions c WHERE c.id=NEW.completion_id AND c.assignment_id=NEW.assignment_id AND c.enrollment_id=NEW.enrollment_id)
+BEGIN SELECT RAISE(ABORT,'Calendar undo must match completion ownership'); END;
 CREATE TRIGGER IF NOT EXISTS plan_calendar_assignments_match BEFORE INSERT ON plan_calendar_assignments
 WHEN NOT EXISTS(
  SELECT 1 FROM plan_enrollments e
