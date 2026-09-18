@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 use uuid::Uuid;
 
+pub mod backup;
 mod export;
 #[cfg(unix)]
 mod export_directory;

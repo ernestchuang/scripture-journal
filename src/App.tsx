@@ -19,6 +19,7 @@ export function App() {
   const [pane, setPane] = useState<'read' | 'write'>('read');
   const [notice, setNotice] = useState('');
   const [exporting, setExporting] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
   const persistence = useRef<JournalPersistenceState | null>(null);
   const rememberPersistence = useCallback((state: JournalPersistenceState) => { persistence.current = state; }, []);
 
@@ -61,6 +62,15 @@ export function App() {
       setExporting(false);
     }
   }
+  async function backup(command: 'create_full_backup' | 'stage_full_restore') {
+    setBackupBusy(true); setNotice('');
+    try {
+      await persistence.current?.flush();
+      const result = await invoke<string | null>(command);
+      if (result) setNotice(command === 'create_full_backup' ? `Full backup created: ${result}` : result);
+    } catch (error) { setNotice(`Backup operation failed; the current journal was not replaced. ${String(error)}`); }
+    finally { setBackupBusy(false); }
+  }
 
   return (
     <div className="app">
@@ -89,6 +99,8 @@ export function App() {
             title={isDesktop ? 'Export finished entries to an Obsidian folder' : 'Folder export is available in the desktop app'}>
             {exporting ? 'Exporting…' : 'Export to Obsidian'}
           </button>
+          <button className="export-button" disabled={!isDesktop || backupBusy} onClick={() => void backup('create_full_backup')}>Full backup</button>
+          <button className="export-button" disabled={!isDesktop || backupBusy} onClick={() => void backup('stage_full_restore')}>Restore backup</button>
         </div>
       </header>
       {appearance.error && <div className="app-notice" role="status">{appearance.error}</div>}

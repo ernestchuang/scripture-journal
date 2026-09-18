@@ -15,7 +15,59 @@ use tauri_plugin_dialog::DialogExt;
 
 struct AppState {
     journal: Arc<Mutex<JournalStore>>,
+    journal_path: PathBuf,
     export_directories: Mutex<HashSet<PathBuf>>,
+}
+
+#[tauri::command]
+async fn create_full_backup(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Choose where to save the full backup")
+        .blocking_pick_folder();
+    let Some(folder) = selected else {
+        return Ok(None);
+    };
+    let folder = folder.into_path().map_err(|e| e.to_string())?;
+    let destination = folder.join(format!(
+        "scripture-journal-{}.sjbackup",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+    ));
+    let source = state.journal_path.clone();
+    let shown = destination.to_string_lossy().into_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        journal_core::backup::create(&source, &destination).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(Some(shown))
+}
+
+#[tauri::command]
+async fn stage_full_restore(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Choose a Scripture Journal backup")
+        .blocking_pick_folder();
+    let Some(folder) = selected else {
+        return Ok(None);
+    };
+    let folder = folder.into_path().map_err(|e| e.to_string())?;
+    let staged = state.journal_path.with_file_name("restore-pending.sqlite3");
+    tauri::async_runtime::spawn_blocking(move || {
+        journal_core::backup::stage_restore(&folder, &staged).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(Some("Backup verified. Restart Scripture Journal to restore it. Export folders will need to be chosen again.".into()))
 }
 
 #[derive(Deserialize)]
@@ -1729,9 +1781,15 @@ pub fn run() {
         .setup(|app| {
             let root = app.path().app_data_dir()?;
             std::fs::create_dir_all(&root)?;
-            let journal = JournalStore::open(&root.join("journal.sqlite3"))?;
+            let journal_path = root.join("journal.sqlite3");
+            journal_core::backup::activate_pending(
+                &journal_path,
+                &root.join("restore-pending.sqlite3"),
+            )?;
+            let journal = JournalStore::open(&journal_path)?;
             app.manage(AppState {
                 journal: Arc::new(Mutex::new(journal)),
+                journal_path,
                 export_directories: Mutex::new(HashSet::new()),
             });
             Ok(())
@@ -1765,7 +1823,9 @@ pub fn run() {
             export_journal,
             apply_appearance,
             read_omarchy_theme,
-            startup_appearance
+            startup_appearance,
+            create_full_backup,
+            stage_full_restore
         ])
         .run(tauri::generate_context!())
         .expect("Could not start Scripture Journal");
