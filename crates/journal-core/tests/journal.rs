@@ -314,6 +314,77 @@ fn store_imports_new_json_plans_and_exports_selected_versions_without_touching_h
 }
 
 #[test]
+fn identical_builtin_json_imports_create_distinct_custom_plans_without_mutating_progress() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let built_in = store.register_four_stream_plan().unwrap();
+    let existing = store
+        .create_plan_definition(stream_definition("Existing progress"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&existing.id, stream_selections(false))
+        .unwrap();
+    let active = store.active_plan_assignments(&enrollment.id).unwrap();
+    let old_testament = active
+        .iter()
+        .find(|assignment| assignment.stream_id == "old-testament")
+        .unwrap();
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: old_testament.stream_id.clone(),
+            expected_assignment_id: old_testament.id.clone(),
+            expected_progress_id: old_testament.progress_id.clone(),
+        })
+        .unwrap();
+    let progress_before_import = progress_fingerprint(&path);
+    let active_before_import = store.active_plan_assignments(&enrollment.id).unwrap();
+
+    let built_in_json = store.export_plan_definition_json(&built_in.id).unwrap();
+    let input_definition = parse_plan_definition_json(&built_in_json).unwrap();
+    let first_import = store.import_plan_definition_json(&built_in_json).unwrap();
+    let second_import = store.import_plan_definition_json(&built_in_json).unwrap();
+    assert_ne!(first_import.plan_id, second_import.plan_id);
+    assert_ne!(first_import.id, second_import.id);
+    assert_ne!(first_import.plan_id, built_in.plan_id);
+    assert_ne!(second_import.plan_id, built_in.plan_id);
+    assert_eq!(first_import.definition, input_definition);
+    assert_eq!(second_import.definition, input_definition);
+    assert_eq!(
+        parse_plan_definition_json(&store.export_plan_definition_json(&first_import.id).unwrap())
+            .unwrap(),
+        input_definition
+    );
+    assert_eq!(store.register_four_stream_plan().unwrap(), built_in);
+    assert_eq!(progress_fingerprint(&path), progress_before_import);
+    assert_eq!(
+        store.active_plan_assignments(&enrollment.id).unwrap(),
+        active_before_import
+    );
+    let plan_registry_after_import = plan_registry_fingerprint(&path);
+    drop(store);
+
+    let mut reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(reopened.register_four_stream_plan().unwrap(), built_in);
+    assert_eq!(plan_registry_fingerprint(&path), plan_registry_after_import);
+    assert_eq!(progress_fingerprint(&path), progress_before_import);
+    assert_eq!(
+        reopened.active_plan_assignments(&enrollment.id).unwrap(),
+        active_before_import
+    );
+
+    let domain_invalid = valid_explicit_definition_json().replacen("\"day\":1", "\"day\":2", 1);
+    let registry_before_rejection = plan_registry_fingerprint(&path);
+    let progress_before_rejection = progress_fingerprint(&path);
+    assert!(reopened
+        .import_plan_definition_json(&domain_invalid)
+        .is_err());
+    assert_eq!(plan_registry_fingerprint(&path), registry_before_rejection);
+    assert_eq!(progress_fingerprint(&path), progress_before_rejection);
+}
+
+#[test]
 fn failed_json_plan_imports_and_missing_export_leave_existing_rows_unchanged() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
