@@ -1,0 +1,10 @@
+.plan-panel { border-bottom: 1px solid var(--line); padding: .9rem 1.4rem; background: var(--surface); color: var(--ink); font-size: .82rem; }
+.plan-panel header span { color: var(--muted); font-size: .63rem; font-weight: 700; letter-spacing: .15em; }
+.plan-panel h2, .plan-panel h3 { font-family: var(--serif); font-weight: 500; margin: .15rem 0 .6rem; }
+.plan-panel h2 { font-size: 1.2rem; }.plan-panel h3 { font-size: 1rem; }
+.plan-panel p { color: var(--muted); margin: .5rem 0; }.plan-panel label { display: grid; gap: .3rem; font-weight: 600; }
+.plan-panel select { width: 100%; max-width: 100%; color: var(--ink); background: var(--surface-raised); border: 1px solid var(--line); border-radius: .4rem; padding: .45rem; }
+.plan-panel button { margin-left: .5rem; padding: .3rem .5rem; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: .35rem; }
+.plan-error { color: var(--error-ink); background: var(--error-surface); border: 1px solid var(--error-line); border-radius: .4rem; padding: .55rem; overflow-wrap: anywhere; }
+.plan-details ul { margin: .4rem 0 0; padding-left: 1.2rem; }.plan-details li { margin: .3rem 0; display: grid; gap: .1rem; }.plan-details li span { color: var(--muted); }
+@media (max-width: 640px) { .plan-panel { padding: .8rem 1rem; } }

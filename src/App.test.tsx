@@ -9,6 +9,9 @@ const native = vi.hoisted(() => ({
   listEntries: vi.fn(),
   saveEntry: vi.fn(),
   invoke: vi.fn(),
+  listPlanEnrollments: vi.fn(),
+  getPlanDefinitionVersion: vi.fn(),
+  activePlanAssignments: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
@@ -24,6 +27,13 @@ vi.mock('./platform/journal', () => ({
     getHistory: vi.fn(async () => []),
     restoreRevision: vi.fn(),
     exportJournal: vi.fn(),
+  },
+}));
+vi.mock('./platform/plans', () => ({
+  nativePlans: {
+    listPlanEnrollments: native.listPlanEnrollments,
+    getPlanDefinitionVersion: native.getPlanDefinitionVersion,
+    activePlanAssignments: native.activePlanAssignments,
   },
 }));
 vi.mock('./scripture/Reader', () => ({ Reader: () => null }));
@@ -58,6 +68,9 @@ beforeEach(() => {
   });
   native.listEntries.mockReset().mockResolvedValue([]);
   native.saveEntry.mockReset();
+  native.listPlanEnrollments.mockReset().mockResolvedValue([]);
+  native.getPlanDefinitionVersion.mockReset();
+  native.activePlanAssignments.mockReset();
 });
 
 afterEach(cleanup);
