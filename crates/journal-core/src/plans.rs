@@ -74,6 +74,40 @@ pub fn four_stream_plan_definition() -> PlanDefinition {
     }
 }
 
+/// Robert Murray M’Cheyne's established 365-day calendar, represented as one
+/// explicit daily set. Multi-chapter readings are expanded into adjacent
+/// passages so chapter and verse boundaries remain exact in the portable
+/// definition format.
+pub fn mcheyne_plan_definition() -> PlanDefinition {
+    let source: Vec<Vec<[u32; 4]>> = serde_json::from_str(include_str!("mcheyne_schedule.json"))
+        .expect("the checked-in M’Cheyne schedule must be valid JSON");
+    let days = source
+        .into_iter()
+        .enumerate()
+        .map(|(index, passages)| ExplicitScheduleDay {
+            day: index as u32 + 1,
+            passages: passages
+                .into_iter()
+                .map(|[book, chapter, start_verse, end_verse]| Passage {
+                    book,
+                    chapter,
+                    start_verse: (start_verse != 0).then_some(start_verse),
+                    end_verse: (end_verse != 0).then_some(end_verse),
+                })
+                .collect(),
+        })
+        .collect();
+
+    PlanDefinition {
+        schema_version: DEFINITION_SCHEMA_VERSION,
+        name: "M’Cheyne's Daily Bible Readings".into(),
+        description: Some(
+            "Robert Murray M’Cheyne's 365-day calendar of family and private readings.".into(),
+        ),
+        schedule: PlanSchedule::ExplicitSchedule { days },
+    }
+}
+
 fn canonical_chapters(
     books: std::ops::RangeInclusive<u32>,
     include: impl Fn(u32) -> bool,

@@ -1,8 +1,8 @@
 use journal_core::{
-    four_stream_plan_definition, parse_plan_definition_json, serialize_plan_definition_json,
-    ChapterRef, ChapterStream, CompleteStreamRequest, EntryContent, ExplicitScheduleDay,
-    JournalStore, Passage, PlanDefinition, PlanSchedule, SaveRequest, StreamEnrollment,
-    MAX_PLAN_DEFINITION_JSON_BYTES,
+    four_stream_plan_definition, mcheyne_plan_definition, parse_plan_definition_json,
+    serialize_plan_definition_json, ChapterRef, ChapterStream, CompleteStreamRequest, EntryContent,
+    ExplicitScheduleDay, JournalStore, Passage, PlanDefinition, PlanSchedule, SaveRequest,
+    StreamEnrollment, MAX_PLAN_DEFINITION_JSON_BYTES,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -644,6 +644,83 @@ fn built_in_four_stream_definition_covers_every_canonical_chapter_and_enrolls() 
             ("psalms".into(), 19, 150),
         ]
     );
+}
+
+#[test]
+fn mcheyne_definition_preserves_the_complete_calendar_and_boundaries() {
+    let definition = mcheyne_plan_definition();
+    let PlanSchedule::ExplicitSchedule { days } = &definition.schedule else {
+        panic!("M’Cheyne must be an explicit daily schedule");
+    };
+
+    assert_eq!(days.len(), 365);
+    assert_eq!(
+        days.iter().map(|day| day.passages.len()).sum::<usize>(),
+        1_621
+    );
+    assert_eq!(days.iter().map(|day| day.passages.len()).min(), Some(4));
+    assert_eq!(days.iter().map(|day| day.passages.len()).max(), Some(7));
+    assert_eq!(
+        days.first().unwrap().passages,
+        vec![
+            whole_chapter(1, 1),
+            whole_chapter(40, 1),
+            whole_chapter(15, 1),
+            whole_chapter(44, 1),
+        ]
+    );
+    assert_eq!(
+        days[58].passages,
+        vec![
+            whole_chapter(2, 11),
+            passage_range(2, 12, 1, 20),
+            whole_chapter(42, 14),
+            whole_chapter(18, 29),
+            whole_chapter(46, 15),
+        ]
+    );
+    assert_eq!(days[59].passages[0], passage_range(2, 12, 21, 50));
+    assert_eq!(
+        days[129].passages,
+        vec![
+            whole_chapter(4, 19),
+            whole_chapter(19, 56),
+            whole_chapter(19, 57),
+            whole_chapter(23, 8),
+            passage_range(23, 9, 1, 7),
+            whole_chapter(59, 2),
+        ]
+    );
+    assert_eq!(
+        days.last().unwrap().passages,
+        vec![
+            whole_chapter(14, 36),
+            whole_chapter(66, 22),
+            whole_chapter(39, 4),
+            whole_chapter(43, 21),
+        ]
+    );
+
+    let json = serialize_plan_definition_json(&definition).unwrap();
+    assert_eq!(parse_plan_definition_json(&json).unwrap(), definition);
+}
+
+fn whole_chapter(book: u32, chapter: u32) -> Passage {
+    Passage {
+        book,
+        chapter,
+        start_verse: None,
+        end_verse: None,
+    }
+}
+
+fn passage_range(book: u32, chapter: u32, start_verse: u32, end_verse: u32) -> Passage {
+    Passage {
+        book,
+        chapter,
+        start_verse: Some(start_verse),
+        end_verse: Some(end_verse),
+    }
 }
 
 #[test]
