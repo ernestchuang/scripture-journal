@@ -125,12 +125,16 @@ afterEach(() => {
 
 describe('native application close lifecycle', () => {
   it('clears a transient native appearance error after a later successful update', async () => {
-    native.invoke.mockRejectedValueOnce(new Error('Temporary native failure'));
+    let appearanceCalls = 0;
+    native.invoke.mockImplementation(async (command: string) => {
+      if (command === 'apply_appearance' && appearanceCalls++ === 0) throw new Error('Temporary native failure');
+      return undefined;
+    });
     render(<App />);
     expect(await screen.findByText('The window appearance could not be updated.')).toBeTruthy();
     await act(async () => { window.dispatchEvent(new Event('appearancechange')); });
     await waitFor(() => expect(screen.queryByText('The window appearance could not be updated.')).toBeNull());
-    expect(native.invoke).toHaveBeenCalledTimes(2);
+    expect(native.invoke.mock.calls.filter(([command]) => command === 'apply_appearance')).toHaveLength(2);
   });
 
   it('keeps close pending until the current editor generation is saved unfinished', async () => {
@@ -477,5 +481,33 @@ describe('native application close lifecycle', () => {
     expect(native.saveEntry).toHaveBeenCalledTimes(1);
     expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while undoing' } });
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this while undoing');
+  });
+
+  it('offers restored portable preferences without applying them silently', async () => {
+    const values = new Map<string, string>([['scripture-journal.appearance', 'light'], ['scripture-journal.reader-location', '{"book":43,"chapter":2}']]);
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    } });
+    native.invoke.mockImplementation(async (command: string) => command === 'startup_restore_outcome'
+      ? { notice: 'Backup restored.', preferences: {
+        'scripture-journal.appearance': 'dark',
+        'scripture-journal.reader-location': '{"book":43,"chapter":3}',
+      } }
+      : undefined);
+
+    render(<App />);
+
+    expect(await screen.findByRole('button', { name: 'Apply restored appearance/reading preferences' })).toBeTruthy();
+    expect(values.get('scripture-journal.appearance')).toBe('light');
+    expect(values.get('scripture-journal.reader-location')).toBe('{"book":43,"chapter":2}');
+
+    native.saveEntry.mockRejectedValueOnce(new Error('Synthetic save failure'));
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    fireEvent.change(await screen.findByLabelText(/Reflection Markdown/), { target: { value: 'Unsaved before preference reload' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply restored appearance/reading preferences' }));
+    expect(await screen.findByText(/preferences could not be applied.*Synthetic save failure/i)).toBeTruthy();
+    expect(values.get('scripture-journal.appearance')).toBe('light');
+    expect(native.invoke.mock.calls.some(([command]) => command === 'acknowledge_restored_preferences')).toBe(false);
   });
 });

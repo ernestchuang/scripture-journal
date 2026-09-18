@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 use uuid::Uuid;
 
+pub mod backup;
 mod deletion;
 mod export;
 pub const CURRENT_SCHEMA: u32 = 14;

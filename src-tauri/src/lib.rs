@@ -6,7 +6,7 @@ use journal_core::{
     PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, Revision,
     SaveRequest, StreamEnrollment,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     path::PathBuf,
@@ -21,7 +21,214 @@ use scripture::{ScriptureStore, Verse};
 struct AppState {
     journal: Arc<Mutex<JournalStore>>,
     scripture: Arc<Mutex<ScriptureStore>>,
+    journal_path: PathBuf,
+    restore_backups: Mutex<HashSet<PathBuf>>,
     export_directories: Mutex<HashSet<PathBuf>>,
+    restore_outcome: Mutex<StartupRestoreOutcome>,
+    // Declared last so journal connections close before releasing the lease.
+    _journal_lock: std::fs::File,
+}
+
+fn acquire_journal_lock(root: &std::path::Path) -> Result<std::fs::File, String> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("journal.lock"))
+        .map_err(|e| e.to_string())?;
+    fs2::FileExt::try_lock_exclusive(&file).map_err(|_| "This journal is already open in another Scripture Journal instance. Close it before opening or restoring here.".to_string())?;
+    Ok(file)
+}
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartupRestoreOutcome {
+    notice: Option<String>,
+    preferences: journal_core::backup::PortablePreferences,
+}
+
+fn open_startup_journal(
+    root: &std::path::Path,
+) -> Result<(JournalStore, PathBuf, StartupRestoreOutcome), String> {
+    let journal_path = root.join("journal.sqlite3");
+    let staged = root.join("restore-pending.sqlite3");
+    let pending_preferences = root.join("restore-preferences-pending.json");
+    let restored_preferences = root.join("restore-preferences-restored.json");
+    let mut outcome = StartupRestoreOutcome::default();
+    let mut restore_failed = false;
+    match journal_core::backup::activate_pending(&journal_path, &staged) {
+        Ok(true) => {
+            if pending_preferences.exists() {
+                if let Err(error) = std::fs::rename(&pending_preferences, &restored_preferences) {
+                    outcome.notice = Some(format!("The journal was restored, but its optional preferences could not be prepared. The restored journal remains active. {error}"));
+                }
+            }
+            if outcome.notice.is_none() {
+                outcome.notice = Some("Backup restored. The current journal is ready.".into());
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            restore_failed = true;
+            let _ = std::fs::remove_file(&pending_preferences);
+            outcome.notice = Some(format!(
+                "Restore failed; the current journal was retained. {error:#}"
+            ));
+        }
+    }
+    if restored_preferences.exists() {
+        match std::fs::read(&restored_preferences)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
+        {
+            Ok(preferences) => {
+                outcome.preferences = preferences;
+                if !outcome.preferences.is_empty() && !restore_failed {
+                    outcome.notice = Some("Backup restored. Restored appearance and reading preferences are ready to apply.".into());
+                }
+            }
+            Err(error) if !restore_failed => {
+                outcome.notice = Some(format!("The journal was restored, but its optional preferences could not be read. The restored journal remains active. {error}"));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok((
+        JournalStore::open(&journal_path).map_err(|e| e.to_string())?,
+        journal_path,
+        outcome,
+    ))
+}
+
+#[tauri::command]
+fn startup_restore_outcome(state: State<'_, AppState>) -> Result<StartupRestoreOutcome, String> {
+    state
+        .restore_outcome
+        .lock()
+        .map(|value| value.clone())
+        .map_err(|_| "Restore status is unavailable.".into())
+}
+
+#[tauri::command]
+fn acknowledge_restored_preferences(state: State<'_, AppState>) -> Result<(), String> {
+    let receipt = state
+        .journal_path
+        .with_file_name("restore-preferences-restored.json");
+    if receipt.exists() {
+        std::fs::remove_file(receipt).map_err(|error| error.to_string())?;
+    }
+    state
+        .restore_outcome
+        .lock()
+        .map_err(|_| "Restore status is unavailable.")?
+        .preferences
+        .clear();
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_full_backup(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    preferences: journal_core::backup::PortablePreferences,
+) -> Result<Option<String>, String> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Choose where to save the full backup")
+        .blocking_pick_folder();
+    let Some(folder) = selected else {
+        return Ok(None);
+    };
+    let folder = folder.into_path().map_err(|e| e.to_string())?;
+    let destination = folder.join(format!(
+        "scripture-journal-{}.sjbackup",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+    ));
+    let source = state.journal_path.clone();
+    let shown = destination.to_string_lossy().into_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        journal_core::backup::create(&source, &destination, preferences).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(Some(shown))
+}
+
+#[tauri::command]
+async fn choose_restore_backup(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Choose a Scripture Journal backup")
+        .blocking_pick_folder();
+    let Some(folder) = selected else {
+        return Ok(None);
+    };
+    let folder = folder
+        .into_path()
+        .map_err(|e| e.to_string())?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    state
+        .restore_backups
+        .lock()
+        .map_err(|_| "Restore selection is unavailable.")?
+        .insert(folder.clone());
+    Ok(Some(folder.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+async fn stage_full_restore(
+    directory: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let folder = PathBuf::from(directory)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !state
+        .restore_backups
+        .lock()
+        .map_err(|_| "Restore selection is unavailable.")?
+        .remove(&folder)
+    {
+        return Err("Choose the backup again before restoring.".into());
+    }
+    let staged = state.journal_path.with_file_name("restore-pending.sqlite3");
+    let preferences = tauri::async_runtime::spawn_blocking(move || {
+        journal_core::backup::stage_restore(&folder, &staged).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let receipt = state
+        .journal_path
+        .with_file_name("restore-preferences-pending.json");
+    let bytes = serde_json::to_vec(&preferences).map_err(|e| e.to_string())?;
+    if let Err(error) = write_receipt(&receipt, &bytes) {
+        let _ = std::fs::remove_file(state.journal_path.with_file_name("restore-pending.sqlite3"));
+        return Err(error.to_string());
+    }
+    Ok("Backup verified. Restart Scripture Journal to restore it. Export folders will need to be chosen again.".into())
+}
+
+fn write_receipt(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1886,16 +2093,22 @@ pub fn run() {
         .setup(|app| {
             let root = app.path().app_data_dir()?;
             std::fs::create_dir_all(&root)?;
-            let journal = JournalStore::open(&root.join("journal.sqlite3"))?;
+            let journal_lock = acquire_journal_lock(&root).map_err(std::io::Error::other)?;
+            let (journal, journal_path, restore_outcome) =
+                open_startup_journal(&root).map_err(std::io::Error::other)?;
             // Scripture is a disposable cache. A damaged/unavailable cache must never
             // prevent the authoritative journal from opening.
             let scripture = ScriptureStore::open(&root.join("scripture.sqlite3"))
                 .or_else(|_| ScriptureStore::temporary())
                 .map_err(std::io::Error::other)?;
             app.manage(AppState {
+                _journal_lock: journal_lock,
                 journal: Arc::new(Mutex::new(journal)),
                 scripture: Arc::new(Mutex::new(scripture)),
+                journal_path,
+                restore_backups: Mutex::new(HashSet::new()),
                 export_directories: Mutex::new(HashSet::new()),
+                restore_outcome: Mutex::new(restore_outcome),
             });
             Ok(())
         })
@@ -1940,8 +2153,55 @@ pub fn run() {
             import_scripture_pack,
             scripture_translation_info,
             scripture_kjv_status,
-            download_kjv_library
+            download_kjv_library,
+            create_full_backup,
+            choose_restore_backup,
+            stage_full_restore,
+            startup_restore_outcome,
+            acknowledge_restored_preferences
         ])
         .run(tauri::generate_context!())
         .expect("Could not start Scripture Journal");
+}
+
+#[cfg(test)]
+mod backup_startup_tests {
+    use super::*;
+    #[test]
+    fn journal_lifetime_lock_prevents_restore_under_another_instance() {
+        let root = tempfile::tempdir().unwrap();
+        let first = acquire_journal_lock(root.path()).unwrap();
+        assert!(acquire_journal_lock(root.path()).is_err());
+        drop(first);
+        assert!(acquire_journal_lock(root.path()).is_ok());
+    }
+    #[test]
+    fn invalid_pending_restore_does_not_block_healthy_journal_startup() {
+        let root = tempfile::tempdir().unwrap();
+        drop(JournalStore::open(&root.path().join("journal.sqlite3")).unwrap());
+        std::fs::write(root.path().join("restore-pending.sqlite3"), b"invalid").unwrap();
+        let (_, _, outcome) = open_startup_journal(root.path()).unwrap();
+        assert!(outcome
+            .notice
+            .unwrap()
+            .contains("current journal was retained"));
+    }
+
+    #[test]
+    fn failed_new_restore_is_not_hidden_by_an_older_preferences_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        drop(JournalStore::open(&root.path().join("journal.sqlite3")).unwrap());
+        std::fs::write(root.path().join("restore-pending.sqlite3"), b"invalid").unwrap();
+        std::fs::write(
+            root.path().join("restore-preferences-restored.json"),
+            br#"{"scripture-journal.appearance":"dark"}"#,
+        )
+        .unwrap();
+        let (_, _, outcome) = open_startup_journal(root.path()).unwrap();
+        assert!(outcome
+            .notice
+            .unwrap()
+            .contains("current journal was retained"));
+        assert_eq!(outcome.preferences["scripture-journal.appearance"], "dark");
+    }
 }

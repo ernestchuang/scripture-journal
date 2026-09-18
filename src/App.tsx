@@ -11,6 +11,13 @@ import { nativePlans } from './platform/plans';
 import { PlanPanel } from './plans/PlanPanel';
 
 const journal = isDesktop ? nativeJournal : browserJournal;
+const portablePreferenceKeys = [
+  'scripture-journal.appearance',
+  'scripture-journal.custom-themes',
+  'scripture-journal.reader-location',
+  'scripture-journal.translation',
+] as const;
+type RestoreOutcome = { notice?: string | null; preferences: Record<string, string> };
 
 export function App() {
   const appearance = useAppearance();
@@ -24,6 +31,8 @@ export function App() {
   const [pane, setPane] = useState<'read' | 'write'>('read');
   const [notice, setNotice] = useState('');
   const [exporting, setExporting] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [restoredPreferences, setRestoredPreferences] = useState<Record<string, string>>({});
   const persistence = useRef<JournalPersistenceState | null>(null);
   const rememberPersistence = useCallback((state: JournalPersistenceState) => { persistence.current = state; }, []);
   useEffect(() => { try { window.localStorage?.setItem('scripture-journal.reader-location', JSON.stringify(selection)); } catch { /* Reading remains usable without preference storage. */ } }, [selection]);
@@ -43,6 +52,15 @@ export function App() {
     }).then((stop) => { if (disposed) stop(); else unlisten = stop; })
       .catch(() => setNotice('Close protection could not start. Wait for Draft saved before closing the app.'));
     return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    void invoke<RestoreOutcome>('startup_restore_outcome').then(outcome => {
+      if (!outcome) return;
+      if (outcome.notice) setNotice(outcome.notice);
+      setRestoredPreferences(outcome.preferences ?? {});
+    }).catch(error => setNotice(`Restore status could not be read. ${String(error)}`));
   }, []);
 
   function reflect(passage: Passage) {
@@ -65,6 +83,40 @@ export function App() {
       setNotice(`Export could not finish: ${String(error)}`);
     } finally {
       setExporting(false);
+    }
+  }
+  async function backup(command: 'create_full_backup' | 'stage_full_restore') {
+    setBackupBusy(true); setNotice('');
+    try {
+      await persistence.current?.flush();
+      let result: string | null;
+      if (command === 'stage_full_restore') {
+        const directory = await invoke<string | null>('choose_restore_backup');
+        if (!directory || !window.confirm(`Replace the current journal from this backup after restart?\n\n${directory}\n\nA pre-restore backup will be created first.`)) return;
+        result = await invoke<string>('stage_full_restore', { directory });
+      } else {
+        const preferences = Object.fromEntries(portablePreferenceKeys.flatMap(key => {
+          const value = localStorage.getItem(key);
+          return value === null ? [] : [[key, value]];
+        }));
+        result = await invoke<string | null>(command, { preferences });
+      }
+      if (result) setNotice(command === 'create_full_backup' ? `Full backup created: ${result}` : result);
+    } catch (error) { setNotice(`Backup operation failed; the current journal was not replaced. ${String(error)}`); }
+    finally { setBackupBusy(false); }
+  }
+
+  async function applyRestoredPreferences() {
+    try {
+      await persistence.current?.flush();
+      for (const key of portablePreferenceKeys) {
+        const value = restoredPreferences[key];
+        if (value !== undefined) localStorage.setItem(key, value);
+      }
+      await invoke('acknowledge_restored_preferences');
+      window.location.reload();
+    } catch (error) {
+      setNotice(`Restored preferences could not be applied. They remain available to retry. ${String(error)}`);
     }
   }
 
@@ -95,6 +147,8 @@ export function App() {
             title={isDesktop ? 'Export finished entries to an Obsidian folder' : 'Folder export is available in the desktop app'}>
             {exporting ? 'Exporting…' : 'Export to Obsidian'}
           </button>
+          <button className="export-button" disabled={!isDesktop || backupBusy} onClick={() => void backup('create_full_backup')}>Full backup</button>
+          <button className="export-button" disabled={!isDesktop || backupBusy} onClick={() => void backup('stage_full_restore')}>Restore backup</button>
         </div>
       </header>
       {appearance.error && <div className="app-notice" role="status">{appearance.error}</div>}
@@ -109,7 +163,9 @@ export function App() {
       </nav>
 
       {notice && <div className="app-notice" role="status">
-        <span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss export notice">×</button>
+        <span>{notice}</span>
+        {Object.keys(restoredPreferences).length > 0 && <button onClick={() => void applyRestoredPreferences()}>Apply restored appearance/reading preferences</button>}
+        <button onClick={() => setNotice('')} aria-label="Dismiss export notice">×</button>
       </div>}
 
       <main className={`workspace show-${pane}`}>
