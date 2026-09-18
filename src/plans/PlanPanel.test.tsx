@@ -506,6 +506,56 @@ describe('retained plan panel', () => {
     expect(await screen.findByText(/Completion retry-completion/)).toBeTruthy();
   });
 
+  it('preserves dated assignment metadata while confirmed-completion history refreshes or fails without replaying the write', async () => {
+    const retained = { ...calendarEnrollment, id: 'calendar-history-refresh' };
+    const assignment: DatedPlanAssignment = { id: 'dated-history-refresh', enrollmentId: retained.id, definitionVersionId: retained.definitionVersionId, definitionDay: 60, localDate: retained.startDate, passages: [{ book: 2, chapter: 12, startVerse: 21, endVerse: 51 }] };
+    const completion = { id: 'completion-history-refresh', assignmentId: assignment.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:09Z' };
+    const refresh = deferred<typeof completion[]>();
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValue([{ id: retained.id, definitionVersionId: retained.definitionVersionId, createdAt: retained.createdAt }]);
+    vi.mocked(plans.getCalendarPlanEnrollment).mockResolvedValue(retained);
+    vi.mocked(plans.calendarPlanAssignments).mockResolvedValue([assignment]);
+    vi.mocked(plans.completeCalendarAssignment).mockResolvedValue(completion);
+    vi.mocked(plans.calendarCompletionHistory).mockResolvedValueOnce([]).mockReturnValueOnce(refresh.promise).mockResolvedValueOnce([completion]);
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete calendar assignment' }));
+    expect(await screen.findByText('Completion status is loading.')).toBeTruthy();
+    expect(screen.getByText('2026-03-01')).toBeTruthy();
+    expect(screen.getByText('Exodus 12:21–51')).toBeTruthy();
+    expect(screen.getByText(`Assignment ${assignment.id} · Definition version ${assignment.definitionVersionId}`)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete calendar assignment' })).toBeNull();
+    expect(screen.queryByText(/Completed 2026-09-18T00:00:09Z/)).toBeNull();
+    await act(async () => { refresh.reject(new Error('history offline')); });
+    expect(await screen.findByText(/Could not load calendar completion history: Error: history offline/)).toBeTruthy();
+    expect(screen.getByText('Completion status is unavailable.')).toBeTruthy();
+    expect(screen.getByText('Exodus 12:21–51')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete calendar assignment' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry calendar completion history' }));
+    expect(await screen.findByText(`Completed ${completion.completedAt} · Completion ${completion.id}`)).toBeTruthy();
+    expect(plans.completeCalendarAssignment).toHaveBeenCalledTimes(1);
+    expect(plans.calendarCompletionHistory).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps initial calendar assignments visible but completion status unknown until history retry succeeds', async () => {
+    const retained = { ...calendarEnrollment, id: 'calendar-history-initial-failure' };
+    const assignment: DatedPlanAssignment = { id: 'dated-history-initial-failure', enrollmentId: retained.id, definitionVersionId: retained.definitionVersionId, definitionDay: 1, localDate: retained.startDate, passages: [{ book: 43, chapter: 3, startVerse: 16, endVerse: 16 }] };
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValue([{ id: retained.id, definitionVersionId: retained.definitionVersionId, createdAt: retained.createdAt }]);
+    vi.mocked(plans.getCalendarPlanEnrollment).mockResolvedValue(retained);
+    vi.mocked(plans.calendarPlanAssignments).mockResolvedValue([assignment]);
+    vi.mocked(plans.calendarCompletionHistory).mockRejectedValueOnce(new Error('initial history offline')).mockResolvedValueOnce([]);
+    render(<PlanPanel api={plans} />);
+    expect(await screen.findByText(/Could not load calendar completion history: Error: initial history offline/)).toBeTruthy();
+    expect(screen.getByText('2026-03-01')).toBeTruthy();
+    expect(screen.getByText('John 3:16')).toBeTruthy();
+    expect(screen.getByText(`Assignment ${assignment.id} · Definition version ${assignment.definitionVersionId}`)).toBeTruthy();
+    expect(screen.getByText('Completion status is unavailable.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete calendar assignment' })).toBeNull();
+    expect(plans.completeCalendarAssignment).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry calendar completion history' }));
+    expect(await screen.findByRole('button', { name: 'Complete calendar assignment' })).toBeTruthy();
+  });
+
   it('refreshes confirmed calendar enrollment discovery without re-enrolling', async () => {
     const plans = api();
     vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedCalendar]);
