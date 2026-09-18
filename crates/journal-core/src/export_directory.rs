@@ -335,7 +335,6 @@ mod tests {
 
     #[test]
     fn enumeration_stays_pinned_and_restarts_each_scan() {
-        use std::ffi::OsStr;
         let root = tempfile::tempdir().unwrap();
         let selected = root.path().canonicalize().unwrap().join("selected");
         let handle = ExportDirectory::open(&selected).unwrap();
@@ -346,13 +345,15 @@ mod tests {
         fs::rename(&selected, &moved).unwrap();
         symlink(&outside, &selected).unwrap();
         assert!(!handle.contains_name_prefix("recovery-").unwrap());
-        // A matching name is enough: no file read, UTF-8 conversion, or symlink following.
-        let name = OsStr::from_bytes(b"recovery-\xff");
+        // A matching but unreadable managed entry is enough: enumeration neither opens
+        // nor follows it. Use a portable name because macOS rejects invalid-byte names.
+        let name = "recovery-symlink";
         symlink(outside.join("missing"), moved.join(name)).unwrap();
         for _ in 0..2 {
             assert!(handle.contains_name_prefix("recovery-").unwrap());
             assert!(!handle.contains_name_prefix("absent-").unwrap());
         }
+        assert!(handle.read_optional(name).is_err());
         fs::remove_file(moved.join(name)).unwrap();
         assert!(!handle.contains_name_prefix("recovery-").unwrap());
         fs::create_dir(moved.join("recovery-directory")).unwrap();
