@@ -23,6 +23,13 @@ fn request(title: &str, finish: bool) -> SaveRequest {
     }
 }
 
+fn export_fixture(dir: &TempDir, name: &str) -> std::path::PathBuf {
+    // macOS exposes its temporary directory through /var -> /private/var. Resolve
+    // that trusted test-fixture alias; production must keep rejecting selected
+    // destinations with symlink ancestors.
+    dir.path().canonicalize().unwrap().join(name)
+}
+
 #[test]
 fn reopen_recovers_full_draft_and_settings() {
     let dir = TempDir::new().unwrap();
@@ -129,7 +136,7 @@ fn export_only_published_content_and_preserves_external_changes() {
     let mut req = request("Published", true);
     req.content.links.push(draft.entry_id.clone());
     let first = store.save_entry(req.clone()).unwrap();
-    let out = dir.path().join("export");
+    let out = export_fixture(&dir, "export");
     assert_eq!(store.export_journal(&out).unwrap().written, 1);
     let file = out.join(format!("{}.md", req.entry_id));
     let initial = fs::read_to_string(&file).unwrap();
@@ -160,7 +167,7 @@ fn export_rejects_unowned_files_and_foreign_journals() {
     let mut store = JournalStore::open(&dir.path().join("j.db")).unwrap();
     let req = request("Published", true);
     store.save_entry(req.clone()).unwrap();
-    let out = dir.path().join("out");
+    let out = export_fixture(&dir, "out");
     fs::create_dir(&out).unwrap();
     let file = out.join(format!("{}.md", req.entry_id));
     fs::write(&file, "unowned").unwrap();
