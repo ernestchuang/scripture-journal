@@ -24,17 +24,21 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [enrolling, setEnrolling] = useState(false);
   const detailEpoch = useRef(0);
   const actionEpoch = useRef(0);
+  const discoveryEpoch = useRef(0);
+
+  useEffect(() => () => { actionEpoch.current += 1; }, [api]);
 
   useEffect(() => {
     if (!api) return;
     let active = true;
+    const epoch = ++discoveryEpoch.current;
     setEnrollments(null); setListError(''); setDetails(null);
     api.listPlanEnrollments().then(items => {
-      if (!active) return;
+      if (!active || epoch !== discoveryEpoch.current) return;
       setEnrollments(items);
       setSelectedId(current => items.some(item => item.id === current) ? current : (items[0]?.id ?? ''));
-    }).catch(error => { if (active) setListError(String(error)); });
-    return () => { active = false; detailEpoch.current += 1; actionEpoch.current += 1; };
+    }).catch(error => { if (active && epoch === discoveryEpoch.current) setListError(String(error)); });
+    return () => { active = false; detailEpoch.current += 1; };
   }, [api, attempt]);
 
   useEffect(() => {
@@ -76,20 +80,25 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   async function enroll() {
     if (!api || !offer || enrolling || preparing) return;
     const epoch = ++actionEpoch.current;
+    const knownEnrollments = enrollments ?? [];
     setEnrolling(true); setOfferError('');
     try {
       const enrollment = await api.enrollInChapterStreams(offer.id, choices);
       if (epoch !== actionEpoch.current) return;
+      const refreshEpoch = ++discoveryEpoch.current;
       try {
         const refreshed = await api.listPlanEnrollments();
-        if (epoch !== actionEpoch.current) return;
+        if (epoch !== actionEpoch.current || refreshEpoch !== discoveryEpoch.current) return;
         setListError('');
         setEnrollments(refreshed.some(item => item.id === enrollment.id) ? refreshed : [...refreshed, enrollment]);
         setSelectedId(enrollment.id);
         if (!refreshed.some(item => item.id === enrollment.id)) setOfferError('Enrollment was created, but discovery did not return it yet.');
       } catch (error) {
-        if (epoch !== actionEpoch.current) return;
-        setEnrollments(current => current?.some(item => item.id === enrollment.id) ? current : [...(current ?? []), enrollment]);
+        if (epoch !== actionEpoch.current || refreshEpoch !== discoveryEpoch.current) return;
+        setEnrollments(current => {
+          const retained = current ?? knownEnrollments;
+          return retained.some(item => item.id === enrollment.id) ? retained : [...retained, enrollment];
+        });
         setSelectedId(enrollment.id);
         setOfferError(`Enrollment was created, but retained plans could not be refreshed: ${String(error)}`);
       }
