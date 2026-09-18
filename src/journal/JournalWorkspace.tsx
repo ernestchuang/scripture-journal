@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { blankContent, type Entry, type EntryContent, type Passage, type Revision } from '../domain';
+import { type Entry, type EntryContent, type Passage, type Revision } from '../domain';
+import { contentFromTemplate, writingTemplates } from './templates';
 import type { JournalApi } from '../platform/journal';
 import { SaveCoordinator } from './saveCoordinator';
 import './journal.css';
@@ -24,6 +25,11 @@ export interface JournalWorkspaceProps {
 export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceChange }: JournalWorkspaceProps) {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [query, setQuery] = useState('');
+  const [tagFilter, setTagFilter] = useState('');
+  const [bookFilter, setBookFilter] = useState('');
+  const [chapterFilter, setChapterFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [templateId, setTemplateId] = useState('blank');
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [operationError, setOperationError] = useState('');
@@ -71,7 +77,7 @@ export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceCh
   const open = (entry?: Entry, passages: Passage[] = []) => {
     if (entry) entry = committedEntries.current.get(entry.id) ?? entry;
     sessionRef.current = new SaveCoordinator(entry?.id ?? crypto.randomUUID(), api,
-      entry?.content ?? blankContent(structuredClone(passages)), entry, refresh, committed);
+      entry?.content ?? contentFromTemplate(writingTemplates.find(item => item.id === templateId) ?? writingTemplates[0], passages), entry, refresh, committed);
     setHistory(null); setInspected(null); setLinkSelection(''); setOperationError(''); refresh();
   };
 
@@ -163,22 +169,38 @@ export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceCh
   });
   const matches = entries.filter(entry => {
     const needle = query.trim().toLowerCase();
+    if (tagFilter && !entry.content.tags.some(tag => tag.trim() === tagFilter)) return false;
+    if (bookFilter && !entry.content.passages.some(p => p.book === Number(bookFilter) && (!chapterFilter || p.chapter === Number(chapterFilter)))) return false;
+    const finished = entry.publishedRevisionId === entry.workingRevisionId;
+    if (statusFilter === 'finished' && !finished || statusFilter === 'draft' && finished) return false;
     return `${entry.content.title} ${entry.content.body} ${entry.content.tags.join(' ')} ${entry.content.passages.map(passageLabel).join(' ')}`.toLowerCase().includes(needle);
   }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const tags = [...new Set(entries.flatMap(entry => entry.content.tags.map(tag => tag.trim()).filter(Boolean)))].sort();
+  const hasFilters = !!(query || tagFilter || bookFilter || statusFilter);
   const backlinks = session ? entries.filter(entry => entry.id !== session.id && entry.content.links.includes(session.id)) : [];
 
   return <section className="journal-workspace" aria-label="Journal">
     <header className="journal-heading">
       <div><span className="journal-eyebrow">YOUR REFLECTIONS</span><h2>Journal</h2></div>
-      <button onClick={() => navigate(() => open())} disabled={busy}>New blank entry</button>
+      <div className="journal-template"><label>Writing template<select value={templateId} onChange={event => setTemplateId(event.target.value)} disabled={busy}>{writingTemplates.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <button onClick={() => navigate(() => open())} disabled={busy}>{templateId === 'blank' ? 'New blank entry' : 'New entry from template'}</button></div>
     </header>
     {loadError && <div role="alert" className="journal-error">Could not load your journal: {loadError}
       <button onClick={() => { setLoadError(''); api.listEntries().then(items => { setEntries(items); setLoaded(true); }).catch(error => setLoadError(String(error))); }}>Retry loading</button>
     </div>}
     <label className="journal-search">Find a reflection<input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Words, tags, or passages" /></label>
+    <details className="journal-filters"><summary>Filter reflections{hasFilters ? ` · ${matches.length} matching` : ''}</summary>
+      <div className="journal-filter-fields">
+        <label>Tag<select value={tagFilter} onChange={event => setTagFilter(event.target.value)}><option value="">All tags</option>{tags.map(tag => <option key={tag}>{tag}</option>)}</select></label>
+        <label>Bible book<select value={bookFilter} onChange={event => { setBookFilter(event.target.value); setChapterFilter(''); }}><option value="">All passages</option>{books.map((book, index) => <option key={book} value={index + 1}>{book}</option>)}</select></label>
+        <label>Chapter<input type="number" min="1" step="1" disabled={!bookFilter} value={chapterFilter} onChange={event => setChapterFilter(event.target.value)} placeholder="All chapters" /></label>
+        <label>Entry status<select value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="">Drafts and finished</option><option value="draft">Drafts</option><option value="finished">Finished</option></select></label>
+      </div>
+      {hasFilters && <button onClick={() => { setQuery(''); setTagFilter(''); setBookFilter(''); setChapterFilter(''); setStatusFilter(''); }}>Clear filters</button>}
+    </details>
     <nav className="journal-entry-list" aria-label="Journal entries">
       {!loaded && !loadError && <p>Loading your journal…</p>}
-      {loaded && matches.length === 0 && <p>{query ? 'No matching reflections.' : 'Your reflections will appear here.'}</p>}
+      {loaded && matches.length === 0 && <p>{hasFilters ? 'No matching reflections.' : 'Your reflections will appear here.'}</p>}
       {matches.map(entry => <button key={entry.id} aria-current={session?.id === entry.id ? 'true' : undefined} disabled={busy} onClick={() => navigate(() => open(entry))}>
         <strong>{title(entry)}</strong><span>{entry.content.passages.map(passageLabel).join(' · ') || 'Personal reflection'}</span>
         <small>{entry.publishedRevisionId === entry.workingRevisionId ? 'Finished' : 'Draft'} · {date(entry.updatedAt)}</small>

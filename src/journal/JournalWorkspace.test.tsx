@@ -16,6 +16,34 @@ const fakeApi = (): JournalApi => ({
 });
 
 describe('journal workspace', () => {
+  it('combines revisit filters without changing open writing', async () => {
+    const api = fakeApi();
+    const make = (id: string, finished: boolean, chapter: number, tags: string[]): Entry => ({
+      id, createdAt: '2026-09-17T00:00:00Z', updatedAt: '2026-09-17T00:00:00Z',
+      workingRevisionId: 'r1', publishedRevisionId: finished ? 'r1' : null,
+      content: { ...blankContent([{ book: 43, chapter }]), title: id, tags },
+    });
+    vi.mocked(api.listEntries).mockResolvedValue([
+      make('Trust', true, 3, ['hope']), make('Questions', false, 3, ['hope']), make('Next chapter', true, 4, ['hope']),
+    ]);
+    render(<JournalWorkspace api={api} passage={{ book: 43, chapter: 3 }} reflectRequest={0} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Questions/ }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    fireEvent.change(editor, { target: { value: 'Still writing' } });
+    fireEvent.click(screen.getByText('Filter reflections'));
+    fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'hope' } });
+    fireEvent.change(screen.getByLabelText('Bible book'), { target: { value: '43' } });
+    fireEvent.change(screen.getByLabelText('Chapter'), { target: { value: '3' } });
+    fireEvent.change(screen.getByLabelText('Entry status'), { target: { value: 'finished' } });
+    const nav = screen.getByRole('navigation', { name: 'Journal entries' });
+    expect(nav.textContent).toContain('Trust');
+    expect(nav.textContent).not.toContain('Questions');
+    expect(nav.textContent).not.toContain('Next chapter');
+    expect((editor as HTMLTextAreaElement).value).toBe('Still writing');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(nav.textContent).toContain('Questions');
+    expect(nav.textContent).toContain('Next chapter');
+  });
   it('persists continuous typing without waiting for an idle pause', async () => {
     const api = fakeApi();
     render(<JournalWorkspace api={api} passage={{ book: 1, chapter: 1 }} reflectRequest={0} />);
