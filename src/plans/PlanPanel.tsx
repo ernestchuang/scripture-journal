@@ -78,6 +78,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const exportEpoch = useRef(0);
   const retainedExportEpoch = useRef(0);
   const retainedEnrollmentEpoch = useRef(0);
+  const retainedChoiceDefinitionId = useRef('');
   const discoveryEpoch = useRef(0);
   const definitionDiscoveryEpoch = useRef(0);
   const confirmedEnrollment = useRef<PlanEnrollment | null>(null);
@@ -101,6 +102,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     exportEpoch.current += 1;
     retainedExportEpoch.current += 1;
     retainedEnrollmentEpoch.current += 1;
+    retainedChoiceDefinitionId.current = '';
     definitionDiscoveryEpoch.current += 1;
     confirmedEnrollment.current = null;
     confirmedDefinitions.current.clear();
@@ -124,11 +126,13 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   }, [api, selectedDefinitionId]);
 
   useEffect(() => {
+    if (retainedChoiceDefinitionId.current === selectedDefinitionId) return;
+    retainedChoiceDefinitionId.current = selectedDefinitionId;
     const definition = retainedDefinitions?.find(item => item.id === selectedDefinitionId);
     setRetainedEnrollmentChoices(definition?.definition.schedule.kind === 'chapterStreams'
       ? definition.definition.schedule.streams.map(stream => ({ streamId: stream.id, startingPosition: 0, loopAfterEnd: true }))
       : []);
-  }, [retainedDefinitions, selectedDefinitionId]);
+  }, [api, retainedDefinitions, selectedDefinitionId]);
 
   useEffect(() => {
     exportEpoch.current += 1;

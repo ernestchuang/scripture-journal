@@ -318,6 +318,40 @@ describe('retained plan panel', () => {
     expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(retainedEnrollment.id);
   });
 
+  it('preserves retained choices through import overlay, failed refresh, retry, and enrollment', async () => {
+    let rejectRefresh!: (reason: unknown) => void;
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions)
+      .mockResolvedValueOnce([retainedStreams])
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRefresh = reject; }))
+      .mockResolvedValueOnce([retainedStreams, importedPlan]);
+    vi.mocked(plans.enrollInChapterStreams).mockResolvedValueOnce(retainedEnrollment);
+    render(<PlanPanel api={plans} />);
+    const starts = await screen.findAllByLabelText('Retained starting chapter') as HTMLSelectElement[];
+    const loops = screen.getAllByLabelText('Retained stream loops') as HTMLInputElement[];
+    fireEvent.change(starts[0], { target: { value: '1' } });
+    fireEvent.click(loops[1]);
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"schemaVersion":1}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    await waitFor(() => expect(plans.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getAllByLabelText('Retained stream loops')[0]);
+    await act(async () => { rejectRefresh(new Error('refresh unavailable')); });
+
+    expect((screen.getAllByLabelText('Retained starting chapter')[0] as HTMLSelectElement).value).toBe('1');
+    expect((screen.getAllByLabelText('Retained stream loops')[0] as HTMLInputElement).checked).toBe(false);
+    expect((screen.getAllByLabelText('Retained stream loops')[1] as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry retained definitions' }));
+    await waitFor(() => expect(plans.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(3));
+    fireEvent.click(screen.getByRole('button', { name: 'Create retained enrollment' }));
+
+    await waitFor(() => expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1));
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledWith(retainedStreams.id, [
+      { streamId: 'repeat', startingPosition: 1, loopAfterEnd: false },
+      { streamId: 'short', startingPosition: 0, loopAfterEnd: false },
+    ]);
+    expect(plans.importPlanDefinitionJson).toHaveBeenCalledTimes(1);
+  });
+
   it('retains selected-version choices after rejection and permits one explicit retry', async () => {
     let rejectEnrollment!: (reason: unknown) => void;
     const plans = api();
