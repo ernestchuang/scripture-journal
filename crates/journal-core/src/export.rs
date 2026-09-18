@@ -72,13 +72,20 @@ impl JournalStore {
             serde_json::from_slice::<Manifest>(bytes)
                 .context("Invalid export manifest; refusing overwrite")?
         } else {
+            #[cfg(unix)]
+            let recovery_exists = directory_handle.contains_name_prefix(MANIFEST_RECOVERY)?;
+            #[cfg(not(unix))]
+            let recovery_exists = fs::read_dir(directory)?.any(|entry| {
+                entry
+                    .map(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .starts_with(MANIFEST_RECOVERY)
+                    })
+                    .unwrap_or(true)
+            });
             ensure!(
-                !fs::read_dir(directory)?.any(|entry| entry
-                    .map(|e| e
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(MANIFEST_RECOVERY))
-                    .unwrap_or(true)),
+                !recovery_exists,
                 "Export manifest is missing but recovery files exist; repair explicitly"
             );
             Manifest {

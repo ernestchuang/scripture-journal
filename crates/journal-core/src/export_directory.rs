@@ -109,6 +109,16 @@ impl ExportDirectory {
         Ok(Self(directory))
     }
 
+    /// Enumerate names in the held directory without following any entry.
+    pub(super) fn contains_name_prefix(&self, prefix: &str) -> Result<bool> {
+        for entry in rustix::fs::Dir::read_from(&self.0)? {
+            if entry?.file_name().to_bytes().starts_with(prefix.as_bytes()) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Read one managed leaf without resolving the original directory path again.
     pub(super) fn read_optional(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let name = managed_name(name)?;
@@ -237,6 +247,37 @@ impl ExportDirectory {
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::symlink};
+
+    #[test]
+    fn enumeration_stays_pinned_and_restarts_each_scan() {
+        use std::ffi::OsStr;
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().canonicalize().unwrap().join("selected");
+        let handle = ExportDirectory::open(&selected).unwrap();
+        let moved = root.path().join("moved");
+        let outside = root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("recovery-outside"), b"outside").unwrap();
+        fs::rename(&selected, &moved).unwrap();
+        symlink(&outside, &selected).unwrap();
+        assert!(!handle.contains_name_prefix("recovery-").unwrap());
+        // A matching name is enough: no file read, UTF-8 conversion, or symlink following.
+        let name = OsStr::from_bytes(b"recovery-\xff");
+        symlink(outside.join("missing"), moved.join(name)).unwrap();
+        for _ in 0..2 {
+            assert!(handle.contains_name_prefix("recovery-").unwrap());
+            assert!(!handle.contains_name_prefix("absent-").unwrap());
+        }
+        fs::remove_file(moved.join(name)).unwrap();
+        assert!(!handle.contains_name_prefix("recovery-").unwrap());
+        fs::create_dir(moved.join("recovery-directory")).unwrap();
+        assert!(handle.contains_name_prefix("recovery-").unwrap());
+        assert_eq!(
+            fs::read(outside.join("recovery-outside")).unwrap(),
+            b"outside"
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    }
 
     #[test]
     fn lock_stays_in_opened_directory_after_path_is_replaced() {
