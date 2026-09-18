@@ -1024,6 +1024,90 @@ fn stale_completion_epoch_is_rejected_after_undo_reopen_and_recompletion() {
         .unwrap();
 }
 
+#[test]
+fn simultaneous_stores_reject_stale_completion_and_retain_recompletion_history() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut first_store = JournalStore::open(&path).unwrap();
+    let version = first_store
+        .create_plan_definition(stream_definition("Simultaneous stores"))
+        .unwrap();
+    let enrollment = first_store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let mut second_store = JournalStore::open(&path).unwrap();
+    let stale_assignment = second_store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|assignment| assignment.stream_id == "old-testament")
+        .unwrap();
+    let stale_request = CompleteStreamRequest {
+        enrollment_id: enrollment.id.clone(),
+        stream_id: stale_assignment.stream_id.clone(),
+        expected_assignment_id: stale_assignment.id.clone(),
+        expected_progress_id: stale_assignment.progress_id.clone(),
+    };
+
+    let first_completion = first_store
+        .complete_plan_stream(stale_request.clone())
+        .unwrap();
+    first_store
+        .undo_plan_completion(&first_completion.id)
+        .unwrap();
+    let before_rejection = progress_fingerprint(&path);
+    assert!(second_store
+        .complete_plan_stream(stale_request)
+        .unwrap_err()
+        .to_string()
+        .contains("Conflict"));
+    assert_eq!(progress_fingerprint(&path), before_rejection);
+
+    let refreshed_assignment = second_store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|assignment| assignment.stream_id == "old-testament")
+        .unwrap();
+    assert_eq!(refreshed_assignment.id, stale_assignment.id);
+    assert_ne!(
+        refreshed_assignment.progress_id,
+        stale_assignment.progress_id
+    );
+    let recompletion = second_store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: refreshed_assignment.stream_id,
+            expected_assignment_id: refreshed_assignment.id,
+            expected_progress_id: refreshed_assignment.progress_id,
+        })
+        .unwrap();
+    let active_after_recompletion = second_store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap();
+    assert_eq!(
+        active_after_recompletion
+            .iter()
+            .find(|assignment| assignment.stream_id == "old-testament")
+            .unwrap()
+            .ordinal,
+        2
+    );
+    let retained = progress_fingerprint(&path);
+    assert!(retained[3].contains(&first_completion.id));
+    assert!(retained[3].contains(&recompletion.id));
+    assert!(!retained[4].is_empty());
+    drop(second_store);
+    drop(first_store);
+
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(progress_fingerprint(&path), retained);
+    assert_eq!(
+        reopened.active_plan_assignments(&enrollment.id).unwrap(),
+        active_after_recompletion
+    );
+}
+
 fn repeated_chapter_definition() -> PlanDefinition {
     PlanDefinition {
         schema_version: 1,
