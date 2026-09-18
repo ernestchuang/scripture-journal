@@ -46,6 +46,19 @@ const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanD
   undoPlanCompletion: vi.fn(async () => undefined),
 });
 
+function clickRetainedExportOnCommit() {
+  return new Promise<void>(resolve => {
+    const observer = new MutationObserver(() => {
+      const button = Array.from(document.querySelectorAll('button')).find(item => item.textContent === 'Export retained definition JSON');
+      if (!button) return;
+      observer.disconnect();
+      button.click();
+      resolve();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  });
+}
+
 describe('retained plan panel', () => {
   it('makes selection invalidation precede export ownership without a delayed reset', () => {
     const delayedReset = { epoch: 0, selectedDefinitionId: retainedDefinition.id };
@@ -322,21 +335,27 @@ describe('retained plan panel', () => {
     expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
   });
 
-  it('keeps an export started as soon as deferred retained discovery renders its selection', async () => {
+  it('settles and retries an export clicked after discovery commit but before passive effects', async () => {
     let resolveDefinitions!: (definitions: PlanDefinitionVersion[]) => void;
-    let resolveExport!: (json: string) => void;
+    let rejectExport!: (error: Error) => void;
     const plans = api();
     vi.mocked(plans.listLatestPlanDefinitionVersions).mockImplementationOnce(() => new Promise(resolve => { resolveDefinitions = resolve; }));
-    vi.mocked(plans.exportPlanDefinitionJson).mockImplementationOnce(() => new Promise(resolve => { resolveExport = resolve; }));
+    vi.mocked(plans.exportPlanDefinitionJson)
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectExport = reject; }))
+      .mockResolvedValueOnce('{"recovered":true}');
     render(<PlanPanel api={plans} />);
 
-    await act(async () => { resolveDefinitions([retainedDefinition]); });
-    fireEvent.click(screen.getByRole('button', { name: 'Export retained definition JSON' }));
+    const clickedBeforePassiveEffects = clickRetainedExportOnCommit();
+    resolveDefinitions([retainedDefinition]);
+    await clickedBeforePassiveEffects;
     expect((screen.getByRole('button', { name: 'Exporting retained definition JSON…' }) as HTMLButtonElement).disabled).toBe(true);
-    await act(async () => { resolveExport('{"deferred":true}'); });
+    await act(async () => { rejectExport(new Error('commit-window failure')); });
+    expect(screen.getByText(/Could not export retained plan JSON: Error: commit-window failure/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry retained definition JSON' }));
 
-    expect((screen.getByLabelText('Exported retained plan JSON') as HTMLTextAreaElement).value).toBe('{"deferred":true}');
-    expect(plans.exportPlanDefinitionJson).toHaveBeenCalledWith(retainedDefinition.id);
+    expect((await screen.findByLabelText('Exported retained plan JSON') as HTMLTextAreaElement).value).toBe('{"recovered":true}');
+    expect(plans.exportPlanDefinitionJson).toHaveBeenNthCalledWith(1, retainedDefinition.id);
+    expect(plans.exportPlanDefinitionJson).toHaveBeenNthCalledWith(2, retainedDefinition.id);
   });
 
   it('shows a retained-definition export failure and permits a retry without changing other plan state', async () => {
