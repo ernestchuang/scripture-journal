@@ -356,6 +356,11 @@ impl JournalStore {
         plans::enroll(&mut self.conn, definition_version_id, streams)
     }
 
+    /// Lists retained enrollments oldest first, breaking timestamp ties by enrollment ID.
+    pub fn list_plan_enrollments(&self) -> Result<Vec<PlanEnrollment>> {
+        plans::enrollments(&self.conn)
+    }
+
     pub fn active_plan_assignments(&self, enrollment_id: &str) -> Result<Vec<PlanAssignment>> {
         validate_id(enrollment_id)?;
         plans::active_assignments(&self.conn, enrollment_id)

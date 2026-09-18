@@ -235,6 +235,24 @@ pub(crate) fn enroll(
     Ok(result)
 }
 
+pub(crate) fn enrollments(conn: &Connection) -> Result<Vec<PlanEnrollment>> {
+    let mut statement = conn.prepare(
+        "SELECT id,definition_version_id,created_at
+         FROM plan_enrollments
+         ORDER BY created_at,id",
+    )?;
+    let enrollments = statement
+        .query_map([], |row| {
+            Ok(PlanEnrollment {
+                id: row.get(0)?,
+                definition_version_id: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(enrollments)
+}
+
 pub(crate) fn active_assignments(
     conn: &Connection,
     enrollment_id: &str,

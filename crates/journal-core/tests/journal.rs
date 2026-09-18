@@ -1603,6 +1603,82 @@ fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
 }
 
 #[test]
+fn retained_enrollments_are_discoverable_without_changing_history() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    assert!(store.list_plan_enrollments().unwrap().is_empty());
+
+    let first_version = store
+        .create_plan_definition(stream_definition("Discovery version one"))
+        .unwrap();
+    let first_enrollment = store
+        .enroll_in_chapter_streams(&first_version.id, stream_selections(false))
+        .unwrap();
+    let mut edited = stream_definition("Discovery version two");
+    let PlanSchedule::ChapterStreams { streams } = &mut edited.schedule else {
+        unreachable!();
+    };
+    streams[0].chapters.push(ChapterRef {
+        book: 1,
+        chapter: 3,
+    });
+    let second_version = store
+        .create_plan_definition_version(&first_version.plan_id, edited)
+        .unwrap();
+    let second_enrollment = store
+        .enroll_in_chapter_streams(&second_version.id, stream_selections(true))
+        .unwrap();
+
+    let active = store
+        .active_plan_assignments(&first_enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|assignment| assignment.stream_id == "old-testament")
+        .unwrap();
+    let completion = store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: first_enrollment.id.clone(),
+            stream_id: active.stream_id,
+            expected_assignment_id: active.id,
+            expected_progress_id: active.progress_id,
+        })
+        .unwrap();
+    store.undo_plan_completion(&completion.id).unwrap();
+
+    let retained_definitions = plan_registry_fingerprint(&path);
+    let retained_progress = progress_fingerprint(&path);
+    let enrollments = store.list_plan_enrollments().unwrap();
+    assert_eq!(enrollments.len(), 2);
+    assert!(enrollments.contains(&first_enrollment));
+    assert!(enrollments.contains(&second_enrollment));
+    assert_eq!(
+        enrollments
+            .iter()
+            .map(|enrollment| (&enrollment.created_at, &enrollment.id))
+            .collect::<Vec<_>>(),
+        {
+            let mut ordering = enrollments
+                .iter()
+                .map(|enrollment| (&enrollment.created_at, &enrollment.id))
+                .collect::<Vec<_>>();
+            ordering.sort();
+            ordering
+        }
+    );
+    assert_eq!(first_enrollment.definition_version_id, first_version.id);
+    assert_eq!(second_enrollment.definition_version_id, second_version.id);
+    assert_eq!(plan_registry_fingerprint(&path), retained_definitions);
+    assert_eq!(progress_fingerprint(&path), retained_progress);
+    drop(store);
+
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(reopened.list_plan_enrollments().unwrap(), enrollments);
+    assert_eq!(plan_registry_fingerprint(&path), retained_definitions);
+    assert_eq!(progress_fingerprint(&path), retained_progress);
+}
+
+#[test]
 fn stop_loop_stale_completion_and_ordered_undo_preserve_history() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
