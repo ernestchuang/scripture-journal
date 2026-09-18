@@ -13,9 +13,10 @@ mod plans;
 mod verse_counts;
 pub use export::ExportReport;
 pub use plans::{
-    four_stream_plan_definition, mcheyne_plan_definition, parse_plan_definition_json,
-    serialize_plan_definition_json, ChapterRef, ChapterStream, CompleteStreamRequest,
-    ExplicitScheduleDay, PlanAssignment, PlanCompletion, PlanCompletionHistoryItem, PlanDefinition,
+    expand_calendar_assignments, four_stream_plan_definition, mcheyne_plan_definition,
+    parse_plan_definition_json, serialize_plan_definition_json, CalendarAssignment,
+    CalendarScheduleMode, ChapterRef, ChapterStream, CompleteStreamRequest, ExplicitScheduleDay,
+    PlanAssignment, PlanCompletion, PlanCompletionHistoryItem, PlanDefinition,
     PlanDefinitionVersion, PlanEnrollment, PlanSchedule, StreamEnrollment,
     MAX_PLAN_DEFINITION_JSON_BYTES,
 };

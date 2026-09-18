@@ -1,6 +1,6 @@
 use crate::{validate_passage, Passage, CHAPTERS};
 use anyhow::{ensure, Context, Result};
-use chrono::Utc;
+use chrono::{Datelike, Days, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -187,6 +187,93 @@ pub struct ChapterRef {
 pub struct ExplicitScheduleDay {
     pub day: u32,
     pub passages: Vec<Passage>,
+}
+
+/// How an explicit schedule is assigned to local civil dates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CalendarScheduleMode {
+    /// Match definition days to their established month/day through December 31.
+    CalendarAligned,
+    /// Put definition day one on the selected date and continue without gaps.
+    DayOne,
+}
+
+/// A pure date assignment. Completion time and durable enrollment identity are
+/// intentionally outside this value and are added only by later persistence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CalendarAssignment {
+    pub definition_version_id: String,
+    pub local_date: NaiveDate,
+    pub definition_day: u32,
+    pub passages: Vec<Passage>,
+}
+
+/// Expands an explicit definition onto local civil dates without reading a
+/// clock, mutating progress, or manufacturing completion state.
+pub fn expand_calendar_assignments(
+    version: &PlanDefinitionVersion,
+    start_date: NaiveDate,
+    mode: CalendarScheduleMode,
+) -> Result<Vec<CalendarAssignment>> {
+    ensure!(
+        !version.id.is_empty(),
+        "Definition version identity is required"
+    );
+    let definition = &version.definition;
+    validate_definition(definition)?;
+    let PlanSchedule::ExplicitSchedule { days } = &definition.schedule else {
+        anyhow::bail!("Calendar assignment requires an explicit schedule");
+    };
+
+    match mode {
+        CalendarScheduleMode::CalendarAligned => {
+            ensure!(
+                days.len() == 365,
+                "Calendar alignment requires exactly 365 definition days"
+            );
+            let end = NaiveDate::from_ymd_opt(start_date.year(), 12, 31)
+                .context("Invalid calendar year")?;
+            let mut date = start_date;
+            let mut assignments = Vec::new();
+            while date <= end {
+                if let Some(day) = non_leap_ordinal(date) {
+                    let definition_day = &days[(day - 1) as usize];
+                    assignments.push(CalendarAssignment {
+                        definition_version_id: version.id.clone(),
+                        local_date: date,
+                        definition_day: definition_day.day,
+                        passages: definition_day.passages.clone(),
+                    });
+                }
+                date = match date.succ_opt() {
+                    Some(next) => next,
+                    None => break,
+                };
+            }
+            Ok(assignments)
+        }
+        CalendarScheduleMode::DayOne => days
+            .iter()
+            .enumerate()
+            .map(|(offset, day)| {
+                let local_date = start_date
+                    .checked_add_days(Days::new(offset as u64))
+                    .context("Calendar assignment date is out of range")?;
+                Ok(CalendarAssignment {
+                    definition_version_id: version.id.clone(),
+                    local_date,
+                    definition_day: day.day,
+                    passages: day.passages.clone(),
+                })
+            })
+            .collect(),
+    }
+}
+
+fn non_leap_ordinal(date: NaiveDate) -> Option<u32> {
+    NaiveDate::from_ymd_opt(2023, date.month(), date.day()).map(|value| value.ordinal())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
