@@ -96,6 +96,23 @@ test('invalid stored preference falls back to System', async ({ page }) => {
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 });
 
+test('a saved Follow Omarchy choice migrates to System without using its cached Linux palette', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.addInitScript(() => {
+    localStorage.setItem('scripture-journal.appearance', 'omarchy');
+    localStorage.setItem('scripture-journal.omarchy-theme', JSON.stringify({
+      schemaVersion: 1, id: 'omarchy-active', name: 'Stale Linux palette', mode: 'dark',
+      colors: Object.fromEntries(['app-background', 'paper', 'surface', 'surface-raised', 'surface-subtle', 'surface-active', 'ink', 'muted', 'placeholder', 'line', 'line-strong', 'accent', 'accent-hover', 'accent-contrast', 'focus', 'selection', 'error-ink', 'error-surface', 'error-line'].map(token => [token, '#010203'])),
+    }));
+  });
+  await page.goto('/');
+  await expect(page.getByRole('combobox', { name: 'Appearance' })).toHaveValue('system');
+  await expect(page.getByRole('option', { name: 'Follow Omarchy' })).toHaveCount(0);
+  await expect(page.locator('html')).toHaveCSS('background-color', 'rgb(245, 242, 234)');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('scripture-journal.appearance'))).toBe('system');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('scripture-journal.omarchy-theme'))).toBeNull();
+});
+
 test('imports a portable theme, persists it, and paints it before React on reload', async ({ page }) => {
   await page.goto('/');
   const colors = ['app-background', 'paper', 'surface', 'surface-raised', 'surface-subtle', 'surface-active', 'ink', 'muted', 'placeholder', 'line', 'line-strong', 'accent', 'accent-hover', 'accent-contrast', 'focus', 'selection', 'error-ink', 'error-surface', 'error-line']
