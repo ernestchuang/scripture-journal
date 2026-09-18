@@ -15,6 +15,7 @@ use std::{
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 mod scripture;
+mod scripture_pack;
 use scripture::{ScriptureStore, Verse};
 
 struct AppState {
@@ -36,6 +37,49 @@ async fn scripture_chapter(
             .lock()
             .map_err(|_| "Scripture library is unavailable.".to_string())?
             .chapter(&translation, book, chapter)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn import_scripture_pack(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let store = state.scripture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(selected) = app
+            .dialog()
+            .file()
+            .add_filter("Scripture JSON pack", &["json"])
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = selected.into_path().map_err(|e| e.to_string())?;
+        let pack = scripture_pack::read_pack(&path)?;
+        store
+            .lock()
+            .map_err(|_| "Scripture library is unavailable.".to_string())?
+            .install_pack(pack)
+            .map(Some)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn scripture_translation_info(
+    state: State<'_, AppState>,
+    translation: String,
+) -> Result<Option<scripture::TranslationInfo>, String> {
+    let store = state.scripture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .lock()
+            .map_err(|_| "Scripture library is unavailable.".to_string())?
+            .translation_info(&translation)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1893,6 +1937,8 @@ pub fn run() {
             read_omarchy_theme,
             startup_appearance,
             scripture_chapter,
+            import_scripture_pack,
+            scripture_translation_info,
             scripture_kjv_status,
             download_kjv_library
         ])

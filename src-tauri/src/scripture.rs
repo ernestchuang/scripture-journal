@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
@@ -13,7 +13,7 @@ mod canonical_counts {
 }
 
 const KJV_URL: &str = "https://ebible.org/Scriptures/eng-kjv2006_vpl.zip";
-const CHAPTERS: [u16; 66] = [
+pub(crate) const CHAPTERS: [u16; 66] = [
     50, 40, 27, 36, 34, 24, 21, 4, 31, 24, 22, 25, 29, 36, 10, 13, 10, 42, 150, 31, 12, 8, 66, 52,
     5, 48, 12, 14, 3, 9, 1, 4, 7, 3, 3, 3, 2, 14, 4, 28, 16, 24, 21, 28, 16, 16, 13, 6, 6, 4, 4, 5,
     3, 6, 4, 3, 1, 13, 5, 5, 3, 5, 1, 1, 1, 22,
@@ -32,6 +32,12 @@ const CODES: [&str; 66] = [
 pub struct Verse {
     number: u16,
     text: String,
+}
+
+#[derive(Serialize)]
+pub struct TranslationInfo {
+    pub name: String,
+    pub source: String,
 }
 
 pub struct ScriptureStore {
@@ -59,6 +65,61 @@ impl ScriptureStore {
     }
     pub fn is_persistent(&self) -> bool {
         self.persistent
+    }
+    pub fn translation_info(&self, translation: &str) -> Result<Option<TranslationInfo>, String> {
+        self.connection
+            .query_row(
+                "SELECT name,source FROM translations WHERE id=?1 AND complete=1",
+                [translation],
+                |r| {
+                    Ok(TranslationInfo {
+                        name: r.get(0)?,
+                        source: r.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+    pub fn install_pack(
+        &mut self,
+        pack: super::scripture_pack::ScripturePack,
+    ) -> Result<String, String> {
+        super::scripture_pack::validate_pack(&pack)?;
+        if !self.persistent {
+            return Err("Offline Scripture storage needs repair before importing.".into());
+        }
+        let tx = self.connection.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM verses WHERE translation=?1",
+            [&pack.translation],
+        )
+        .map_err(|e| e.to_string())?;
+        {
+            let mut insert = tx
+                .prepare("INSERT INTO verses VALUES(?1,?2,?3,?4,?5)")
+                .map_err(|e| e.to_string())?;
+            for chapter in &pack.chapters {
+                for verse in &chapter.verses {
+                    insert
+                        .execute(params![
+                            pack.translation,
+                            chapter.book,
+                            chapter.chapter,
+                            verse.number,
+                            verse.text
+                        ])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO translations(id,name,source,complete) VALUES(?1,?2,?3,1)",
+            params![pack.translation, pack.name, pack.source],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(pack.translation)
     }
     pub fn chapter(
         &self,

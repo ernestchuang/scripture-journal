@@ -2,11 +2,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import Reader from './Reader';
-import { loadChapter, type Verse } from './provider';
-vi.mock('./provider', () => ({ loadChapter: vi.fn(), kjvOfflineStatus: vi.fn(async () => false), downloadKjv: vi.fn(), invalidateKjvCache: vi.fn() }));
+import { importScripturePack, invalidateTranslationCache, loadChapter, type Verse } from './provider';
+vi.mock('./provider', () => ({ loadChapter: vi.fn(), kjvOfflineStatus: vi.fn(async () => false), downloadKjv: vi.fn(), invalidateKjvCache: vi.fn(), importScripturePack: vi.fn(), invalidateTranslationCache: vi.fn(), translationInfo: vi.fn(async () => null) }));
 vi.mock('../platform/journal', () => ({ isDesktop: true }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 describe('reader isolation', () => {
+  it('activates an imported translation and refreshes the visible chapter', async () => {
+    vi.mocked(loadChapter).mockImplementation(async (_p, _signal, translation) => [{ number: 1, text: `${translation} fixture` }]);
+    vi.mocked(importScripturePack).mockResolvedValue('ESV');
+    render(<Reader selection={{ book: 43, chapter: 3 }} onSelectionChange={() => {}} onReflect={() => {}} />);
+    fireEvent.click(screen.getByText('About translations & availability'));
+    fireEvent.click(screen.getByRole('button', { name: 'Import authorized Scripture pack' }));
+    await screen.findByText('ESV pack installed for offline reading.');
+    await screen.findByText('ESV fixture');
+    expect(invalidateTranslationCache).toHaveBeenCalledWith('ESV');
+    expect(vi.mocked(loadChapter).mock.calls.at(-1)?.[0]).toMatchObject({ book: 43, chapter: 3 });
+  });
   it('aborts old chapter work and ignores a late result after external navigation', async () => {
     let finishOld!: (verses: Verse[]) => void;
     let oldSignal!: AbortSignal;
