@@ -3,7 +3,7 @@ use anyhow::{ensure, Result};
 use std::{
     ffi::CString,
     fs::File,
-    io,
+    io::{self, Read},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::ffi::OsStrExt,
@@ -64,6 +64,43 @@ impl ExportDirectory {
         Ok(Self(directory))
     }
 
+    /// Read one managed leaf without resolving the original directory path again.
+    pub(super) fn read_optional(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        ensure!(
+            !name.is_empty() && name != "." && name != ".." && !name.contains('/'),
+            "Expected a single managed filename"
+        );
+        let name = CString::new(name)?;
+        // SAFETY: self owns the live directory fd and name is one C-string leaf.
+        let fd = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let error = io::Error::last_os_error();
+            return if error.kind() == io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(error.into())
+            };
+        }
+        // SAFETY: successful openat returns a new descriptor owned by this File.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let metadata = file.metadata()?;
+        ensure!(metadata.is_file(), "Managed path is not a regular file");
+        ensure!(
+            metadata.len() <= 64_000_000,
+            "Managed file exceeds size limit"
+        );
+        let mut bytes = Vec::new();
+        file.take(64_000_001).read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 64_000_000, "Managed file exceeds size limit");
+        Ok(Some(bytes))
+    }
+
     pub(super) fn open_lock(&self) -> Result<File> {
         let name = c".scripture-journal-export.lock";
         // SAFETY: self owns the directory descriptor; name is a static C string.
@@ -122,5 +159,69 @@ mod tests {
         assert!(!outside.join("new").exists());
         assert!(ExportDirectory::open(&base.join("created/../outside/new")).is_err());
         assert!(!base.join("created").exists());
+    }
+    #[test]
+    fn reads_stay_in_pinned_directory_after_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().canonicalize().unwrap().join("selected");
+        let handle = ExportDirectory::open(&selected).unwrap();
+        fs::write(selected.join("manifest.json"), b"original manifest").unwrap();
+        let outside = root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("manifest.json"), b"substituted manifest").unwrap();
+        fs::write(outside.join("outside-only"), b"outside data").unwrap();
+        fs::rename(&selected, root.path().join("moved")).unwrap();
+        symlink(&outside, &selected).unwrap();
+        assert_eq!(
+            handle.read_optional("manifest.json").unwrap().unwrap(),
+            b"original manifest"
+        );
+        assert!(handle.read_optional("outside-only").unwrap().is_none());
+        assert_eq!(
+            fs::read(outside.join("manifest.json")).unwrap(),
+            b"substituted manifest"
+        );
+    }
+
+    #[test]
+    fn managed_reads_reject_symlinks_directories_and_unsafe_names() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let handle = ExportDirectory::open(&base).unwrap();
+        fs::write(base.join("real"), b"fixture").unwrap();
+        symlink(base.join("real"), base.join("link")).unwrap();
+        symlink(base.join("absent"), base.join("dangling")).unwrap();
+        fs::create_dir(base.join("directory")).unwrap();
+        for name in [
+            "link",
+            "dangling",
+            "directory",
+            "",
+            ".",
+            "..",
+            "../real",
+            "/real",
+            "directory/../real",
+            "bad\0name",
+        ] {
+            assert!(handle.read_optional(name).is_err(), "must reject {name:?}");
+        }
+        assert!(handle.read_optional("absent").unwrap().is_none());
+    }
+
+    #[test]
+    fn oversized_managed_read_is_rejected_before_allocation() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let handle = ExportDirectory::open(&base).unwrap();
+        File::create(base.join("large"))
+            .unwrap()
+            .set_len(64_000_001)
+            .unwrap();
+        assert!(handle
+            .read_optional("large")
+            .unwrap_err()
+            .to_string()
+            .contains("size limit"));
     }
 }

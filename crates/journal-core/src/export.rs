@@ -59,8 +59,10 @@ impl JournalStore {
         };
         lock.try_lock_exclusive()
             .context("Another exporter is using this destination")?;
-        let manifest_path = directory.join(MANIFEST);
-        let initial = read_optional(&manifest_path)?;
+        #[cfg(unix)]
+        let initial = directory_handle.read_optional(MANIFEST)?;
+        #[cfg(not(unix))]
+        let initial = read_optional(&directory.join(MANIFEST))?;
         let mut manifest = if let Some(bytes) = &initial {
             serde_json::from_slice::<Manifest>(bytes)
                 .context("Invalid export manifest; refusing overwrite")?
