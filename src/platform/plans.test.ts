@@ -5,7 +5,9 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 
 import {
   nativePlans,
+  type CalendarAssignmentCompletion,
   type CompleteStreamRequest,
+  type CompleteCalendarAssignmentRequest,
   type CalendarEnrollmentRequest,
   type CalendarPlanEnrollment,
   type DatedPlanAssignment,
@@ -74,6 +76,18 @@ const datedAssignment: DatedPlanAssignment = {
   definitionDay: 1,
   localDate: '2024-02-28',
   passages: [{ book: 1, chapter: 1 }, { book: 40, chapter: 1 }],
+};
+
+const calendarCompletionRequest: CompleteCalendarAssignmentRequest = {
+  enrollmentId: calendarEnrollment.id,
+  assignmentId: datedAssignment.id,
+};
+
+const calendarCompletion: CalendarAssignmentCompletion = {
+  id: 'calendar-completion-1',
+  assignmentId: datedAssignment.id,
+  enrollmentId: calendarEnrollment.id,
+  completedAt: '2026-09-18T00:00:03Z',
 };
 
 const assignment: PlanAssignment = {
@@ -284,6 +298,34 @@ describe('native plan-definition adapter', () => {
     expect(native.invoke).toHaveBeenNthCalledWith(1, 'get_calendar_plan_enrollment', { enrollmentId: 'missing-calendar-enrollment' });
     expect(native.invoke).toHaveBeenNthCalledWith(2, 'calendar_plan_assignments', { enrollmentId: 'calendar-enrollment-empty' });
     expect(native.invoke).toHaveBeenNthCalledWith(3, 'enroll_in_calendar', { request: { ...calendarRequest, startDate: '2024-2-28' } });
+  });
+
+  it('maps calendar completion and retained history with exact IDs and camelCase fields', async () => {
+    native.invoke.mockResolvedValueOnce(calendarCompletion).mockResolvedValueOnce([calendarCompletion]);
+
+    await expect(nativePlans.completeCalendarAssignment(calendarCompletionRequest)).resolves.toEqual(calendarCompletion);
+    await expect(nativePlans.calendarCompletionHistory(calendarEnrollment.id)).resolves.toEqual([calendarCompletion]);
+
+    expect(native.invoke).toHaveBeenNthCalledWith(1, 'complete_calendar_assignment', { request: calendarCompletionRequest });
+    expect(native.invoke).toHaveBeenNthCalledWith(2, 'calendar_completion_history', { enrollmentId: calendarEnrollment.id });
+    expect(calendarCompletion).toEqual({
+      id: 'calendar-completion-1',
+      assignmentId: datedAssignment.id,
+      enrollmentId: calendarEnrollment.id,
+      completedAt: '2026-09-18T00:00:03Z',
+    });
+  });
+
+  it('propagates calendar completion ownership and duplicate errors without rewriting arguments', async () => {
+    const error = new Error('Calendar assignment does not belong to enrollment');
+    const invalid: CompleteCalendarAssignmentRequest = { enrollmentId: 'other-calendar-enrollment', assignmentId: datedAssignment.id };
+    native.invoke.mockRejectedValueOnce(error).mockRejectedValueOnce(error);
+
+    await expect(nativePlans.completeCalendarAssignment(invalid)).rejects.toBe(error);
+    await expect(nativePlans.completeCalendarAssignment(calendarCompletionRequest)).rejects.toBe(error);
+
+    expect(native.invoke).toHaveBeenNthCalledWith(1, 'complete_calendar_assignment', { request: invalid });
+    expect(native.invoke).toHaveBeenNthCalledWith(2, 'complete_calendar_assignment', { request: calendarCompletionRequest });
   });
 
   it('maps retained completion history with all camelCase fields intact', async () => {

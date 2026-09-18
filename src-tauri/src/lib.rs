@@ -1,7 +1,8 @@
 use journal_core::{
-    CalendarPlanEnrollment, CalendarScheduleMode, CompleteStreamRequest, DatedPlanAssignment,
-    Entry, ExportReport, JournalStore, PlanAssignment, PlanCompletion, PlanCompletionHistoryItem,
-    PlanDefinition, PlanDefinitionVersion, PlanEnrollment, Revision, SaveRequest, StreamEnrollment,
+    CalendarAssignmentCompletion, CalendarPlanEnrollment, CalendarScheduleMode,
+    CompleteStreamRequest, DatedPlanAssignment, Entry, ExportReport, JournalStore, PlanAssignment,
+    PlanCompletion, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion,
+    PlanEnrollment, Revision, SaveRequest, StreamEnrollment,
 };
 use serde::Deserialize;
 use std::{
@@ -478,6 +479,53 @@ async fn calendar_plan_assignments(
     calendar_plan_assignments_for_store(state.journal.clone(), enrollment_id).await
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompleteCalendarAssignmentRequest {
+    enrollment_id: String,
+    assignment_id: String,
+}
+
+async fn complete_calendar_assignment_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    request: CompleteCalendarAssignmentRequest,
+) -> Result<CalendarAssignmentCompletion, String> {
+    run_store(store, move |journal| {
+        journal
+            .complete_calendar_assignment(&request.enrollment_id, &request.assignment_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn complete_calendar_assignment(
+    state: State<'_, AppState>,
+    request: CompleteCalendarAssignmentRequest,
+) -> Result<CalendarAssignmentCompletion, String> {
+    complete_calendar_assignment_for_store(state.journal.clone(), request).await
+}
+
+async fn calendar_completion_history_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    enrollment_id: String,
+) -> Result<Vec<CalendarAssignmentCompletion>, String> {
+    run_store(store, move |journal| {
+        journal
+            .calendar_completion_history(&enrollment_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn calendar_completion_history(
+    state: State<'_, AppState>,
+    enrollment_id: String,
+) -> Result<Vec<CalendarAssignmentCompletion>, String> {
+    calendar_completion_history_for_store(state.journal.clone(), enrollment_id).await
+}
+
 async fn active_plan_assignments_for_store(
     store: Arc<Mutex<JournalStore>>,
     enrollment_id: String,
@@ -821,6 +869,108 @@ mod plan_command_tests {
             assert_eq!(
                 aligned_assignments.last().unwrap().local_date.to_string(),
                 "2024-12-31"
+            );
+        });
+    }
+
+    #[test]
+    fn typed_calendar_completion_commands_preserve_identity_and_reject_invalid_writes() {
+        tauri::async_runtime::block_on(async {
+            let (_directory, store) = test_store();
+            let definition = register_mcheyne_plan_for_store(store.clone())
+                .await
+                .unwrap();
+            let first = enroll_in_calendar_for_store(
+                store.clone(),
+                CalendarEnrollmentRequest {
+                    definition_version_id: definition.id.clone(),
+                    start_date: "2026-01-01".into(),
+                    schedule_mode: CalendarScheduleMode::DayOne,
+                },
+            )
+            .await
+            .unwrap();
+            let second = enroll_in_calendar_for_store(
+                store.clone(),
+                CalendarEnrollmentRequest {
+                    definition_version_id: definition.id,
+                    start_date: "2026-02-01".into(),
+                    schedule_mode: CalendarScheduleMode::DayOne,
+                },
+            )
+            .await
+            .unwrap();
+            let assignment = calendar_plan_assignments_for_store(store.clone(), first.id.clone())
+                .await
+                .unwrap()
+                .remove(0);
+            let empty = calendar_completion_history_for_store(store.clone(), first.id.clone())
+                .await
+                .unwrap();
+            assert!(empty.is_empty());
+            assert!(complete_calendar_assignment_for_store(
+                store.clone(),
+                CompleteCalendarAssignmentRequest {
+                    enrollment_id: second.id.clone(),
+                    assignment_id: assignment.id.clone(),
+                },
+            )
+            .await
+            .unwrap_err()
+            .contains("does not belong"));
+            assert_eq!(
+                calendar_completion_history_for_store(store.clone(), first.id.clone())
+                    .await
+                    .unwrap(),
+                empty
+            );
+            assert!(complete_calendar_assignment_for_store(
+                store.clone(),
+                CompleteCalendarAssignmentRequest {
+                    enrollment_id: "not-an-id".into(),
+                    assignment_id: assignment.id.clone(),
+                },
+            )
+            .await
+            .is_err());
+            let completion = complete_calendar_assignment_for_store(
+                store.clone(),
+                CompleteCalendarAssignmentRequest {
+                    enrollment_id: first.id.clone(),
+                    assignment_id: assignment.id.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(completion.assignment_id, assignment.id);
+            assert_eq!(completion.enrollment_id, first.id);
+            assert_eq!(
+                serde_json::to_value(&completion).unwrap(),
+                serde_json::json!({
+                    "id": completion.id,
+                    "assignmentId": assignment.id,
+                    "enrollmentId": first.id,
+                    "completedAt": completion.completed_at,
+                })
+            );
+            let retained = calendar_completion_history_for_store(store.clone(), first.id.clone())
+                .await
+                .unwrap();
+            assert_eq!(retained, vec![completion]);
+            assert!(complete_calendar_assignment_for_store(
+                store.clone(),
+                CompleteCalendarAssignmentRequest {
+                    enrollment_id: first.id.clone(),
+                    assignment_id: assignment.id,
+                },
+            )
+            .await
+            .is_err());
+            assert_eq!(
+                calendar_completion_history_for_store(store, first.id)
+                    .await
+                    .unwrap(),
+                retained
             );
         });
     }
@@ -1426,6 +1576,8 @@ pub fn run() {
             enroll_in_calendar,
             get_calendar_plan_enrollment,
             calendar_plan_assignments,
+            complete_calendar_assignment,
+            calendar_completion_history,
             active_plan_assignments,
             plan_completion_history,
             complete_plan_stream,

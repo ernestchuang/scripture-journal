@@ -77,6 +77,20 @@ export interface DatedPlanAssignment {
   passages: Passage[];
 }
 
+/** Both IDs identify the retained calendar assignment that was explicitly completed. */
+export interface CompleteCalendarAssignmentRequest {
+  enrollmentId: string;
+  assignmentId: string;
+}
+
+/** A retained, immutable completion of a dated calendar assignment. */
+export interface CalendarAssignmentCompletion {
+  id: string;
+  assignmentId: string;
+  enrollmentId: string;
+  completedAt: string;
+}
+
 export interface PlanAssignment {
   id: string;
   enrollmentId: string;
@@ -134,6 +148,8 @@ export interface PlanDefinitionApi {
   enrollInCalendar(request: CalendarEnrollmentRequest): Promise<CalendarPlanEnrollment>;
   getCalendarPlanEnrollment(enrollmentId: string): Promise<CalendarPlanEnrollment | null>;
   calendarPlanAssignments(enrollmentId: string): Promise<DatedPlanAssignment[]>;
+  completeCalendarAssignment(request: CompleteCalendarAssignmentRequest): Promise<CalendarAssignmentCompletion>;
+  calendarCompletionHistory(enrollmentId: string): Promise<CalendarAssignmentCompletion[]>;
   activePlanAssignments(enrollmentId: string): Promise<PlanAssignment[]>;
   planCompletionHistory(enrollmentId: string): Promise<PlanCompletionHistoryItem[]>;
   completePlanStream(request: CompleteStreamRequest): Promise<PlanCompletion>;
@@ -164,6 +180,10 @@ export const nativePlans: PlanDefinitionApi = {
     invoke<CalendarPlanEnrollment | null>('get_calendar_plan_enrollment', { enrollmentId }),
   calendarPlanAssignments: enrollmentId =>
     invoke<DatedPlanAssignment[]>('calendar_plan_assignments', { enrollmentId }),
+  completeCalendarAssignment: request =>
+    invoke<CalendarAssignmentCompletion>('complete_calendar_assignment', { request }),
+  calendarCompletionHistory: enrollmentId =>
+    invoke<CalendarAssignmentCompletion[]>('calendar_completion_history', { enrollmentId }),
   activePlanAssignments: enrollmentId =>
     invoke<PlanAssignment[]>('active_plan_assignments', { enrollmentId }),
   planCompletionHistory: enrollmentId =>
