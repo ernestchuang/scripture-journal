@@ -39,6 +39,10 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState('');
   const [imported, setImported] = useState<PlanDefinitionVersion | null>(null);
+  const [importedChoices, setImportedChoices] = useState<StreamEnrollment[]>([]);
+  const [enrollingImported, setEnrollingImported] = useState(false);
+  const [importedEnrollment, setImportedEnrollment] = useState<PlanEnrollment | null>(null);
+  const [importedEnrollError, setImportedEnrollError] = useState('');
   const [exportingVersionId, setExportingVersionId] = useState('');
   const [exportError, setExportError] = useState<{ versionId: string; message: string } | null>(null);
   const [exportedJson, setExportedJson] = useState<{ versionId: string; json: string } | null>(null);
@@ -48,6 +52,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const completionEpoch = useRef(0);
   const undoEpoch = useRef(0);
   const importEpoch = useRef(0);
+  const importedEnrollmentEpoch = useRef(0);
   const exportEpoch = useRef(0);
   const discoveryEpoch = useRef(0);
   const confirmedEnrollment = useRef<PlanEnrollment | null>(null);
@@ -63,6 +68,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     completionEpoch.current += 1;
     undoEpoch.current += 1;
     importEpoch.current += 1;
+    importedEnrollmentEpoch.current += 1;
     exportEpoch.current += 1;
     confirmedEnrollment.current = null;
     confirmedCompletions.current.clear();
@@ -169,7 +175,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   }
 
   async function enroll() {
-    if (!api || !offer || enrolling || preparing) return;
+    if (!api || !offer || enrolling || preparing || enrollingImported) return;
     const epoch = ++actionEpoch.current;
     setEnrolling(true); setOfferError('');
     try {
@@ -200,7 +206,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   }
 
   async function importCustomPlan() {
-    if (!api || importing || !customPlanJson.trim()) return;
+    if (!api || importing || enrollingImported || !customPlanJson.trim()) return;
     const epoch = ++importEpoch.current;
     const submitted = customPlanJson;
     setImporting(true); setImportError('');
@@ -208,11 +214,51 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       const version = await api.importPlanDefinitionJson(submitted);
       if (epoch !== importEpoch.current) return;
       setImported(version);
+      setImportedEnrollment(null); setImportedEnrollError('');
+      setImportedChoices(version.definition.schedule.kind === 'chapterStreams'
+        ? version.definition.schedule.streams.map(stream => ({ streamId: stream.id, startingPosition: 0, loopAfterEnd: true }))
+        : []);
       setCustomPlanJson(current => current === submitted ? '' : current);
     } catch (error) {
       if (epoch === importEpoch.current) setImportError(`Could not import custom plan: ${String(error)}`);
     } finally {
       if (epoch === importEpoch.current) setImporting(false);
+    }
+  }
+
+  async function enrollImportedPlan() {
+    if (!api || !imported || importing || enrolling || enrollingImported) return;
+    const schedule = imported.definition.schedule;
+    if (schedule.kind !== 'chapterStreams') return;
+    const version = imported;
+    const submitted = importedChoices.map(choice => ({ ...choice }));
+    if (submitted.length !== schedule.streams.length) return;
+    const epoch = ++importedEnrollmentEpoch.current;
+    setEnrollingImported(true); setImportedEnrollError('');
+    try {
+      const enrollment = await api.enrollInChapterStreams(version.id, submitted);
+      if (epoch !== importedEnrollmentEpoch.current) return;
+      confirmedEnrollment.current = enrollment;
+      setImportedEnrollment(enrollment);
+      setEnrollments(current => current?.some(item => item.id === enrollment.id) ? current : [...(current ?? []), enrollment]);
+      setSelectedId(enrollment.id);
+      const refreshEpoch = ++discoveryEpoch.current;
+      try {
+        const refreshed = await api.listPlanEnrollments();
+        if (epoch !== importedEnrollmentEpoch.current || refreshEpoch !== discoveryEpoch.current) return;
+        setListError('');
+        setEnrollments(refreshed.some(item => item.id === enrollment.id) ? refreshed : [...refreshed, enrollment]);
+        setSelectedId(enrollment.id);
+        if (refreshed.some(item => item.id === enrollment.id)) confirmedEnrollment.current = null;
+        else setImportedEnrollError('Custom-plan enrollment was created, but discovery did not return it yet.');
+      } catch (error) {
+        if (epoch !== importedEnrollmentEpoch.current || refreshEpoch !== discoveryEpoch.current) return;
+        setImportedEnrollError(`Custom-plan enrollment was created, but retained plans could not be refreshed: ${String(error)}`);
+      }
+    } catch (error) {
+      if (epoch === importedEnrollmentEpoch.current) setImportedEnrollError(`Could not create custom-plan enrollment: ${String(error)}`);
+    } finally {
+      if (epoch === importedEnrollmentEpoch.current) setEnrollingImported(false);
     }
   }
 
@@ -336,9 +382,18 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       <h3>Import custom plan</h3>
       <p>Paste a plan-definition JSON document. Import creates a new plan identity and does not alter retained enrollments.</p>
       <label>Custom plan JSON<textarea value={customPlanJson} onChange={event => setCustomPlanJson(event.target.value)} placeholder='{"schemaVersion":1,...}' spellCheck={false} /></label>
-      <button disabled={importing || !customPlanJson.trim()} onClick={() => void importCustomPlan()}>{importing ? 'Importing plan…' : 'Import custom plan'}</button>
+      <button disabled={importing || enrollingImported || !customPlanJson.trim()} onClick={() => void importCustomPlan()}>{importing ? 'Importing plan…' : 'Import custom plan'}</button>
       {importError && <div role="alert" className="plan-error">{importError}</div>}
-      {imported && <div role="status" className="plan-imported">Imported custom plan <strong>{imported.definition.name}</strong> as a new plan identity. Retained enrollments were not changed.<small>Definition version {imported.id}</small><button disabled={!!exportingVersionId} onClick={() => void exportDefinition(imported)}>{exportingVersionId === imported.id ? 'Exporting imported version JSON…' : exportError?.versionId === imported.id ? 'Retry imported version JSON' : 'Export imported version JSON'}</button>{exportError?.versionId === imported.id && <div role="alert" className="plan-error">{exportError.message}</div>}{exportedJson?.versionId === imported.id && <label>Exported imported plan JSON<textarea readOnly value={exportedJson.json} spellCheck={false} /></label>}</div>}
+      {imported && <div role="status" className="plan-imported">Imported custom plan <strong>{imported.definition.name}</strong> as a new plan identity. Retained enrollments were not changed.<small>Definition version {imported.id}</small><button disabled={!!exportingVersionId} onClick={() => void exportDefinition(imported)}>{exportingVersionId === imported.id ? 'Exporting imported version JSON…' : exportError?.versionId === imported.id ? 'Retry imported version JSON' : 'Export imported version JSON'}</button>{exportError?.versionId === imported.id && <div role="alert" className="plan-error">{exportError.message}</div>}{exportedJson?.versionId === imported.id && <label>Exported imported plan JSON<textarea readOnly value={exportedJson.json} spellCheck={false} /></label>}
+        {imported.definition.schedule.kind === 'explicitSchedule' && <p>This imported calendar plan cannot be enrolled as chapter streams.</p>}
+        {imported.definition.schedule.kind === 'chapterStreams' && !importedEnrollment && <section aria-label="Enroll in imported custom plan"><p>Choose the starting occurrence and whether each stream loops, then create an enrollment pinned to this definition version.</p><div className="plan-streams">{imported.definition.schedule.streams.map((stream, index) => <fieldset key={stream.id}>
+          <legend>{stream.name}</legend>
+          <label>Custom starting chapter<select value={importedChoices[index]?.startingPosition ?? 0} onChange={event => setImportedChoices(current => current.map((choice, choiceIndex) => choiceIndex === index ? { ...choice, startingPosition: Number(event.target.value) } : choice))}>{stream.chapters.map((chapter, position) => <option key={`${chapter.book}:${chapter.chapter}:${position}`} value={position}>Book {chapter.book} · Chapter {chapter.chapter}</option>)}</select></label>
+          <label className="plan-loop"><input type="checkbox" checked={importedChoices[index]?.loopAfterEnd ?? true} onChange={event => setImportedChoices(current => current.map((choice, choiceIndex) => choiceIndex === index ? { ...choice, loopAfterEnd: event.target.checked } : choice))} /> Custom stream loops</label>
+        </fieldset>)}</div><button disabled={enrollingImported || importing || enrolling || importedChoices.length !== imported.definition.schedule.streams.length} onClick={() => void enrollImportedPlan()}>{enrollingImported ? 'Creating custom enrollment…' : 'Create custom enrollment'}</button></section>}
+        {importedEnrollment && <p>Custom-plan enrollment {importedEnrollment.id} was created for definition version {importedEnrollment.definitionVersionId}.</p>}
+        {importedEnrollError && <div role="alert" className="plan-error">{importedEnrollError}</div>}
+      </div>}
     </section>
     {enrollments?.length === 0 && <p>No retained plan enrollments yet.</p>}
     {enrollments && enrollments.length > 0 && <>

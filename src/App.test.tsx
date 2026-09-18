@@ -252,6 +252,32 @@ describe('native application close lifecycle', () => {
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this while importing');
   });
 
+  it('preserves and autosaves dirty writing while enrolling in an imported custom plan', async () => {
+    const imported = { id: 'custom-version', planId: 'custom-plan', version: 1, createdAt: '2026-09-18T00:00:00Z', definition: { schemaVersion: 1, name: 'Imported streams', schedule: { kind: 'chapterStreams', streams: [{ id: 'custom', name: 'Custom stream', chapters: [{ book: 43, chapter: 1 }] }] } } };
+    const enrollment = { id: 'custom-enrollment', definitionVersionId: imported.id, createdAt: '2026-09-18T00:00:01Z' };
+    native.importPlanDefinitionJson.mockResolvedValue(imported);
+    native.enrollInChapterStreams.mockResolvedValue(enrollment);
+    native.listPlanEnrollments.mockResolvedValueOnce([]).mockResolvedValueOnce([enrollment]);
+    native.getPlanDefinitionVersion.mockResolvedValue(imported);
+    native.activePlanAssignments.mockResolvedValue([]);
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"schemaVersion":1}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    const enroll = await screen.findByRole('button', { name: 'Create custom enrollment' });
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Keep this while custom enrolling' } });
+    fireEvent.click(enroll);
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(native.enrollInChapterStreams).toHaveBeenCalledWith(imported.id, [{ streamId: 'custom', startingPosition: 0, loopAfterEnd: true }]);
+    expect(native.saveEntry).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while custom enrolling' } });
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this while custom enrolling');
+  });
+
   it('preserves and autosaves dirty writing while explicitly exporting a selected plan version', async () => {
     const enrollment = { id: 'enrollment-1', definitionVersionId: 'version-1', createdAt: '2026-09-18T00:00:00Z' };
     native.listPlanEnrollments.mockResolvedValue([enrollment]);

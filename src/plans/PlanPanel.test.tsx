@@ -20,6 +20,11 @@ const fourStream = {
 const created: PlanEnrollment = { id: 'enrollment-new', definitionVersionId: fourStream.id, createdAt: '2026-09-18T00:00:02Z' };
 const history = (id: string, enrollmentId = first.id, undone = false) => ({ id, assignmentId: 'assignment-1', enrollmentId, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, completedAt: '2026-09-18T00:00:03Z', undone });
 const importedPlan = { id: 'custom-version', planId: 'custom-plan', version: 1, createdAt: first.createdAt, definition: { schemaVersion: 1, name: 'Imported streams', schedule: { kind: 'chapterStreams' as const, streams: [] } } };
+const importedStreams = { ...importedPlan, definition: { ...importedPlan.definition, schedule: { kind: 'chapterStreams' as const, streams: [
+  { id: 'repeat', name: 'Repeated chapters', chapters: [{ book: 19, chapter: 1 }, { book: 19, chapter: 1 }] },
+  { id: 'short', name: 'Short stream', chapters: [{ book: 40, chapter: 1 }] },
+] } } };
+const customEnrollment: PlanEnrollment = { id: 'custom-enrollment', definitionVersionId: importedStreams.id, createdAt: '2026-09-18T00:00:04Z' };
 const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
@@ -90,7 +95,7 @@ describe('retained plan panel', () => {
       .mockImplementationOnce(() => new Promise(resolve => { resolveSecond = resolve; }));
     const view = render(<PlanPanel api={plans} />);
     const select = await screen.findByLabelText('Retained enrollment');
-    fireEvent.click(screen.getByRole('button', { name: 'Export selected version JSON' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Export selected version JSON' }));
     fireEvent.change(select, { target: { value: second.id } });
     expect(await screen.findByText('Second plan')).toBeTruthy();
     await act(async () => { resolveFirst('{"wrong":"version-1"}'); });
@@ -188,6 +193,91 @@ describe('retained plan panel', () => {
     view.unmount();
     await act(async () => { resolveImport(importedPlan); });
     expect(view.container.textContent).toBe('');
+  });
+
+  it('explicitly enrolls the exact imported stream version with occurrence and loop choices', async () => {
+    const plans = api();
+    vi.mocked(plans.importPlanDefinitionJson).mockResolvedValueOnce(importedStreams);
+    vi.mocked(plans.enrollInChapterStreams).mockResolvedValueOnce(customEnrollment);
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValueOnce([first, second]).mockResolvedValueOnce([first, second, customEnrollment]);
+    render(<PlanPanel api={plans} />);
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"custom":true}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    const starts = await screen.findAllByLabelText('Custom starting chapter') as HTMLSelectElement[];
+    const loops = screen.getAllByLabelText('Custom stream loops') as HTMLInputElement[];
+    expect(starts[0].options).toHaveLength(2);
+    expect(Array.from(starts[0].options, option => option.text)).toEqual(['Book 19 · Chapter 1', 'Book 19 · Chapter 1']);
+    fireEvent.change(starts[0], { target: { value: '1' } });
+    fireEvent.click(loops[1]);
+    const submit = screen.getByRole('button', { name: 'Create custom enrollment' });
+    fireEvent.click(submit); fireEvent.click(submit);
+
+    await waitFor(() => expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1));
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledWith(importedStreams.id, [
+      { streamId: 'repeat', startingPosition: 1, loopAfterEnd: true },
+      { streamId: 'short', startingPosition: 0, loopAfterEnd: false },
+    ]);
+    expect(await screen.findByText(/Custom-plan enrollment custom-enrollment was created for definition version custom-version/)).toBeTruthy();
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(customEnrollment.id);
+  });
+
+  it('reports custom enrollment rejection, retains choices, and permits one explicit retry', async () => {
+    let rejectEnrollment!: (reason: unknown) => void;
+    const plans = api();
+    vi.mocked(plans.importPlanDefinitionJson).mockResolvedValueOnce(importedStreams);
+    vi.mocked(plans.enrollInChapterStreams)
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectEnrollment = reject; }))
+      .mockResolvedValueOnce(customEnrollment);
+    render(<PlanPanel api={plans} />);
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"custom":true}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    const starts = await screen.findAllByLabelText('Custom starting chapter') as HTMLSelectElement[];
+    fireEvent.change(starts[0], { target: { value: '1' } });
+    const submit = screen.getByRole('button', { name: 'Create custom enrollment' });
+    fireEvent.click(submit); fireEvent.click(submit);
+    expect((screen.getByRole('button', { name: 'Creating custom enrollment…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
+    await act(async () => { rejectEnrollment(new Error('custom enrollment rejected')); });
+    expect(await screen.findByText(/Could not create custom-plan enrollment: Error: custom enrollment rejected/)).toBeTruthy();
+    expect((screen.getAllByLabelText('Custom starting chapter')[0] as HTMLSelectElement).value).toBe('1');
+    fireEvent.click(screen.getByRole('button', { name: 'Create custom enrollment' }));
+    await waitFor(() => expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(2));
+  });
+
+  it('preserves newer import input and confirmed custom enrollment when refresh fails after navigation', async () => {
+    let resolveEnrollment!: (value: PlanEnrollment) => void;
+    const plans = api();
+    vi.mocked(plans.importPlanDefinitionJson).mockResolvedValueOnce(importedStreams);
+    vi.mocked(plans.enrollInChapterStreams).mockImplementationOnce(() => new Promise(resolve => { resolveEnrollment = resolve; }));
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValueOnce([first, second]).mockRejectedValueOnce(new Error('custom refresh offline'));
+    render(<PlanPanel api={plans} />);
+    const input = screen.getByLabelText('Custom plan JSON') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: '{"custom":true}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    await screen.findByRole('button', { name: 'Create custom enrollment' });
+    fireEvent.click(screen.getByRole('button', { name: 'Create custom enrollment' }));
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: second.id } });
+    fireEvent.change(input, { target: { value: '{"newer":"unsent"}' } });
+    expect((screen.getByRole('button', { name: 'Import custom plan' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { resolveEnrollment(customEnrollment); });
+
+    expect(await screen.findByText(/Custom-plan enrollment was created, but retained plans could not be refreshed: Error: custom refresh offline/)).toBeTruthy();
+    expect(input.value).toBe('{"newer":"unsent"}');
+    const select = screen.getByLabelText('Retained enrollment') as HTMLSelectElement;
+    expect(select.value).toBe(customEnrollment.id);
+    expect(screen.getByRole('option', { name: customEnrollment.id })).toBeTruthy();
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reinterpret an imported explicit schedule as chapter streams', async () => {
+    const plans = api();
+    vi.mocked(plans.importPlanDefinitionJson).mockResolvedValueOnce({ ...importedPlan, definition: { ...importedPlan.definition, schedule: { kind: 'explicitSchedule', days: [{ day: 1, passages: [{ book: 43, chapter: 3 }] }] } } });
+    render(<PlanPanel api={plans} />);
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"calendar":true}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    expect(await screen.findByText('This imported calendar plan cannot be enrolled as chapter streams.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Create custom enrollment' })).toBeNull();
+    expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
   });
 
   it('shows retained completion identity, passage, timestamp, and undone state', async () => {
