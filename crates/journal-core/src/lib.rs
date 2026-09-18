@@ -11,9 +11,11 @@ mod export;
 pub const CURRENT_SCHEMA: u32 = 14;
 #[cfg(unix)]
 mod export_directory;
+mod legacy_import;
 mod plans;
 mod verse_counts;
 pub use export::ExportReport;
+pub use legacy_import::{LegacyImportPreview, LegacyImportRecord, LegacyImportResult};
 pub use plans::{
     expand_calendar_assignments, four_stream_plan_definition, mcheyne_plan_definition,
     parse_plan_definition_json, serialize_plan_definition_json, AdoptCalendarPlanRequest,
@@ -237,6 +239,20 @@ impl JournalStore {
         store.conn.pragma_update(None, "journal_mode", "WAL")?;
         store.conn.pragma_update(None, "synchronous", "FULL")?;
         Ok(store)
+    }
+
+    /// Inspects a legacy journal without changing either journal.
+    pub fn preview_legacy_import(&self, path: &Path) -> Result<LegacyImportPreview> {
+        legacy_import::preview(&self.conn, path)
+    }
+
+    /// Imports the exact source set that was previewed in one transaction.
+    pub fn import_legacy_journal(
+        &mut self,
+        path: &Path,
+        expected_preview_id: &str,
+    ) -> Result<LegacyImportResult> {
+        legacy_import::import(&mut self.conn, path, expected_preview_id)
     }
 
     pub fn list_entries(&self) -> Result<Vec<Entry>> {

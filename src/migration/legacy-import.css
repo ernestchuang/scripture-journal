@@ -1,0 +1,8 @@
+.legacy-import { border-bottom: 1px solid var(--line); padding: .75rem 1.4rem; background: var(--surface); color: var(--ink); font-size: .82rem; }
+.legacy-import-toggle { color: inherit; background: transparent; border: 0; padding: 0; font: 600 .82rem var(--sans); text-decoration: underline; cursor: pointer; }
+.legacy-import-body { margin-top: .65rem; }
+.legacy-import-body p { color: var(--muted); margin: .45rem 0; }
+.legacy-import-body button { padding: .35rem .55rem; color: inherit; background: var(--surface-raised); border: 1px solid var(--line); border-radius: .35rem; }
+.legacy-import-body ul { max-height: 11rem; overflow: auto; margin: .65rem 0; padding-left: 1.2rem; }
+.legacy-import-body li { margin: .3rem 0; }
+@media (max-width: 640px) { .legacy-import { padding: .7rem 1rem; } }

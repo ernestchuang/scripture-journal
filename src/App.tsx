@@ -9,6 +9,8 @@ import { Reader } from './scripture/Reader';
 import { JournalWorkspace, type JournalPersistenceState } from './journal/JournalWorkspace';
 import { nativePlans } from './platform/plans';
 import { PlanPanel } from './plans/PlanPanel';
+import { LegacyImportPanel } from './migration/LegacyImportPanel';
+import { nativeLegacyImport } from './platform/legacyImport';
 
 const journal = isDesktop ? nativeJournal : browserJournal;
 
@@ -118,6 +120,7 @@ export function App() {
         </section>
         <section className="journal-panel" aria-label="Journal">
           <PlanPanel api={isDesktop ? nativePlans : undefined} />
+          <LegacyImportPanel api={isDesktop ? nativeLegacyImport : undefined} />
           <JournalWorkspace api={journal} passage={selection} reflectRequest={reflectRequest} onPersistenceChange={rememberPersistence} />
         </section>
       </main>
