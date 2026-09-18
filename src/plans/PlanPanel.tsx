@@ -235,11 +235,17 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       await api.undoPlanCompletion(item.id);
       if (epoch !== undoEpoch.current) return;
       confirmedUndos.current.set(item.id, item.enrollmentId);
+      const retained = readyHistory.current.get(item.enrollmentId);
+      const confirmedHistory: ReadyPlanHistory | undefined = retained && {
+        kind: 'ready',
+        items: retained.items.map(value => value.id === item.id ? { ...value, undone: true } : value),
+      };
+      if (confirmedHistory) readyHistory.current.set(item.enrollmentId, confirmedHistory);
       if (selectedIdRef.current !== item.enrollmentId) return;
       setHistory(current => {
-        const retained = current?.kind === 'ready' ? current : readyHistory.current.get(item.enrollmentId);
-        if (!retained) return current;
-        const ready: ReadyPlanHistory = { kind: 'ready', items: retained.items.map(value => value.id === item.id ? { ...value, undone: true } : value) };
+        const visible = current?.kind === 'ready' ? current : confirmedHistory;
+        if (!visible) return current;
+        const ready: ReadyPlanHistory = { kind: 'ready', items: visible.items.map(value => value.id === item.id ? { ...value, undone: true } : value) };
         readyHistory.current.set(item.enrollmentId, ready);
         return ready;
       });

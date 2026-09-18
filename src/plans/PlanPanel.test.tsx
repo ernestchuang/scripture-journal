@@ -653,4 +653,30 @@ describe('retained plan panel', () => {
     expect(screen.queryByRole('button', { name: 'Undo completion completion-current' })).toBeNull();
     expect(plans.undoPlanCompletion).toHaveBeenCalledTimes(1);
   });
+
+  it('recovers cached confirmed undo after navigation and a failed return read', async () => {
+    let resolveUndo!: () => void;
+    const plans = api();
+    const item = history('completion-current');
+    vi.mocked(plans.planCompletionHistory)
+      .mockResolvedValueOnce([item])
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('return history failed'))
+      .mockResolvedValueOnce([{ ...item, undone: true }]);
+    vi.mocked(plans.undoPlanCompletion).mockImplementationOnce(() => new Promise(resolve => { resolveUndo = resolve; }));
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo completion completion-current' }));
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: second.id } });
+    expect(await screen.findByText('No retained completions yet.')).toBeTruthy();
+    await act(async () => { resolveUndo(); });
+
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: first.id } });
+    expect(await screen.findByText(/Completion history could not be refreshed: Error: return history failed/)).toBeTruthy();
+    expect(screen.getByText('Undone')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Undo completion completion-current' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry completion history' }));
+    await waitFor(() => expect(plans.planCompletionHistory).toHaveBeenCalledTimes(4));
+    expect(screen.getByText('Undone')).toBeTruthy();
+    expect(plans.undoPlanCompletion).toHaveBeenCalledTimes(1);
+  });
 });
