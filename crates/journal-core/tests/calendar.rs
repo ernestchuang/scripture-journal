@@ -381,7 +381,12 @@ fn schema_eight_migration_preserves_populated_calendar_rows() {
     let assignments = store.calendar_plan_assignments(&enrollment.id).unwrap();
     drop(store);
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TRIGGER plan_calendar_completions_immutable; DROP TRIGGER plan_calendar_completions_retained; DROP TABLE plan_calendar_completions; PRAGMA user_version=8;").unwrap();
+    conn.execute_batch("DROP TRIGGER plan_calendar_completions_immutable; DROP TRIGGER plan_calendar_completions_retained; DROP TABLE plan_calendar_completions; DROP INDEX plan_calendar_assignment_owner; PRAGMA user_version=8;").unwrap();
+    assert!(!schema_object_exists(&conn, "plan_calendar_completions"));
+    assert!(!schema_object_exists(
+        &conn,
+        "plan_calendar_assignment_owner"
+    ));
     drop(conn);
     let reopened = JournalStore::open(&path).unwrap();
     assert_eq!(
@@ -400,6 +405,11 @@ fn schema_eight_migration_preserves_populated_calendar_rows() {
         .is_empty());
     drop(reopened);
     let conn = rusqlite::Connection::open(&path).unwrap();
+    assert!(schema_object_exists(&conn, "plan_calendar_completions"));
+    assert!(schema_object_exists(
+        &conn,
+        "plan_calendar_assignment_owner"
+    ));
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
@@ -605,11 +615,20 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
 
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TABLE plan_calendar_assignments;
+        "DROP TRIGGER plan_calendar_completions_immutable;
+         DROP TRIGGER plan_calendar_completions_retained;
+         DROP TABLE plan_calendar_completions;
+         DROP INDEX plan_calendar_assignment_owner;
+         DROP TABLE plan_calendar_assignments;
          DROP TABLE plan_calendar_enrollments;
          PRAGMA user_version=7;",
     )
     .unwrap();
+    assert!(!schema_object_exists(&conn, "plan_calendar_completions"));
+    assert!(!schema_object_exists(
+        &conn,
+        "plan_calendar_assignment_owner"
+    ));
     drop(conn);
 
     let retained = schema_seven_fingerprint(&path);
@@ -623,6 +642,13 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
         vec![version, second_version]
     );
     drop(reopened);
+    let migrated = rusqlite::Connection::open(&path).unwrap();
+    assert!(schema_object_exists(&migrated, "plan_calendar_completions"));
+    assert!(schema_object_exists(
+        &migrated,
+        "plan_calendar_assignment_owner"
+    ));
+    drop(migrated);
     assert_database_integrity(&path, 9);
 
     let mut reopened_again = JournalStore::open(&path).unwrap();
@@ -688,6 +714,15 @@ fn schema_seven_fingerprint(path: &std::path::Path) -> Vec<String> {
             .unwrap_or_default()
     })
     .collect()
+}
+
+fn schema_object_exists(conn: &rusqlite::Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)",
+        [name],
+        |row| row.get(0),
+    )
+    .unwrap()
 }
 
 fn calendar_fingerprint(path: &std::path::Path) -> Vec<String> {
