@@ -108,6 +108,60 @@ pub fn mcheyne_plan_definition() -> PlanDefinition {
     }
 }
 
+#[cfg(test)]
+mod mcheyne_coverage_tests {
+    use super::*;
+    use crate::verse_counts::VERSE_COUNTS;
+
+    fn chapter_index(book: u32, chapter: u32) -> usize {
+        CHAPTERS[..(book - 1) as usize].iter().sum::<u32>() as usize + (chapter - 1) as usize
+    }
+
+    fn verse_offset(chapter_index: usize) -> usize {
+        VERSE_COUNTS[..chapter_index]
+            .iter()
+            .map(|count| *count as usize)
+            .sum()
+    }
+
+    #[test]
+    fn calendar_covers_every_canonical_verse_at_its_expected_multiplicity() {
+        let definition = mcheyne_plan_definition();
+        let PlanSchedule::ExplicitSchedule { days } = definition.schedule else {
+            panic!("M’Cheyne must be an explicit daily schedule");
+        };
+        assert_eq!(days.len(), 365);
+
+        let mut actual = vec![0u8; VERSE_COUNTS.iter().map(|count| *count as usize).sum()];
+        for passage in days.iter().flat_map(|day| &day.passages) {
+            let chapter_index = chapter_index(passage.book, passage.chapter);
+            let offset = verse_offset(chapter_index);
+            let start = passage.start_verse.unwrap_or(1);
+            let end = passage
+                .end_verse
+                .unwrap_or(VERSE_COUNTS[chapter_index] as u32);
+            for verse in start..=end {
+                actual[offset + (verse - 1) as usize] += 1;
+            }
+        }
+
+        for book in 1..=66 {
+            let expected = if book == 19 || book >= 40 { 2 } else { 1 };
+            for chapter in 1..=CHAPTERS[(book - 1) as usize] {
+                let chapter_index = chapter_index(book, chapter);
+                let offset = verse_offset(chapter_index);
+                for verse in 1..=VERSE_COUNTS[chapter_index] as u32 {
+                    assert_eq!(
+                        actual[offset + (verse - 1) as usize],
+                        expected,
+                        "book {book}, chapter {chapter}, verse {verse}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn canonical_chapters(
     books: std::ops::RangeInclusive<u32>,
     include: impl Fn(u32) -> bool,

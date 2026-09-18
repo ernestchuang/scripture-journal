@@ -679,7 +679,7 @@ fn mcheyne_definition_preserves_the_complete_calendar_and_boundaries() {
             whole_chapter(46, 15),
         ]
     );
-    assert_eq!(days[59].passages[0], passage_range(2, 12, 21, 50));
+    assert_eq!(days[59].passages[0], passage_range(2, 12, 21, 51));
     assert_eq!(
         days[129].passages,
         vec![
