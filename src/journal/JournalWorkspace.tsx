@@ -100,6 +100,18 @@ export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceCh
     return () => window.clearTimeout(timer);
   }, [session, generation]);
 
+  // The idle debounce alone never fires during uninterrupted typing. This
+  // independent deadline persists at least every five seconds while healthy.
+  useEffect(() => {
+    if (!session) return;
+    const timer = window.setInterval(() => {
+      if (session.dirty && session.status !== 'error' && session.status !== 'saving') {
+        void session.flush().catch(() => undefined);
+      }
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [session]);
+
   useEffect(() => {
     const protect = (event: BeforeUnloadEvent) => {
       if (sessionRef.current?.dirty || sessionRef.current?.status === 'saving') { event.preventDefault(); event.returnValue = ''; }
@@ -117,6 +129,28 @@ export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceCh
       setHistory(null); setInspected(null);
     }, false);
   };
+  const recoverAsNew = () => navigate(async () => {
+    const current = sessionRef.current;
+    if (!current || current.status !== 'error') return;
+    // Keep the failed session untouched until the independent copy commits.
+    // A failed recovery must never discard the only copy of the user's draft.
+    const recovered = await api.saveEntry({
+      entryId: crypto.randomUUID(), expectedRevisionId: null,
+      content: structuredClone(current.content), finish: false,
+    });
+    committed(recovered);
+    open(recovered);
+    // Refresh a competing writer's entry without replacing the recovered copy.
+    try {
+      const latest = await api.listEntries();
+      committedEntries.current.clear();
+      latest.forEach(entry => committedEntries.current.set(entry.id, entry));
+      committedEntries.current.set(recovered.id, recovered);
+      setEntries([recovered, ...latest.filter(entry => entry.id !== recovered.id)]);
+    } catch (error) {
+      setOperationError(`Recovered draft saved, but the entry list could not refresh: ${String(error)}`);
+    }
+  }, false);
   const showHistory = () => navigate(async () => {
     const current = sessionRef.current;
     if (current) { setHistory(await api.getHistory(current.id)); setInspected(null); }
@@ -155,7 +189,10 @@ export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceCh
       <div className="journal-save-row"><span role="status" aria-live="polite">{session.status === 'saving' ? 'Saving…' : session.status === 'finished' ? 'Finished' : session.status === 'saved' ? 'Draft saved' : session.status === 'error' ? 'Save failed — draft remains open' : 'Unsaved changes'}</span>
         <button disabled={busy} onClick={finish}>Finish entry</button>
       </div>
-      {session.status === 'error' && <div role="alert" className="journal-error">{session.error}<button disabled={busy} onClick={() => navigate(() => undefined)}>Retry save</button></div>}
+      {session.status === 'error' && <div role="alert" className="journal-error">{session.error}<button disabled={busy} onClick={() => navigate(() => undefined)}>Retry save</button>
+        <p>If this entry changed elsewhere, save your current writing as a separate unfinished entry. The original entry and its history stay intact.</p>
+        <button disabled={busy} onClick={recoverAsNew}>Save as new draft</button>
+      </div>}
       <fieldset disabled={busy} className="journal-fields">
         <label>Title<input value={content.title} onChange={event => edit({ title: event.target.value })} placeholder="Give this reflection a title" /></label>
         <div className="journal-passages"><span>Connected passages</span>

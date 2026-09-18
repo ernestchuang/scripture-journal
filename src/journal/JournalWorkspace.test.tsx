@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Entry, SaveRequest } from '../domain';
+import { blankContent, type Entry, type SaveRequest } from '../domain';
 import type { JournalApi } from '../platform/journal';
 import { JournalWorkspace } from './JournalWorkspace';
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 const fakeApi = (): JournalApi => ({
   listEntries: vi.fn(async () => []),
   saveEntry: vi.fn(async (request: SaveRequest): Promise<Entry> => ({
@@ -16,6 +16,55 @@ const fakeApi = (): JournalApi => ({
 });
 
 describe('journal workspace', () => {
+  it('persists continuous typing without waiting for an idle pause', async () => {
+    const api = fakeApi();
+    render(<JournalWorkspace api={api} passage={{ book: 1, chapter: 1 }} reflectRequest={0} />);
+    await screen.findByText('Your reflections will appear here.');
+    vi.useFakeTimers();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'New blank entry' })); });
+    const editor = screen.getByLabelText(/Reflection Markdown/);
+    for (let index = 0; index < 10; index++) {
+      fireEvent.change(editor, { target: { value: `Continuous writing ${index}` } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    }
+    expect(api.saveEntry).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.saveEntry).mock.calls[0][0]).toMatchObject({
+      finish: false, content: { body: 'Continuous writing 9' },
+    });
+  });
+
+  it('recovers a stale writer into a new draft and preserves it if recovery fails', async () => {
+    const api = fakeApi();
+    const original: Entry = {
+      id: crypto.randomUUID(), createdAt: '2026-09-17T00:00:00Z', updatedAt: '2026-09-17T00:00:00Z',
+      workingRevisionId: 'old', publishedRevisionId: 'old',
+      content: { ...blankContent([{ book: 43, chapter: 3 }]), title: 'Original entry', body: 'Original body', tags: ['study'] },
+    };
+    const competing = { ...original, workingRevisionId: 'competing', content: { ...original.content, body: 'Other writer' } };
+    vi.mocked(api.listEntries).mockResolvedValueOnce([original]).mockResolvedValue([competing]);
+    vi.mocked(api.saveEntry).mockRejectedValueOnce(new Error('Entry changed since it was loaded'))
+      .mockRejectedValueOnce(new Error('Storage unavailable'));
+    render(<JournalWorkspace api={api} passage={{ book: 1, chapter: 1 }} reflectRequest={0} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Original entry/ }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    fireEvent.change(editor, { target: { value: 'My conflicting writing' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Finish entry' }));
+    await screen.findByText('Save failed — draft remains open');
+    fireEvent.click(screen.getByRole('button', { name: 'Save as new draft' }));
+    await screen.findByText(/Action could not finish.*Storage unavailable/);
+    expect((editor as HTMLTextAreaElement).value).toBe('My conflicting writing');
+    fireEvent.click(screen.getByRole('button', { name: 'Save as new draft' }));
+    await screen.findByText('Draft saved');
+    const requests = vi.mocked(api.saveEntry).mock.calls.map(([request]) => request);
+    expect(requests[0]).toMatchObject({ entryId: original.id, expectedRevisionId: 'old', finish: true });
+    expect(requests[2].entryId).not.toBe(original.id);
+    expect(requests[2]).toMatchObject({ expectedRevisionId: null, finish: false,
+      content: { body: 'My conflicting writing', tags: ['study'], passages: [{ book: 43, chapter: 3 }] } });
+    // Reopening the original uses the refreshed competing version, not cached old content.
+    fireEvent.click(screen.getAllByRole('button', { name: /Original entry/ }).find(button => button.getAttribute('aria-current') !== 'true')!);
+    await waitFor(() => expect((screen.getByLabelText(/Reflection Markdown/) as HTMLTextAreaElement).value).toBe('Other writer'));
+  });
+
   it('does not create an entry on mount and pins reflection to its original passage', async () => {
     const api = fakeApi();
     const { rerender } = render(<JournalWorkspace api={api} passage={{ book: 43, chapter: 3 }} reflectRequest={0} />);
