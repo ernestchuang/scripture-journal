@@ -35,9 +35,12 @@ not treated as permission to create another event.
 
 Existing definition versions, enrollment rows, policies, assignments, progress
 epochs, completions, and undo rows are never updated or deleted. Every old assignment
-continues to identify the definition version and passage snapshot from which it was
-created. Adoption never marks an assignment complete, undoes a completion, changes a
-start date, changes loop policy, or changes calendar alignment policy.
+continues to identify the definition version, generation, and passage snapshot from
+which it was created. Historical stream rows that predate this schema gain their
+enrollment's original definition version and an original-generation identity during
+migration; this is provenance only and does not rewrite their snapshots. Adoption
+never marks an assignment complete, undoes a completion, changes a start date,
+changes loop policy, or changes calendar alignment policy.
 
 ## Chapter-stream compatibility and boundary
 
@@ -51,18 +54,53 @@ For each stream, the current assignment's zero-based `streamPosition` must exist
 the same position in the target and the chapter there must equal the assignment's
 retained passage snapshot. This occurrence-position check is required even when the
 same chapter appears elsewhere. Earlier definition content may differ because old
-assignments retain their own snapshots; later occurrences may be reordered, added,
-or removed. The existing per-enrollment loop-or-stop policy remains unchanged.
+assignments retain their own snapshots; later, not-yet-materialized occurrences may
+be reordered, added, or removed. The existing per-enrollment loop-or-stop policy
+remains unchanged.
 
-The current assignments remain active and keep their old definition identity.
-Adoption affects only successors created after those assignments complete. A successor
-uses the target sequence after the validated position, retaining ordinal and cycle
-continuity. At the target end, the existing loop policy either stops or advances to
-target position zero in the next cycle. An exhausted stopped stream has no unambiguous
-current occurrence to map and is incompatible; starting another enrollment is the
-safe alternative. Undo restores its retained old assignment and does not reverse the
-adoption event; completing it again still creates its successor from the adopted
-target.
+Adoption is allowed only at the materialized frontier of every stream. Assignments
+form a retained, linear successor chain: each assignment may identify at most one
+successor assignment, and a successor records the predecessor from which it was
+created. If the displayed active assignment already has a retained successor, the
+stream is rewound behind work that was previously materialized. Adoption is rejected
+for the whole enrollment until the user recompletes the retained chain back to its
+frontier. It never replaces that successor with a different passage or creates a
+parallel assignment at the same logical step. This makes "future" mean assignments
+that have never existed, not merely assignments that are currently unread.
+
+Every stream assignment stores its immutable originating definition-version ID and
+assignment-generation ID. Enrollment creates the original generation. Each adoption
+event creates a new generation for successors produced from its target version; a
+later adoption creates another generation even when it uses the same boundary. The
+assignment's ordinal remains the monotonic logical step within the stream, and cycle
+retains its existing loop meaning. There is one retained successor per assignment, so
+recompletion does not allocate a competing row or reuse `(stream, ordinal)` for a
+different snapshot.
+
+Completion always validates an assignment's occurrence against that assignment's
+originating version, never merely the enrollment's latest adopted version. After a
+completion, an already-retained successor is selected exactly as stored. This is the
+case while replaying history after undo, including across any number of adoption
+boundaries. Only a frontier assignment with no retained successor may create one:
+the most recent adoption whose boundary is that exact assignment supplies the target
+version and generation; otherwise the assignment's own version and generation
+continue. A later adoption at the same uncompleted frontier supersedes the earlier
+event for successor creation while retaining both events as history.
+
+The current frontier assignments remain active and keep their old provenance.
+Adoption affects only successors first created after those assignments complete. A
+new successor uses the target sequence after the validated position, with ordinal
+incremented once and cycle unchanged; at the target end, the existing loop policy
+either stops or uses target position zero with cycle incremented once. An exhausted
+stopped stream has no active frontier to map and is incompatible; starting another
+enrollment is the safe alternative.
+
+Undo retains ordered-undo rules and appends a progress epoch selecting the exact
+historical assignment. It does not reverse or delete adoption. Recompletion follows
+the retained successor chain until the frontier, validating each historical
+assignment against its own version. Therefore a definition may remove or change a
+pre-boundary occurrence without making historical recompletion impossible, while it
+still cannot reinterpret that retained occurrence.
 
 ## Calendar compatibility and cutover
 
@@ -102,9 +140,24 @@ Database implementation must prove:
 
 - compatible stream adoption changes only successors while retaining old assignments,
   completions, undos, epochs, policies, and definitions across reopen;
+- the sequence `[John 1, John 2, John 3]`, after completing John 1 and adopting
+  `[John 9, John 2, John 4]` at retained John 2, can undo and recomplete John 1 by
+  reusing the exact retained John 2 successor; completing John 2 then creates John 4
+  from the adopted generation;
+- after completing then undoing John 1, the retained John 2 successor makes adoption
+  of `[John 1, John 9, John 3]` at rewound John 1 reject with exact unchanged state;
+  recompleting to retained John 2 reaches the frontier where a new compatible
+  adoption can be requested;
 - repeated chapters use the exact occurrence position, and mismatched position,
   passage, stream set, schedule kind, plan identity, exhausted stop state, or stale
   progress rejects with exact unchanged state;
+- multiple adoptions at one frontier retain every event but use only the latest target
+  for the first successor; undo across multiple boundaries and recompletion reuse the
+  exact retained chain, preserve ordered undo, never fork an ordinal, and validate
+  each row against its originating version and generation;
+- loop adoption at the last target occurrence increments cycle exactly once, retains
+  the generated position-zero successor across undo/recompletion, and a stopped
+  exhausted stream remains incompatible;
 - compatible calendar adoption appends a replacement generation only at the explicit
   cutover, preserves completed and undone history plus pre-cutover unread assignments,
   and exposes the target passages for future dates across reopen;
@@ -114,8 +167,10 @@ Database implementation must prove:
 - injected failures roll back the adoption event and all replacement assignments;
   two stores cannot both adopt from the same expected head; and completion/adoption
   races have the serialized outcomes described above; and
-- migration of populated stores preserves all prior rows exactly and passes SQLite
-  integrity and foreign-key checks.
+- migration of populated stores preserves all prior snapshots and history, assigns
+  deterministic original-version/generation provenance and successor links without
+  guessing a branch, rejects ambiguous legacy chains, and passes SQLite integrity
+  and foreign-key checks.
 
 Native and UI layers must later carry the captured identities unchanged, explain
 incompatibility, guard duplicate and stale asynchronous settlement, preserve unsent
