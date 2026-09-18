@@ -1,0 +1,26 @@
+# Scripture Journal portable theme, schema version 1.
+schema_version = 1
+id = "forest-night"
+name = "Forest Night"
+mode = "dark"
+
+[colors]
+app-background = "#172019"
+paper = "#1d2820"
+surface = "#223027"
+surface-raised = "#29382e"
+surface-subtle = "#26372b"
+surface-active = "#354b39"
+ink = "#e7ede5"
+muted = "#b5c0b3"
+placeholder = "#9fac9d"
+line = "#46564a"
+line-strong = "#758378"
+accent = "#a9c99e"
+accent-hover = "#c4dfba"
+accent-contrast = "#142017"
+focus = "#c7e5b5"
+selection = "#47623c"
+error-ink = "#ffd0c8"
+error-surface = "#4d2b27"
+error-line = "#ad6d63"
