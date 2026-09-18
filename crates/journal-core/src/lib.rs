@@ -15,10 +15,10 @@ pub use export::ExportReport;
 pub use plans::{
     expand_calendar_assignments, four_stream_plan_definition, mcheyne_plan_definition,
     parse_plan_definition_json, serialize_plan_definition_json, CalendarAssignment,
-    CalendarScheduleMode, ChapterRef, ChapterStream, CompleteStreamRequest, ExplicitScheduleDay,
-    PlanAssignment, PlanCompletion, PlanCompletionHistoryItem, PlanDefinition,
-    PlanDefinitionVersion, PlanEnrollment, PlanSchedule, StreamEnrollment,
-    MAX_PLAN_DEFINITION_JSON_BYTES,
+    CalendarPlanEnrollment, CalendarScheduleMode, ChapterRef, ChapterStream, CompleteStreamRequest,
+    DatedPlanAssignment, ExplicitScheduleDay, PlanAssignment, PlanCompletion,
+    PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, PlanSchedule,
+    StreamEnrollment, MAX_PLAN_DEFINITION_JSON_BYTES,
 };
 
 /// A passage in canonical Protestant 66-book order using KJV versification.
@@ -87,7 +87,7 @@ impl JournalStore {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(
-            (0..=7).contains(&version),
+            (0..=8).contains(&version),
             "Unsupported journal schema version {version}"
         );
         if version == 0 {
@@ -108,7 +108,8 @@ impl JournalStore {
             tx.execute_batch(plans::PLAN_ASSIGNMENT_POSITION_SCHEMA)?;
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 7)?;
+            tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 8)?;
             tx.commit()?;
         } else if version == 1 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -118,7 +119,8 @@ impl JournalStore {
             tx.execute_batch(plans::PLAN_ASSIGNMENT_POSITION_SCHEMA)?;
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 7)?;
+            tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 8)?;
             tx.commit()?;
         } else if version == 2 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -127,7 +129,8 @@ impl JournalStore {
             tx.execute_batch(plans::PLAN_ASSIGNMENT_POSITION_SCHEMA)?;
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 7)?;
+            tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 8)?;
             tx.commit()?;
         } else if version == 3 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -135,26 +138,35 @@ impl JournalStore {
             tx.execute_batch(plans::PLAN_ASSIGNMENT_POSITION_SCHEMA)?;
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 7)?;
+            tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 8)?;
             tx.commit()?;
         } else if version == 4 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::PLAN_ASSIGNMENT_POSITION_SCHEMA)?;
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 7)?;
+            tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 8)?;
             tx.commit()?;
         } else if version == 5 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::PLAN_ASSIGNMENT_POSITION_REPAIR_SCHEMA)?;
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 7)?;
+            tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 8)?;
             tx.commit()?;
         } else if version == 6 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 7)?;
+            tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 8)?;
+            tx.commit()?;
+        } else if version == 7 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 8)?;
             tx.commit()?;
         }
         let store = Self { conn };
@@ -366,6 +378,32 @@ impl JournalStore {
     ) -> Result<PlanEnrollment> {
         validate_id(definition_version_id)?;
         plans::enroll(&mut self.conn, definition_version_id, streams)
+    }
+
+    pub fn enroll_in_calendar(
+        &mut self,
+        definition_version_id: &str,
+        start_date: chrono::NaiveDate,
+        mode: CalendarScheduleMode,
+    ) -> Result<CalendarPlanEnrollment> {
+        validate_id(definition_version_id)?;
+        plans::enroll_calendar(&mut self.conn, definition_version_id, start_date, mode)
+    }
+
+    pub fn calendar_plan_assignments(
+        &self,
+        enrollment_id: &str,
+    ) -> Result<Vec<DatedPlanAssignment>> {
+        validate_id(enrollment_id)?;
+        plans::calendar_assignments(&self.conn, enrollment_id)
+    }
+
+    pub fn get_calendar_plan_enrollment(
+        &self,
+        enrollment_id: &str,
+    ) -> Result<Option<CalendarPlanEnrollment>> {
+        validate_id(enrollment_id)?;
+        plans::calendar_enrollment(&self.conn, enrollment_id)
     }
 
     /// Lists retained enrollments oldest first, breaking timestamp ties by enrollment ID.

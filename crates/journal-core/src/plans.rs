@@ -329,6 +329,27 @@ pub struct PlanEnrollment {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CalendarPlanEnrollment {
+    pub id: String,
+    pub definition_version_id: String,
+    pub created_at: String,
+    pub start_date: NaiveDate,
+    pub schedule_mode: CalendarScheduleMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatedPlanAssignment {
+    pub id: String,
+    pub enrollment_id: String,
+    pub definition_version_id: String,
+    pub definition_day: u32,
+    pub local_date: NaiveDate,
+    pub passages: Vec<Passage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlanAssignment {
     pub id: String,
     pub enrollment_id: String,
@@ -427,6 +448,141 @@ pub(crate) fn enroll(
     };
     tx.commit()?;
     Ok(result)
+}
+
+pub(crate) fn enroll_calendar(
+    conn: &mut Connection,
+    version_id: &str,
+    start_date: NaiveDate,
+    mode: CalendarScheduleMode,
+) -> Result<CalendarPlanEnrollment> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version =
+        definition_version(&tx, version_id)?.context("Plan definition version not found")?;
+    let assignments = expand_calendar_assignments(&version, start_date, mode)?;
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO plan_enrollments(id,definition_version_id,created_at) VALUES(?1,?2,?3)",
+        params![id, version_id, now],
+    )?;
+    tx.execute(
+        "INSERT INTO plan_calendar_enrollments(enrollment_id,start_date,schedule_mode) VALUES(?1,?2,?3)",
+        params![id, start_date.to_string(), calendar_mode_text(mode)],
+    )?;
+    for assignment in assignments {
+        tx.execute(
+            "INSERT INTO plan_calendar_assignments(id,enrollment_id,definition_version_id,definition_day,local_date,passages) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                Uuid::new_v4().to_string(),
+                id,
+                assignment.definition_version_id,
+                assignment.definition_day,
+                assignment.local_date.to_string(),
+                serde_json::to_string(&assignment.passages)?,
+            ],
+        )?;
+    }
+    let result = CalendarPlanEnrollment {
+        id,
+        definition_version_id: version_id.to_owned(),
+        created_at: now,
+        start_date,
+        schedule_mode: mode,
+    };
+    tx.commit()?;
+    Ok(result)
+}
+
+pub(crate) fn calendar_assignments(
+    conn: &Connection,
+    enrollment_id: &str,
+) -> Result<Vec<DatedPlanAssignment>> {
+    let mut statement = conn.prepare(
+        "SELECT id,enrollment_id,definition_version_id,definition_day,local_date,passages
+         FROM plan_calendar_assignments WHERE enrollment_id=?1 ORDER BY local_date,id",
+    )?;
+    let rows = statement
+        .query_map([enrollment_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u32>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(
+            |(id, enrollment_id, definition_version_id, definition_day, local_date, passages)| {
+                Ok(DatedPlanAssignment {
+                    id,
+                    enrollment_id,
+                    definition_version_id,
+                    definition_day,
+                    local_date: local_date
+                        .parse()
+                        .context("Invalid stored local schedule date")?,
+                    passages: serde_json::from_str(&passages)
+                        .context("Invalid stored calendar passages")?,
+                })
+            },
+        )
+        .collect()
+}
+
+pub(crate) fn calendar_enrollment(
+    conn: &Connection,
+    enrollment_id: &str,
+) -> Result<Option<CalendarPlanEnrollment>> {
+    let row = conn
+        .query_row(
+            "SELECT e.id,e.definition_version_id,e.created_at,c.start_date,c.schedule_mode
+             FROM plan_enrollments e JOIN plan_calendar_enrollments c ON c.enrollment_id=e.id
+             WHERE e.id=?1",
+            [enrollment_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(
+        |(id, definition_version_id, created_at, start_date, schedule_mode)| {
+            Ok(CalendarPlanEnrollment {
+                id,
+                definition_version_id,
+                created_at,
+                start_date: start_date
+                    .parse()
+                    .context("Invalid stored local schedule date")?,
+                schedule_mode: calendar_mode_from_text(&schedule_mode)?,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn calendar_mode_text(mode: CalendarScheduleMode) -> &'static str {
+    match mode {
+        CalendarScheduleMode::CalendarAligned => "calendar-aligned",
+        CalendarScheduleMode::DayOne => "day-one",
+    }
+}
+
+fn calendar_mode_from_text(value: &str) -> Result<CalendarScheduleMode> {
+    match value {
+        "calendar-aligned" => Ok(CalendarScheduleMode::CalendarAligned),
+        "day-one" => Ok(CalendarScheduleMode::DayOne),
+        _ => anyhow::bail!("Invalid stored calendar schedule mode"),
+    }
 }
 
 pub(crate) fn enrollments(conn: &Connection) -> Result<Vec<PlanEnrollment>> {
@@ -1019,6 +1175,44 @@ CREATE TRIGGER IF NOT EXISTS built_in_plan_registrations_immutable BEFORE UPDATE
 BEGIN SELECT RAISE(ABORT,'Built-in plan registrations are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS built_in_plan_registrations_retained BEFORE DELETE ON built_in_plan_registrations
 BEGIN SELECT RAISE(ABORT,'Built-in plan registrations are retained'); END;
+";
+
+pub(crate) const PLAN_CALENDAR_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS plan_calendar_enrollments(
+ enrollment_id TEXT PRIMARY KEY REFERENCES plan_enrollments(id),
+ start_date TEXT NOT NULL CHECK(start_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+ schedule_mode TEXT NOT NULL CHECK(schedule_mode IN ('calendar-aligned','day-one'))
+);
+CREATE TABLE IF NOT EXISTS plan_calendar_assignments(
+ id TEXT PRIMARY KEY,
+ enrollment_id TEXT NOT NULL REFERENCES plan_calendar_enrollments(enrollment_id),
+ definition_version_id TEXT NOT NULL REFERENCES plan_definition_versions(id),
+ definition_day INTEGER NOT NULL CHECK(definition_day>0),
+ local_date TEXT NOT NULL CHECK(local_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+ passages TEXT NOT NULL CHECK(json_valid(passages) AND json_type(passages)='array' AND json_array_length(passages)>0),
+ UNIQUE(enrollment_id,definition_day),
+ UNIQUE(enrollment_id,local_date)
+);
+CREATE TRIGGER IF NOT EXISTS plan_calendar_enrollments_immutable BEFORE UPDATE ON plan_calendar_enrollments
+BEGIN SELECT RAISE(ABORT,'Calendar enrollments are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS plan_calendar_enrollments_retained BEFORE DELETE ON plan_calendar_enrollments
+BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER IF NOT EXISTS plan_calendar_assignments_immutable BEFORE UPDATE ON plan_calendar_assignments
+BEGIN SELECT RAISE(ABORT,'Calendar assignments are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS plan_calendar_assignments_retained BEFORE DELETE ON plan_calendar_assignments
+BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER IF NOT EXISTS plan_calendar_assignments_match BEFORE INSERT ON plan_calendar_assignments
+WHEN NOT EXISTS(
+ SELECT 1 FROM plan_enrollments e
+ JOIN plan_calendar_enrollments c ON c.enrollment_id=e.id
+ JOIN plan_definition_versions v ON v.id=e.definition_version_id
+ WHERE e.id=NEW.enrollment_id
+ AND e.definition_version_id=NEW.definition_version_id
+ AND json_extract(v.definition,'$.schedule.kind')='explicitSchedule'
+ AND json_extract(v.definition,'$.schedule.days['||(NEW.definition_day-1)||'].day')=NEW.definition_day
+ AND json_extract(v.definition,'$.schedule.days['||(NEW.definition_day-1)||'].passages')=json(NEW.passages)
+)
+BEGIN SELECT RAISE(ABORT,'Calendar assignment must belong to its enrollment version'); END;
 ";
 
 pub(crate) const PLAN_PROGRESS_SCHEMA: &str = "
