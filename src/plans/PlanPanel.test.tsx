@@ -1359,7 +1359,7 @@ describe('retained plan panel', () => {
       { streamId: 'short', startingPosition: 0, loopAfterEnd: false },
     ]);
     expect(await screen.findByText(/Retained-plan enrollment retained-enrollment was created for definition version retained-version-1/)).toBeTruthy();
-    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(retainedEnrollment.id);
+    await waitFor(() => expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(retainedEnrollment.id));
   });
 
   it('preserves retained choices through import overlay, failed refresh, retry, and enrollment', async () => {

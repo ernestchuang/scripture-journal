@@ -126,10 +126,11 @@ fn explicit_deletion_preserves_other_snapshots_and_rejects_stale_writers() {
 #[test]
 fn trash_export_is_receipt_gated_and_restores_only_finished_content() {
     let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
     let mut store = JournalStore::open(&dir.path().join("journal.db")).unwrap();
     let published = save(&mut store, None, "finished content", true);
     let draft = save(&mut store, Some(&published), "private draft", false);
-    let export = dir.path().join("existing");
+    let export = root.join("existing");
     store.export_journal(&export).unwrap();
     store
         .set_entry_trashed(&draft.id, &draft.working_revision_id, true)
@@ -139,7 +140,7 @@ fn trash_export_is_receipt_gated_and_restores_only_finished_content() {
     let bytes = std::fs::read_to_string(&note).unwrap();
     assert!(bytes.contains("deleted: true"));
     assert!(!bytes.contains("finished content"));
-    let fresh = dir.path().join("fresh");
+    let fresh = root.join("fresh");
     assert_eq!(store.export_journal(&fresh).unwrap().written, 0);
     store
         .set_entry_trashed(&draft.id, &draft.working_revision_id, false)
