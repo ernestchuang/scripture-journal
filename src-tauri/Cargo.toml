@@ -16,4 +16,5 @@ tauri-plugin-dialog = "2"
 journal-core = { path = "../crates/journal-core" }
 
 [dev-dependencies]
+serde_json = "1"
 tempfile = "3"

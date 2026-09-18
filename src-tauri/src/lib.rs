@@ -1,4 +1,6 @@
-use journal_core::{Entry, ExportReport, JournalStore, Revision, SaveRequest};
+use journal_core::{
+    Entry, ExportReport, JournalStore, PlanDefinitionVersion, Revision, SaveRequest,
+};
 use std::{
     collections::HashSet,
     path::PathBuf,
@@ -199,6 +201,104 @@ async fn save_entry(state: State<'_, AppState>, request: SaveRequest) -> Result<
     .await
 }
 
+async fn register_four_stream_plan_for_store(
+    store: Arc<Mutex<JournalStore>>,
+) -> Result<PlanDefinitionVersion, String> {
+    run_store(store, |journal| {
+        journal
+            .register_four_stream_plan()
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn register_four_stream_plan(
+    state: State<'_, AppState>,
+) -> Result<PlanDefinitionVersion, String> {
+    register_four_stream_plan_for_store(state.journal.clone()).await
+}
+
+async fn import_plan_definition_json_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    input: String,
+) -> Result<PlanDefinitionVersion, String> {
+    run_store(store, move |journal| {
+        journal
+            .import_plan_definition_json(&input)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn import_plan_definition_json(
+    state: State<'_, AppState>,
+    input: String,
+) -> Result<PlanDefinitionVersion, String> {
+    import_plan_definition_json_for_store(state.journal.clone(), input).await
+}
+
+async fn export_plan_definition_json_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    version_id: String,
+) -> Result<String, String> {
+    run_store(store, move |journal| {
+        journal
+            .export_plan_definition_json(&version_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn export_plan_definition_json(
+    state: State<'_, AppState>,
+    version_id: String,
+) -> Result<String, String> {
+    export_plan_definition_json_for_store(state.journal.clone(), version_id).await
+}
+
+async fn get_plan_definition_version_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    version_id: String,
+) -> Result<Option<PlanDefinitionVersion>, String> {
+    run_store(store, move |journal| {
+        journal
+            .get_plan_definition_version(&version_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_plan_definition_version(
+    state: State<'_, AppState>,
+    version_id: String,
+) -> Result<Option<PlanDefinitionVersion>, String> {
+    get_plan_definition_version_for_store(state.journal.clone(), version_id).await
+}
+
+async fn list_plan_definition_versions_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    plan_id: String,
+) -> Result<Vec<PlanDefinitionVersion>, String> {
+    run_store(store, move |journal| {
+        journal
+            .list_plan_definition_versions(&plan_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn list_plan_definition_versions(
+    state: State<'_, AppState>,
+    plan_id: String,
+) -> Result<Vec<PlanDefinitionVersion>, String> {
+    list_plan_definition_versions_for_store(state.journal.clone(), plan_id).await
+}
+
 #[tauri::command]
 async fn get_history(
     state: State<'_, AppState>,
@@ -208,6 +308,98 @@ async fn get_history(
         journal.get_history(&entry_id).map_err(|e| e.to_string())
     })
     .await
+}
+
+#[cfg(test)]
+mod plan_command_tests {
+    use super::*;
+
+    fn test_store() -> (tempfile::TempDir, Arc<Mutex<JournalStore>>) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = JournalStore::open(&directory.path().join("journal.sqlite3")).unwrap();
+        (directory, Arc::new(Mutex::new(store)))
+    }
+
+    #[test]
+    fn typed_plan_commands_serialize_store_access_and_preserve_core_errors() {
+        tauri::async_runtime::block_on(async {
+            let (_directory, store) = test_store();
+            let built_in = register_four_stream_plan_for_store(store.clone())
+                .await
+                .unwrap();
+            let json = export_plan_definition_json_for_store(store.clone(), built_in.id.clone())
+                .await
+                .unwrap();
+            let imported = import_plan_definition_json_for_store(store.clone(), json.clone())
+                .await
+                .unwrap();
+            assert_ne!(imported.plan_id, built_in.plan_id);
+            assert_eq!(
+                serde_json::from_str::<PlanDefinitionVersion>(
+                    &serde_json::to_string(&imported).unwrap()
+                )
+                .unwrap(),
+                imported
+            );
+            assert_eq!(
+                export_plan_definition_json_for_store(store.clone(), imported.id.clone())
+                    .await
+                    .unwrap(),
+                json
+            );
+            assert_eq!(
+                get_plan_definition_version_for_store(store.clone(), imported.id.clone())
+                    .await
+                    .unwrap(),
+                Some(imported.clone())
+            );
+            assert_eq!(
+                list_plan_definition_versions_for_store(store.clone(), imported.plan_id.clone())
+                    .await
+                    .unwrap(),
+                vec![imported]
+            );
+
+            let before_invalid =
+                list_plan_definition_versions_for_store(store.clone(), built_in.plan_id.clone())
+                    .await
+                    .unwrap();
+            assert!(
+                import_plan_definition_json_for_store(store.clone(), "{".into())
+                    .await
+                    .unwrap_err()
+                    .contains("Invalid plan definition JSON")
+            );
+            assert_eq!(
+                list_plan_definition_versions_for_store(store.clone(), built_in.plan_id.clone())
+                    .await
+                    .unwrap(),
+                before_invalid
+            );
+            let missing = "00000000-0000-4000-a000-000000000000".to_string();
+            assert_eq!(
+                get_plan_definition_version_for_store(store.clone(), missing.clone())
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert!(
+                export_plan_definition_json_for_store(store.clone(), missing)
+                    .await
+                    .unwrap_err()
+                    .contains("Plan definition version not found")
+            );
+            assert_eq!(
+                list_plan_definition_versions_for_store(
+                    Arc::clone(&store),
+                    built_in.plan_id.clone()
+                )
+                .await
+                .unwrap(),
+                before_invalid
+            );
+        });
+    }
 }
 
 #[tauri::command]
@@ -293,6 +485,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_entries,
             save_entry,
+            register_four_stream_plan,
+            import_plan_definition_json,
+            export_plan_definition_json,
+            get_plan_definition_version,
+            list_plan_definition_versions,
             get_history,
             restore_revision,
             choose_export_directory,
