@@ -33,7 +33,7 @@ class QuotaRunnerTests(unittest.TestCase):
                 runner.write_json(state_dir / "state.json", {"worktree": str(root), "issue": "sj-kfw",
                     "status": "blocked", "summary": "Native test needs diagnosis", "thread": "saved-session"})
                 result = None if fails else {"status": "done", "summary": "Verified", "next_kind": "coding", "next_task": ""}
-                with patch("sys.argv", ["runner", "--worktree", str(root), "--no-quota-monitor", "--resume-blocked", "--max-turns", "1"]), \
+                with patch("sys.argv", ["runner", "--worktree", str(root), "--issue", "sj-kfw", "--no-quota-monitor", "--resume-blocked", "--max-turns", "1"]), \
                      patch.object(runner.subprocess, "check_output", side_effect=[str(common), str(common / "worktrees" / "test")]), \
                      patch.object(runner, "read_quota", side_effect=AssertionError("Quota must not be read")) as checks, \
                      patch.object(runner, "execute_unit", return_value=result) as worker:
@@ -46,7 +46,7 @@ class QuotaRunnerTests(unittest.TestCase):
                     checks.assert_not_called()
 
     def test_routing_reviews_first_and_bounds_time_between_reviews(self):
-        self.assertEqual(runner.choose_role({}, True, True, 4), "review")
+        self.assertEqual(runner.choose_role({}, True, True, 1), "review")
         state = {"review_initialized": True, "units_since_review": 0}
         self.assertEqual(runner.choose_role(state, True, True, 4), "coding")
         state.update(next_kind="routine", next_task="Adjust button spacing")
@@ -57,6 +57,57 @@ class QuotaRunnerTests(unittest.TestCase):
         self.assertEqual(runner.choose_role(state, True, True, 4), "review")
         state.update(units_since_review=0, next_kind="review")
         self.assertEqual(runner.choose_role(state, True, True, 4), "review")
+
+    def test_feature_blocker_routes_to_fresh_review_then_release_work(self):
+        state = {"review_initialized": True, "next_kind": "coding"}
+        result = {"status": "blocked", "summary": "Licensing contact unavailable",
+                  "next_kind": "coding", "next_task": "Implement local search",
+                  "release_progress_possible": True}
+        runner.record_result(state, result, "coding", True)
+        self.assertEqual(state["status"], "continue")
+        self.assertEqual(state["next_kind"], "review")
+        self.assertEqual(state["blocked_features"], [{"summary": "Licensing contact unavailable",
+                                                        "next_task": "Implement local search"}])
+        self.assertEqual(runner.choose_role(state, True, True, 1), "review")
+
+    def test_reviewer_blocker_routes_to_coding_without_review_loop(self):
+        state = {"review_initialized": True, "completion_pending": True, "next_kind": "review"}
+        result = {"status": "blocked", "summary": "Mac runtime unavailable",
+                  "next_kind": "review", "next_task": "Implement independent search work",
+                  "release_progress_possible": True}
+        runner.record_result(state, result, "review", True)
+        self.assertEqual(state["status"], "continue")
+        self.assertFalse(state["completion_pending"])
+        self.assertEqual(state["next_kind"], "coding")
+        self.assertEqual(runner.choose_role(state, True, True, 1), "coding")
+
+    def test_release_wide_blocker_remains_terminal(self):
+        state = {"review_initialized": True}
+        result = {"status": "blocked", "summary": "No release task can proceed",
+                  "next_kind": "coding", "next_task": "Obtain required access",
+                  "release_progress_possible": False}
+        runner.record_result(state, result, "coding", True)
+        self.assertEqual(state["status"], "continue")
+        self.assertTrue(state["completion_pending"])
+        self.assertEqual(runner.choose_role(state, True, True, 1), "review")
+        runner.record_result(state, result, "review", True)
+        self.assertEqual(state["status"], "blocked")
+
+    def test_zero_turn_ceiling_is_unlimited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            common = root / "git"
+            common.mkdir()
+            results = [
+                {"status": "continue", "summary": "Review route", "next_kind": "coding", "next_task": "First", "release_progress_possible": True},
+                {"status": "done", "summary": "Candidate complete", "next_kind": "coding", "next_task": "", "release_progress_possible": True},
+                {"status": "done", "summary": "Complete", "next_kind": "coding", "next_task": "", "release_progress_possible": True},
+            ]
+            with patch("sys.argv", ["runner", "--worktree", str(root), "--no-quota-monitor", "--max-turns", "0"]), \
+                 patch.object(runner.subprocess, "check_output", side_effect=[str(common), str(common / "worktrees" / "test")]), \
+                 patch.object(runner, "execute_unit", side_effect=results) as worker:
+                runner.main()
+            self.assertEqual(worker.call_count, 3)
 
     def test_worker_cannot_complete_without_review(self):
         state = {"review_initialized": True}
@@ -70,6 +121,20 @@ class QuotaRunnerTests(unittest.TestCase):
         runner.record_result(state, result, "coding", True)
         runner.record_result(state, result, "review", True)
         self.assertEqual(state["status"], "done")
+
+    def test_execute_unit_rejects_missing_release_progress_decision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "codex"
+            fake.write_text('''#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+print(json.dumps({'type':'thread.started','thread_id':'test-thread'}), flush=True)
+Path(sys.argv[sys.argv.index('-o')+1]).write_text(json.dumps({'status':'continue','summary':'Incomplete checkpoint','next_kind':'coding','next_task':'Retry'}))
+''')
+            fake.chmod(0o700)
+            with self.assertRaisesRegex(ValueError, "release-progress"):
+                runner.execute_unit(str(fake), root, root, {}, "sj-example", "sj-5nz")
 
     def test_preserves_reserve_and_observes_longer_window(self):
         self.assertIsNone(runner.quota_decision(quota(), 80, 1000)[1])
@@ -153,17 +218,17 @@ else:
     assert 'ONE small' in prompt
     assert sys.argv[sys.argv.index('--model')+1] == 'gpt-5.6-luna'
     print(json.dumps({'type':'thread.started','thread_id':'test-thread'}), flush=True)
-    Path(sys.argv[sys.argv.index('-o')+1]).write_text(json.dumps({'status':'continue','summary':'Checkpoint saved','next_kind':'coding','next_task':'Next task'}))
+    Path(sys.argv[sys.argv.index('-o')+1]).write_text(json.dumps({'status':'continue','summary':'Checkpoint saved','next_kind':'coding','next_task':'Next task','release_progress_possible':True}))
 ''')
             fake.chmod(0o700)
             self.assertEqual(runner.read_quota(str(fake))["rateLimits"]["primary"]["usedPercent"], 12)
             state = {}
-            result = runner.execute_unit(str(fake), root, root, state, "sj-example", "gpt-5.6-luna")
+            result = runner.execute_unit(str(fake), root, root, state, "sj-example", "sj-5nz", "gpt-5.6-luna")
             self.assertEqual(result["status"], "continue")
             self.assertEqual(state["thread"], "test-thread")
             self.assertEqual(json.loads((root / "state.json").read_text())["thread"], "test-thread")
             # A second unit explicitly resumes the same saved session.
-            self.assertEqual(runner.execute_unit(str(fake), root, root, state, "sj-example", "gpt-5.6-luna")["status"], "continue")
+            self.assertEqual(runner.execute_unit(str(fake), root, root, state, "sj-example", "sj-5nz", "gpt-5.6-luna")["status"], "continue")
 
     def test_review_starts_fresh_and_preserves_coding_session(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -176,11 +241,11 @@ assert 'resume' not in sys.argv
 assert sys.argv[sys.argv.index('--model')+1] == 'gpt-6-astra'
 assert 'independent reviewer' in sys.stdin.read()
 print(json.dumps({'type':'thread.started','thread_id':'review-session'}), flush=True)
-Path(sys.argv[sys.argv.index('-o')+1]).write_text(json.dumps({'status':'continue','summary':'Needs fixes','next_kind':'coding','next_task':'Fix identified race'}))
+Path(sys.argv[sys.argv.index('-o')+1]).write_text(json.dumps({'status':'continue','summary':'Needs fixes','next_kind':'coding','next_task':'Fix identified race','release_progress_possible':True}))
 ''')
             fake.chmod(0o700)
             state = {"thread": "coding-session", "review_thread": "older-review"}
-            runner.execute_unit(str(fake), root, root, state, "sj-example", "gpt-6-astra", "review", True)
+            runner.execute_unit(str(fake), root, root, state, "sj-example", "sj-5nz", "gpt-6-astra", "review", True)
             self.assertEqual(state["thread"], "coding-session")
             self.assertEqual(state["review_thread"], "review-session")
 

@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import fcntl
+import itertools
 import json
 import math
 from pathlib import Path
@@ -123,6 +124,31 @@ def choose_role(state, review_enabled, routine_enabled, review_every, complex_en
 
 def record_result(state, result, role, review_enabled):
     state.update(result)
+    if result["status"] == "blocked" and result.get("release_progress_possible", True):
+        # A blocked feature must not strand independent release work. The worker
+        # has been instructed to leave the evidence on that feature's Bead and
+        # supply the next independent task before returning this checkpoint.
+        state.setdefault("blocked_features", []).append({
+            "summary": result["summary"],
+            "next_task": result["next_task"],
+        })
+        state["status"] = "continue"
+        if role == "review":
+            # A reviewer can confirm a feature-level external blocker, but its
+            # own checkpoint must route onward instead of reviewing itself.
+            state["review_initialized"] = True
+            state["units_since_review"] = 0
+            state["completion_pending"] = False
+            state["next_kind"] = "coding"
+            return
+        state["units_since_review"] = state.get("units_since_review", 0) + 1
+        if review_enabled:
+            # Review the worker's actual diff and Beads evidence before routing
+            # independent work. This keeps every implementation checkpoint gated.
+            state["next_kind"] = "review"
+        elif state.get("next_kind") == "review":
+            state["next_kind"] = "coding"
+        return
     if role == "review":
         state["review_initialized"] = True
         state["units_since_review"] = 0
@@ -132,25 +158,28 @@ def record_result(state, result, role, review_enabled):
             state["next_kind"] = "coding"
     else:
         state["units_since_review"] = state.get("units_since_review", 0) + 1
-        if review_enabled and result["status"] == "done":
+        if review_enabled and result["status"] in ("done", "blocked"):
             state["status"] = "continue"
             state["completion_pending"] = True
             state["next_kind"] = "review"
 
 
-def execute_unit(codex, worktree, state_dir, state, issue, model=None, role="coding", review_enabled=False):
+def execute_unit(codex, worktree, state_dir, state, issue, release_issue, model=None, role="coding", review_enabled=False):
     output = state_dir / "last-result.json"
     output.unlink(missing_ok=True)
     schema = state_dir / "result-schema.json"
     write_json(schema, {"type": "object", "additionalProperties": False,
-                       "required": ["status", "summary", "next_kind", "next_task"], "properties": {
+                       "required": ["status", "summary", "next_kind", "next_task", "release_progress_possible"], "properties": {
                            "status": {"type": "string", "enum": ["continue", "done", "blocked"]},
                            "summary": {"type": "string"},
                            "next_kind": {"type": "string", "enum": ["coding", "routine", "complex", "review"]},
-                           "next_task": {"type": "string"}}})
+                           "next_task": {"type": "string"},
+                           "release_progress_possible": {"type": "boolean"}}})
     prompt = (
-        f"Continue Scripture Journal issue {issue} in {worktree}. Read AGENTS.md, run bd prime, "
-        f"and read bd show {issue}, its notes, and relevant product contracts. "
+        f"Continue Scripture Journal coordinator issue {issue} and release epic {release_issue} in {worktree}. "
+        f"The authorized delivery scope is {release_issue} and all of its Beads descendants; do not stop at "
+        f"the coordinator task. Read AGENTS.md, run bd prime, and inspect bd show {issue}, bd show "
+        f"{release_issue}, their notes, dependency tree, and relevant product contracts. "
         "Complete ONE small, reviewable unit of authorized work, then return. "
         "Do not attempt the entire release in one turn. Do not spawn agents. "
         "Preserve existing work. Verify changes, record remaining work in Beads, export its snapshot, "
@@ -161,7 +190,16 @@ def execute_unit(codex, worktree, state_dir, state, issue, model=None, role="cod
         "or review. A failed test or missing installable development tool is work to investigate, not itself "
         "a reason to declare blocked. Reserve blocked for essential user input or inaccessible external resources. "
         "Do not modify or launch the quota runner. If an essential decision/access is missing, checkpoint "
-        "and return blocked. Return done only when this issue is actually complete and pushed; "
+        "and return blocked. A blocked feature is not a blocked release: log the exact external blocker, "
+        "evidence, and follow-up on its Bead, then find another independent task within the release scope. "
+        "Set release_progress_possible true on every continue/done result and on a feature-level blocker. "
+        "For that case return status blocked with release_progress_possible true and a concrete next_task; "
+        "the supervisor will continue. Set release_progress_possible false only after inspecting the release "
+        "epic and descendants in Beads and confirming that no meaningful release progress is possible. "
+        "Never waive or weaken actual Apple Silicon macOS runtime, licensing/translation-permission, or other "
+        "release acceptance checks to make work appear complete. Helpful small additions are allowed only when "
+        "recorded in Beads; do not add sync, E2EE, accounts, sharing, or mobile scope. "
+        "Return done only when this release issue is actually complete and pushed; "
         "otherwise continue. Before starting another substantial subtask, checkpoint and return so "
         "the external supervisor can route the next task and apply configured execution limits. "
         f"Previous checkpoint: {state.get('summary', 'See Beads notes and the working tree.')}"
@@ -187,7 +225,8 @@ def execute_unit(codex, worktree, state_dir, state, issue, model=None, role="cod
             "Do not change production code. File actionable findings in Beads and leave/reopen the milestone "
             "as in_progress if incomplete. Commit/push only review bookkeeping. Return continue and a focused "
             "coding task for fixable findings or remaining implementation. Return blocked only for essential "
-            "missing user input/access. Return done and close the milestone only after verifying all acceptance "
+            "missing user input/access after checking whether another release descendant can progress. Return done "
+            "and close the milestone only after verifying all acceptance "
             "criteria, tests and pushed changes. Your approval gates completion. "
         )
     command = [codex, "exec"]
@@ -237,30 +276,33 @@ def execute_unit(codex, worktree, state_dir, state, issue, model=None, role="cod
         raise ValueError("Invalid checkpoint; stopping instead of launching more work.")
     if result.get("next_kind") not in ("coding", "routine", "complex", "review") or not isinstance(result.get("next_task"), str):
         raise ValueError("Invalid task routing; stopping instead of guessing a model.")
+    if not isinstance(result.get("release_progress_possible"), bool):
+        raise ValueError("Invalid release-progress checkpoint; stopping instead of guessing whether to continue.")
     return result
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worktree", type=Path, default=Path.cwd())
-    parser.add_argument("--issue", default="sj-kfw", help="Bounded Beads issue to finish")
+    parser.add_argument("--issue", default="sj-dcr", help="Beads coordinator issue for this release run")
+    parser.add_argument("--release-issue", default="sj-5nz", help="Release epic whose descendants are in scope")
     parser.add_argument("--threshold", type=float, default=80, help="Pause at this used percentage (default: 80)")
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--model", help="Explicit coding-worker model; omitted uses the CLI/session default")
     parser.add_argument("--routine-model", help="Smaller worker for explicitly scoped routine tasks")
     parser.add_argument("--complex-model", help="Stronger coder for difficult implementation and debugging")
-    parser.add_argument("--review-model", help="Independent reviewer; gates milestone completion")
-    parser.add_argument("--review-every", type=int, default=4, help="Review after at most this many coding units")
+    parser.add_argument("--review-model", default="gpt-6-astra", help="Independent reviewer; gates every implementation unit and completion")
+    parser.add_argument("--review-every", type=int, default=1, help="Review after at most this many implementation units")
     parser.add_argument("--quota-window", choices=("all", "primary"), default="all",
                         help="Proactive reserve: all windows or only the primary (normally five-hour) window")
     parser.add_argument("--check", action="store_true", help="Read quota only; never invoke a model")
     parser.add_argument("--no-quota-monitor", action="store_true", help="Do not read quota or proactively pause; stop on worker errors")
     parser.add_argument("--resume-blocked", action="store_true", help="Explicitly retry a blocked checkpoint without erasing its evidence")
-    parser.add_argument("--max-turns", type=int, default=50, help="Safety ceiling for this invocation")
+    parser.add_argument("--max-turns", type=int, default=50, help="Safety ceiling; 0 runs until completion, release-wide block, STOP, or error")
     parser.add_argument("--delay", type=float, default=0, help="Initial delay in seconds, without model calls")
     args = parser.parse_args()
-    if not 1 <= args.threshold < 100 or args.max_turns < 1 or args.delay < 0 or args.review_every < 1:
-        parser.error("Use threshold 1–99, positive max-turns, and nonnegative delay.")
+    if not 1 <= args.threshold < 100 or args.max_turns < 0 or args.delay < 0 or args.review_every < 1:
+        parser.error("Use threshold 1–99, nonnegative max-turns/delay, and positive review-every.")
     if args.check:
         windows, wake = quota_decision(read_quota(args.codex), args.threshold, time.time(), args.quota_window)
         print(json.dumps({"windows": windows, "waitUntil": wake}, indent=2))
@@ -276,8 +318,8 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         state_path = state_dir / "state.json"
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
-        identity = {"worktree": str(worktree), "issue": args.issue}
-        if state and any(state.get(key) != value for key, value in identity.items()):
+        identity = {"worktree": str(worktree), "issue": args.issue, "release_issue": args.release_issue}
+        if state and any(key in state and state[key] != value for key, value in identity.items()):
             raise ValueError("Stored runner belongs to another issue/worktree. Archive its state before starting a different task.")
         if state.get("status") == "blocked" and args.resume_blocked:
             state["status"] = "continue"
@@ -293,7 +335,8 @@ def main():
                 time.sleep(max(0, min(30, wake - time.time())))
 
         sleep_until(time.time() + args.delay)
-        for _ in range(args.max_turns):
+        turns = itertools.count() if args.max_turns == 0 else range(args.max_turns)
+        for _ in turns:
             while not stop.exists():
                 if args.no_quota_monitor:
                     break
@@ -308,7 +351,8 @@ def main():
             role = choose_role(state, bool(args.review_model), bool(args.routine_model), args.review_every, bool(args.complex_model))
             model = {"coding": args.model, "routine": args.routine_model, "complex": args.complex_model, "review": args.review_model}[role]
             print(f"Starting {role} unit for {args.issue} using {model or 'CLI default'}.", flush=True)
-            result = execute_unit(args.codex, worktree, state_dir, state, args.issue, model, role, bool(args.review_model))
+            result = execute_unit(args.codex, worktree, state_dir, state, args.issue, args.release_issue,
+                                  model, role, bool(args.review_model))
             if result is None:
                 if args.no_quota_monitor:
                     raise RuntimeError(f"Worker failed. Quota monitoring is disabled; inspect logs in {state_dir} before resuming.")

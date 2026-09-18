@@ -32,11 +32,12 @@ credits, consume reset credits, or switch accounts/models to bypass limits.
 # Metadata only: no model invocation.
 python scripts/quota_runner.py --check --quota-window primary
 
-# Run from an existing dedicated worktree, until this issue is done or blocked.
-python scripts/quota_runner.py --worktree "$PWD" --issue sj-kfw \
+# Run the full release from an existing dedicated worktree. A zero turn ceiling
+# continues until completion, a release-wide external block, STOP, or an error.
+python scripts/quota_runner.py --worktree "$PWD" --issue sj-dcr --release-issue sj-5nz \
   --model gpt-5.6-terra --routine-model gpt-5.6-luna \
   --complex-model gpt-5.6-sol --review-model gpt-6-astra \
-  --review-every 4 --no-quota-monitor
+  --review-every 1 --max-turns 0 --no-quota-monitor
 ```
 
 Terra is the default coding worker. Sol handles explicitly routed complex coding,
@@ -48,11 +49,29 @@ architectural work stays with the main coder or reviewer. Workers run sequential
 in the same dedicated worktree, with separate coding/routine session identities.
 
 With `--review-model`, Astra runs an independent fresh-session review initially,
-when a worker requests milestone review, after at most four implementation units,
-and before accepting completion. A worker's `done` becomes a pending completion
-review. Findings are recorded in Beads and routed back to coding; only a review
-can confirm completion. Reviewers inspect code/tests and change only review
-bookkeeping. Missing essential access or user decisions still stop the runner.
+after every implementation unit by default (`--review-every 1`), when a worker
+requests milestone review, and before accepting completion. A worker's `done`
+becomes a pending completion review. Findings are recorded in Beads and routed
+back to coding; only a review can confirm completion. Reviewers inspect actual
+code, diffs, tests, and Beads acceptance criteria rather than summaries, and
+change only review bookkeeping. A review routes to coding after its result, so
+the supervisor does not loop through review bookkeeping.
+
+The coordinator issue and the release epic are separate arguments. The runner
+authorizes work on the configured release epic and all of its Beads descendants,
+so it can complete independent release work after a feature is externally
+blocked. A worker must record that blocker, evidence, and follow-up on the
+affected feature's Bead, then return an independent next task with
+`release_progress_possible: true`. The runner records the checkpoint and routes
+it through Astra before continuing. It stops as `blocked` only when the worker
+has inspected the release scope and found no meaningful independent progress,
+and Astra has reviewed that terminal claim. Every structured worker result must
+state this boolean: it is `true` for ordinary progress and feature-level blocks,
+and may be `false` only for the release-wide impasse candidate.
+External macOS runtime validation, translation licensing/permissions, and every
+other release acceptance requirement remain requirements; a blocker must not be
+resolved by weakening or deleting one. Helpful additions must be recorded in
+Beads and do not authorize sync, E2EE, accounts, sharing, or mobile scope.
 Use `--resume-blocked` to explicitly retry a stopped investigation; this preserves
 the prior checkpoint and session IDs. It never reopens completed work. Failed
 tests and installable missing tools should route to investigation rather than
@@ -71,9 +90,10 @@ runner instances, but cannot lock out ordinary editors or other Codex sessions.
 
 Worker results are structured as `continue`, `done`, or `blocked`. Every unit is
 instructed to update Beads, verify, commit, and push. The default invocation ceiling
-is 50 units; it stops earlier on completion, missing essential input, or errors.
-Only the selected issue is authorized by a run; finishing it does not silently
-start unrelated work. Change the issue deliberately for a broader objective.
+is 50 units; it stops earlier on completion, a release-wide missing essential
+input/access, or errors. `--max-turns 0` removes that ceiling for a deliberately
+supervised full-release run. Only the selected release scope is authorized by a
+run; finishing it does not silently start unrelated work.
 
 State and private logs are stored under the Git common directory's `quota-runner/`
 folder, outside tracked source. Logs may contain development tool output. To stop
