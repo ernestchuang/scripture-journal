@@ -196,7 +196,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       const version = await api.importPlanDefinitionJson(submitted);
       if (epoch !== importEpoch.current) return;
       setImported(version);
-      setCustomPlanJson('');
+      setCustomPlanJson(current => current === submitted ? '' : current);
     } catch (error) {
       if (epoch === importEpoch.current) setImportError(`Could not import custom plan: ${String(error)}`);
     } finally {

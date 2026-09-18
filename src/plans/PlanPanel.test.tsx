@@ -98,6 +98,30 @@ describe('retained plan panel', () => {
     view.unmount();
   });
 
+  it('does not clear newer unsent JSON when an earlier import succeeds', async () => {
+    let resolveImport!: (value: typeof importedPlan) => void;
+    const plans = api();
+    vi.mocked(plans.importPlanDefinitionJson)
+      .mockImplementationOnce(() => new Promise(resolve => { resolveImport = resolve; }))
+      .mockResolvedValueOnce({ ...importedPlan, id: 'custom-version-2', definition: { ...importedPlan.definition, name: 'Imported replacement' } });
+    render(<PlanPanel api={plans} />);
+    const input = screen.getByLabelText('Custom plan JSON') as HTMLTextAreaElement;
+    const firstDocument = '{"schemaVersion":1,"name":"First"}';
+    const newerDocument = '{"schemaVersion":1,"name":"Newer unsent"}';
+    fireEvent.change(input, { target: { value: firstDocument } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    fireEvent.change(input, { target: { value: newerDocument } });
+    await act(async () => { resolveImport(importedPlan); });
+
+    expect(screen.getByText('Imported streams')).toBeTruthy();
+    expect(input.value).toBe(newerDocument);
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    expect(await screen.findByText('Imported replacement')).toBeTruthy();
+    expect(plans.importPlanDefinitionJson).toHaveBeenNthCalledWith(1, firstDocument);
+    expect(plans.importPlanDefinitionJson).toHaveBeenNthCalledWith(2, newerDocument);
+    expect(input.value).toBe('');
+  });
+
   it('discards a late import result after unmount', async () => {
     let resolveImport!: (value: typeof importedPlan) => void;
     const plans = api();
