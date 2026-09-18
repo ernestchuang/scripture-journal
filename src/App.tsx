@@ -4,12 +4,14 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { Passage } from './domain';
 import { isDesktop, nativeJournal } from './platform/journal';
 import { browserJournal } from './platform/browserJournal';
+import { useAppearance, type Appearance } from './platform/appearance';
 import { Reader } from './scripture/Reader';
 import { JournalWorkspace, type JournalPersistenceState } from './journal/JournalWorkspace';
 
 const journal = isDesktop ? nativeJournal : browserJournal;
 
 export function App() {
+  const appearance = useAppearance();
   const [selection, setSelection] = useState<Passage>({ book: 43, chapter: 1 });
   const [reflectRequest, setReflectRequest] = useState(0);
   const [pane, setPane] = useState<'read' | 'write'>('read');
@@ -66,6 +68,11 @@ export function App() {
           <span><strong>Scripture Journal</strong><small>A place to read &amp; reflect</small></span>
         </a>
         <div className="header-actions">
+          <label className="theme-control">Appearance
+            <select value={appearance.preference} onChange={event => appearance.change(event.target.value as Appearance)}>
+              <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
+            </select>
+          </label>
           <span className="local-label"><i aria-hidden="true" /> {isDesktop ? 'Local journal' : 'Browser preview'}</span>
           <button className="export-button" onClick={() => void exportJournal()}
             disabled={!isDesktop || exporting}
@@ -74,6 +81,7 @@ export function App() {
           </button>
         </div>
       </header>
+      {appearance.error && <div className="app-notice" role="status">{appearance.error}</div>}
 
       {!isDesktop && <div className="preview-note" role="note">
         Preview: writing stays in this browser. The desktop app saves to its own local journal database.

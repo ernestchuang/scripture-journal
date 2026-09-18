@@ -1,5 +1,5 @@
 # Local application data and secrets never belong in the source repository.
-node_modules/
+node_modules
 dist/
 target/
 .env

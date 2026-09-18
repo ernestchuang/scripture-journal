@@ -88,3 +88,10 @@ Use synthetic fixtures, not personal journals. Read-only import fixtures should
 cover the original application's known formats without copying private content.
 Record external source URLs and access dates when selecting translation providers
 or verifying distribution permissions.
+
+Prefer headless browser tests for ordinary UI work. Visible native smoke tests
+temporarily focus/fullscreen a test window: announce these before launching them
+in an interactive session and avoid unattended desktop interruptions. The debug
+smoke script forces dark mode in its isolated profile via
+`SCRIPTURE_JOURNAL_SMOKE_DARK=1`; release builds ignore this override. Do not change
+the user's desktop appearance to make application tests pass.

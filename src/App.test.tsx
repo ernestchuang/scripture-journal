@@ -8,7 +8,10 @@ const native = vi.hoisted(() => ({
   onCloseRequested: vi.fn(),
   listEntries: vi.fn(),
   saveEntry: vi.fn(),
+  invoke: vi.fn(),
 }));
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({ onCloseRequested: native.onCloseRequested }),
@@ -37,6 +40,13 @@ const savedEntry = (request: SaveRequest): Entry => ({
 });
 
 beforeEach(() => {
+  native.invoke.mockReset().mockResolvedValue(undefined);
+  // index.html's early bootstrap is exercised by the browser tests.
+  window.scriptureAppearance = {
+    getPreference: () => 'system',
+    getResolved: () => 'dark',
+    setPreference: () => true,
+  };
   native.closeHandler = undefined;
   native.onCloseRequested.mockReset().mockImplementation(async handler => {
     native.closeHandler = handler;
@@ -49,12 +59,22 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('native application close lifecycle', () => {
+  it('clears a transient native appearance error after a later successful update', async () => {
+    native.invoke.mockRejectedValueOnce(new Error('Temporary native failure'));
+    render(<App />);
+    expect(await screen.findByText('The window appearance could not be updated.')).toBeTruthy();
+    await act(async () => { window.dispatchEvent(new Event('appearancechange')); });
+    await waitFor(() => expect(screen.queryByText('The window appearance could not be updated.')).toBeNull());
+    expect(native.invoke).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps close pending until the current editor generation is saved unfinished', async () => {
     let release: ((entry: Entry) => void) | undefined;
     native.saveEntry.mockImplementation((request: SaveRequest) => new Promise<Entry>(resolve => {
       release = resolve;
     }));
     render(<App />);
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith('apply_appearance', { theme: 'dark' }));
     await waitFor(() => expect(native.closeHandler).toBeDefined());
     fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
     const editor = await screen.findByLabelText(/Reflection Markdown/);

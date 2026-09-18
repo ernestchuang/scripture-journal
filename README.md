@@ -27,6 +27,13 @@ app uses SQLite in its own application-data directory, identified by
 journal. Drafts autosave after 600 ms of inactivity. Finish makes the current
 version eligible for export. Restoring history creates a new unfinished revision.
 
+Use **Appearance** in the header to select **System**, **Light**, or **Dark**.
+System follows the device appearance; explicit choices persist on this device.
+The app initializes its colors before showing the native window. Browser tests
+run headlessly with a dark default, and the isolated native debug smoke requests
+dark mode. Native smoke automation still temporarily focuses its test window;
+run it deliberately when it will not interrupt your work.
+
 KJV loads online on demand and remains in memory for the session. Persistent
 offline scripture, the other translations, reading plans, full backup/restore,
 legacy import, deletion, and automatic incremental export are not implemented in

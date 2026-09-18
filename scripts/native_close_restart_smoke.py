@@ -255,6 +255,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="scripture-journal-native-smoke-") as temporary:
         root = Path(temporary)
         environment = os.environ | {
+            "SCRIPTURE_JOURNAL_SMOKE_DARK": "1",
             "XDG_DATA_HOME": str(root / "data"),
             "XDG_CONFIG_HOME": str(root / "config"),
             "XDG_CACHE_HOME": str(root / "cache"),

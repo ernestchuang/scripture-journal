@@ -12,6 +12,38 @@ struct AppState {
     export_directories: Mutex<HashSet<PathBuf>>,
 }
 
+#[tauri::command]
+fn startup_appearance() -> Option<&'static str> {
+    // Isolated debug smoke tests must not flash a bright window on the user's desktop.
+    // Release builds never read this test-only override.
+    if cfg!(debug_assertions) && std::env::var("SCRIPTURE_JOURNAL_SMOKE_DARK").as_deref() == Ok("1")
+    {
+        Some("dark")
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
+fn apply_appearance(window: tauri::WebviewWindow, theme: String) -> Result<(), String> {
+    let (theme, color) = match theme.as_str() {
+        "dark" => (tauri::Theme::Dark, tauri::window::Color(29, 36, 32, 255)),
+        "light" => (
+            tauri::Theme::Light,
+            tauri::window::Color(245, 242, 234, 255),
+        ),
+        _ => return Err("Unknown appearance".into()),
+    };
+    let appearance = window
+        .set_background_color(Some(color))
+        .and_then(|_| window.set_theme(Some(theme)));
+    // A platform-specific decoration error must not strand an invisible window.
+    if !window.is_visible().map_err(|e| e.to_string())? {
+        window.show().map_err(|e| e.to_string())?;
+    }
+    appearance.map_err(|e| e.to_string())
+}
+
 async fn run_store<T, F>(store: Arc<Mutex<JournalStore>>, operation: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -140,7 +172,9 @@ pub fn run() {
             get_history,
             restore_revision,
             choose_export_directory,
-            export_journal
+            export_journal,
+            apply_appearance,
+            startup_appearance
         ])
         .run(tauri::generate_context!())
         .expect("Could not start Scripture Journal");

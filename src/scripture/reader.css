@@ -1,23 +1,25 @@
-.scripture-reader { display:flex; flex-direction:column; min-height:0; height:100%; background:#fbf8f0; color:#39372e; border:1px solid #e5decf; border-radius:16px; overflow:hidden; }
-.scripture-toolbar { padding:22px 26px 15px; border-bottom:1px solid #e5decf; }
-.scripture-eyebrow { font-size:.67rem; letter-spacing:.18em; color:#83785e; }
-.scripture-toolbar h2 { margin:5px 0 18px; font:normal 1.8rem Georgia,serif; }
+.scripture-reader { display:flex; flex-direction:column; min-height:0; height:100%; color:var(--ink); background:var(--paper); border:1px solid var(--line); border-radius:16px; overflow:hidden; }
+.scripture-toolbar { padding:22px 26px 15px; border-bottom:1px solid var(--line); }
+.scripture-eyebrow { font-size:.67rem; letter-spacing:.18em; color:var(--muted); }
+.scripture-toolbar h2 { margin:5px 0 18px; font:normal 1.8rem var(--serif); }
 .scripture-navigation { display:flex; flex-wrap:wrap; gap:10px; }
-.scripture-navigation label { display:flex; flex-direction:column; gap:5px; font-size:.72rem; color:#746c5c; }
-.scripture-navigation select { min-height:36px; max-width:180px; padding:5px 9px; background:#fffdf8; border:1px solid #d8cebd; border-radius:7px; color:#39372e; }
+.scripture-navigation label { display:flex; flex-direction:column; gap:5px; font-size:.72rem; color:var(--muted); }
+.scripture-navigation select { min-height:36px; max-width:180px; padding:5px 9px; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:7px; }
 .scripture-reader button { cursor:pointer; font:inherit; }
-.scripture-reflect { margin-top:14px; padding:9px 13px; color:#fffdf8; background:#55634c; border:0; border-radius:7px; }
-.scripture-toolbar details { margin-top:12px; max-width:65ch; font-size:.75rem; line-height:1.6; color:#766e5d; }
+.scripture-reflect { margin-top:14px; padding:9px 13px; color:var(--accent-contrast); background:var(--accent); border:0; border-radius:7px; }
+.scripture-reflect:hover:not(:disabled) { color:var(--accent-contrast); background:var(--accent-hover); }
+.scripture-toolbar details { margin-top:12px; max-width:65ch; font-size:.75rem; line-height:1.6; color:var(--muted); }
 .scripture-toolbar summary { cursor:pointer; }
 .scripture-scroll { flex:1; min-height:240px; overflow-y:auto; padding:18px clamp(20px,5vw,52px) 32px; scroll-behavior:auto; overflow-anchor:none; }
 .scripture-chapter { min-height:380px; padding:12px 0 35px; }
-.scripture-chapter h3 { font:normal 1.45rem Georgia,serif; color:#554f40; margin:12px 0 25px; }
-.scripture-verses { font:1.08rem/1.95 Georgia,'Times New Roman',serif; max-width:68ch; margin:auto; }
+.scripture-chapter h3 { font:normal 1.45rem var(--serif); color:var(--ink); margin:12px 0 25px; }
+.scripture-verses { font:1.08rem/1.95 var(--serif); max-width:68ch; margin:auto; }
 .scripture-verses p { margin:0 0 .7em; border-radius:4px; }
-.scripture-verses sup { color:#968768; font: .65rem system-ui,sans-serif; padding-right:4px; }
-.scripture-highlight { background:#f2e6bd; }
-.scripture-boundary { display:block; width:100%; padding:12px; color:#746a55; background:transparent; border:1px dashed #d5cab5; border-radius:7px; font-size:.8rem!important; }
-.scripture-attribution { margin-top:25px; font-size:.7rem; color:#8b806b; }
+.scripture-verses sup { color:var(--muted); font: .65rem system-ui,sans-serif; padding-right:4px; }
+.scripture-highlight { background:var(--selection); }
+.scripture-boundary { display:block; width:100%; padding:12px; color:var(--muted); background:transparent; border:1px dashed var(--line-strong); border-radius:7px; font-size:.8rem!important; }
+.scripture-boundary:hover:not(:disabled) { color:var(--ink); background:var(--surface-subtle); }
+.scripture-attribution { margin-top:25px; font-size:.7rem; color:var(--muted); }
 .scripture-attribution a { color:inherit; }
-.scripture-reader :focus-visible { outline:2px solid #697953; outline-offset:3px; }
+.scripture-reader :focus-visible { outline:2px solid var(--focus); outline-offset:3px; }
 @media(max-width:600px) { .scripture-toolbar { padding:16px; } .scripture-navigation select { max-width:150px; } }
