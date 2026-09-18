@@ -14,6 +14,7 @@ const native = vi.hoisted(() => ({
   activePlanAssignments: vi.fn(),
   planCompletionHistory: vi.fn(),
   registerFourStreamPlan: vi.fn(),
+  importPlanDefinitionJson: vi.fn(),
   enrollInChapterStreams: vi.fn(),
   completePlanStream: vi.fn(),
   undoPlanCompletion: vi.fn(),
@@ -41,6 +42,7 @@ vi.mock('./platform/plans', () => ({
     activePlanAssignments: native.activePlanAssignments,
     planCompletionHistory: native.planCompletionHistory,
     registerFourStreamPlan: native.registerFourStreamPlan,
+    importPlanDefinitionJson: native.importPlanDefinitionJson,
     enrollInChapterStreams: native.enrollInChapterStreams,
     completePlanStream: native.completePlanStream,
     undoPlanCompletion: native.undoPlanCompletion,
@@ -83,6 +85,7 @@ beforeEach(() => {
   native.activePlanAssignments.mockReset();
   native.planCompletionHistory.mockReset().mockResolvedValue([]);
   native.registerFourStreamPlan.mockReset();
+  native.importPlanDefinitionJson.mockReset();
   native.enrollInChapterStreams.mockReset();
   native.completePlanStream.mockReset();
   native.undoPlanCompletion.mockReset();
@@ -224,6 +227,26 @@ describe('native application close lifecycle', () => {
     expect(native.saveEntry).toHaveBeenCalledTimes(1);
     expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while enrolling' } });
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this while enrolling');
+  });
+
+  it('preserves and autosaves dirty writing while explicitly importing a custom plan', async () => {
+    const imported = { id: 'custom-version', planId: 'custom-plan', version: 1, createdAt: '2026-09-18T00:00:00Z', definition: { schemaVersion: 1, name: 'Imported streams', schedule: { kind: 'chapterStreams', streams: [] } } };
+    native.importPlanDefinitionJson.mockResolvedValue(imported);
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    const input = screen.getByLabelText('Custom plan JSON');
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Keep this while importing' } });
+    fireEvent.change(input, { target: { value: '{"schemaVersion":1}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(native.importPlanDefinitionJson).toHaveBeenCalledWith('{"schemaVersion":1}');
+    expect(native.saveEntry).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while importing' } });
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this while importing');
   });
 
   it('preserves and autosaves dirty writing while explicitly completing a stream', async () => {

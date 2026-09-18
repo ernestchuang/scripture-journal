@@ -14,7 +14,7 @@ type PlanHistory =
   | { kind: 'ready'; items: PlanCompletionHistoryItem[] };
 type ReadyPlanHistory = Extract<PlanHistory, { kind: 'ready' }>;
 
-type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'>;
+type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'>;
 
 export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [enrollments, setEnrollments] = useState<PlanEnrollment[] | null>(null);
@@ -35,11 +35,16 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [undoingId, setUndoingId] = useState('');
   const [undoMessage, setUndoMessage] = useState('');
   const [undoRefreshFailed, setUndoRefreshFailed] = useState(false);
+  const [customPlanJson, setCustomPlanJson] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState('');
+  const [imported, setImported] = useState<PlanDefinitionVersion | null>(null);
   const detailEpoch = useRef(0);
   const historyEpoch = useRef(0);
   const actionEpoch = useRef(0);
   const completionEpoch = useRef(0);
   const undoEpoch = useRef(0);
+  const importEpoch = useRef(0);
   const discoveryEpoch = useRef(0);
   const confirmedEnrollment = useRef<PlanEnrollment | null>(null);
   const confirmedCompletions = useRef(new Map<string, string>());
@@ -53,6 +58,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     actionEpoch.current += 1;
     completionEpoch.current += 1;
     undoEpoch.current += 1;
+    importEpoch.current += 1;
     confirmedEnrollment.current = null;
     confirmedCompletions.current.clear();
     confirmedUndos.current.clear();
@@ -181,6 +187,23 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     }
   }
 
+  async function importCustomPlan() {
+    if (!api || importing || !customPlanJson.trim()) return;
+    const epoch = ++importEpoch.current;
+    const submitted = customPlanJson;
+    setImporting(true); setImportError('');
+    try {
+      const version = await api.importPlanDefinitionJson(submitted);
+      if (epoch !== importEpoch.current) return;
+      setImported(version);
+      setCustomPlanJson('');
+    } catch (error) {
+      if (epoch === importEpoch.current) setImportError(`Could not import custom plan: ${String(error)}`);
+    } finally {
+      if (epoch === importEpoch.current) setImporting(false);
+    }
+  }
+
   async function complete(assignment: PlanAssignment, definition: PlanDefinitionVersion) {
     if (!api || completingId || undoingId) return;
     const epoch = ++completionEpoch.current;
@@ -281,6 +304,14 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
         <button disabled={enrolling || choices.length !== 4} onClick={() => void enroll()}>{enrolling ? 'Creating enrollment…' : 'Create enrollment'}</button>
       </>}
       {offerError && <div role="alert" className="plan-error">{offerError}</div>}
+    </section>
+    <section className="plan-import" aria-label="Import custom plan">
+      <h3>Import custom plan</h3>
+      <p>Paste a plan-definition JSON document. Import creates a new plan identity and does not alter retained enrollments.</p>
+      <label>Custom plan JSON<textarea value={customPlanJson} onChange={event => setCustomPlanJson(event.target.value)} placeholder='{"schemaVersion":1,...}' spellCheck={false} /></label>
+      <button disabled={importing || !customPlanJson.trim()} onClick={() => void importCustomPlan()}>{importing ? 'Importing plan…' : 'Import custom plan'}</button>
+      {importError && <div role="alert" className="plan-error">{importError}</div>}
+      {imported && <div role="status" className="plan-imported">Imported custom plan <strong>{imported.definition.name}</strong> as a new plan identity. Retained enrollments were not changed.<small>Definition version {imported.id}</small></div>}
     </section>
     {enrollments?.length === 0 && <p>No retained plan enrollments yet.</p>}
     {enrollments && enrollments.length > 0 && <>

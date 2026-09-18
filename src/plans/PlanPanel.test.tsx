@@ -19,12 +19,14 @@ const fourStream = {
 };
 const created: PlanEnrollment = { id: 'enrollment-new', definitionVersionId: fourStream.id, createdAt: '2026-09-18T00:00:02Z' };
 const history = (id: string, enrollmentId = first.id, undone = false) => ({ id, assignmentId: 'assignment-1', enrollmentId, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, completedAt: '2026-09-18T00:00:03Z', undone });
-const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
+const importedPlan = { id: 'custom-version', planId: 'custom-plan', version: 1, createdAt: first.createdAt, definition: { schemaVersion: 1, name: 'Imported streams', schedule: { kind: 'chapterStreams' as const, streams: [] } } };
+const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
   activePlanAssignments: vi.fn(async id => id === first.id ? [{ id: 'assignment-1', enrollmentId: id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' }] : []),
   planCompletionHistory: vi.fn(async () => []),
   registerFourStreamPlan: vi.fn(async () => fourStream),
+  importPlanDefinitionJson: vi.fn(async () => importedPlan),
   enrollInChapterStreams: vi.fn(async () => created),
   completePlanStream: vi.fn(async request => ({ id: 'completion-1', assignmentId: request.expectedAssignmentId, completedAt: '2026-09-18T00:00:03Z' })),
   undoPlanCompletion: vi.fn(async () => undefined),
@@ -44,6 +46,68 @@ describe('retained plan panel', () => {
     const plans = api(); vi.mocked(plans.listPlanEnrollments).mockResolvedValueOnce([]);
     render(<PlanPanel api={plans} />);
     expect(await screen.findByText('No retained plan enrollments yet.')).toBeTruthy();
+  });
+
+  it('imports exact custom JSON only through an explicit action and retains the confirmation', async () => {
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments).mockRejectedValueOnce(new Error('discovery offline'));
+    render(<PlanPanel api={plans} />);
+    const input = screen.getByLabelText('Custom plan JSON');
+    const button = screen.getByRole('button', { name: 'Import custom plan' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.change(input, { target: { value: ' {"schemaVersion":1} ' } });
+    fireEvent.click(button);
+    expect(plans.importPlanDefinitionJson).toHaveBeenCalledWith(' {"schemaVersion":1} ');
+    expect(await screen.findByText('Imported streams')).toBeTruthy();
+    expect((input as HTMLTextAreaElement).value).toBe('');
+    expect(await screen.findByText(/Could not load retained plans: Error: discovery offline/)).toBeTruthy();
+    expect(screen.getByText('Imported streams')).toBeTruthy();
+  });
+
+  it('retains custom JSON after a native validation failure and permits a corrected retry', async () => {
+    const plans = api();
+    vi.mocked(plans.importPlanDefinitionJson).mockRejectedValueOnce(new Error('Invalid plan definition JSON')).mockResolvedValueOnce(importedPlan);
+    render(<PlanPanel api={plans} />);
+    const input = screen.getByLabelText('Custom plan JSON') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: '{' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    expect(await screen.findByText(/Could not import custom plan: Error: Invalid plan definition JSON/)).toBeTruthy();
+    expect(input.value).toBe('{');
+    fireEvent.change(input, { target: { value: '{"schemaVersion":1}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    expect(await screen.findByText('Imported streams')).toBeTruthy();
+    expect(plans.importPlanDefinitionJson).toHaveBeenCalledTimes(2);
+  });
+
+  it('suppresses duplicate pending imports and preserves a newer selection', async () => {
+    let resolveImport!: (value: typeof importedPlan) => void;
+    const plans = api();
+    vi.mocked(plans.importPlanDefinitionJson).mockImplementationOnce(() => new Promise(resolve => { resolveImport = resolve; }));
+    const view = render(<PlanPanel api={plans} />);
+    const select = await screen.findByLabelText('Retained enrollment');
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"schemaVersion":1}' } });
+    const button = screen.getByRole('button', { name: 'Import custom plan' });
+    fireEvent.click(button); fireEvent.click(button);
+    expect(plans.importPlanDefinitionJson).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Importing plan…' })).toBeTruthy();
+    fireEvent.change(select, { target: { value: second.id } });
+    expect(await screen.findByText('Second plan')).toBeTruthy();
+    await act(async () => { resolveImport(importedPlan); });
+    expect(screen.getByText('Imported streams')).toBeTruthy();
+    expect((select as HTMLSelectElement).value).toBe(second.id);
+    view.unmount();
+  });
+
+  it('discards a late import result after unmount', async () => {
+    let resolveImport!: (value: typeof importedPlan) => void;
+    const plans = api();
+    vi.mocked(plans.importPlanDefinitionJson).mockImplementationOnce(() => new Promise(resolve => { resolveImport = resolve; }));
+    const view = render(<PlanPanel api={plans} />);
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"schemaVersion":1}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    view.unmount();
+    await act(async () => { resolveImport(importedPlan); });
+    expect(view.container.textContent).toBe('');
   });
 
   it('shows retained completion identity, passage, timestamp, and undone state', async () => {
