@@ -223,6 +223,27 @@ describe('native application close lifecycle', () => {
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this while browsing definitions');
   });
 
+  it('preserves and autosaves dirty writing while exporting a selected retained definition', async () => {
+    native.listLatestPlanDefinitionVersions.mockResolvedValue([
+      { id: 'definition-1', planId: 'plan-1', version: 1, createdAt: '2026-09-18T00:00:00Z', definition: { schemaVersion: 1, name: 'Retained export', schedule: { kind: 'explicitSchedule', days: [{ day: 1, passages: [{ book: 43, chapter: 3 }] }] } } },
+    ]);
+    native.exportPlanDefinitionJson.mockResolvedValue('{"schemaVersion":1}');
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    const exportButton = await screen.findByRole('button', { name: 'Export retained definition JSON' });
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Keep this while exporting a retained definition' } });
+    fireEvent.click(exportButton);
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(native.exportPlanDefinitionJson).toHaveBeenCalledWith('definition-1');
+    expect(native.saveEntry).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while exporting a retained definition' } });
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this while exporting a retained definition');
+  });
+
   it('preserves and autosaves dirty writing while explicitly enrolling in four streams', async () => {
     const version = {
       id: 'four-version', planId: 'four-plan', version: 1, createdAt: '2026-09-18T00:00:00Z',

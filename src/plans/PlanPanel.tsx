@@ -50,6 +50,9 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [exportingVersionId, setExportingVersionId] = useState('');
   const [exportError, setExportError] = useState<{ versionId: string; message: string } | null>(null);
   const [exportedJson, setExportedJson] = useState<{ versionId: string; json: string } | null>(null);
+  const [retainedExportingVersionId, setRetainedExportingVersionId] = useState('');
+  const [retainedExportError, setRetainedExportError] = useState<{ versionId: string; message: string } | null>(null);
+  const [retainedExportedJson, setRetainedExportedJson] = useState<{ versionId: string; json: string } | null>(null);
   const detailEpoch = useRef(0);
   const historyEpoch = useRef(0);
   const actionEpoch = useRef(0);
@@ -58,6 +61,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const importEpoch = useRef(0);
   const importedEnrollmentEpoch = useRef(0);
   const exportEpoch = useRef(0);
+  const retainedExportEpoch = useRef(0);
   const discoveryEpoch = useRef(0);
   const definitionDiscoveryEpoch = useRef(0);
   const confirmedEnrollment = useRef<PlanEnrollment | null>(null);
@@ -66,7 +70,9 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const readyDetails = useRef(new Map<string, ReadyPlanDetails>());
   const readyHistory = useRef(new Map<string, ReadyPlanHistory>());
   const selectedIdRef = useRef(selectedId);
+  const selectedDefinitionIdRef = useRef(selectedDefinitionId);
   selectedIdRef.current = selectedId;
+  selectedDefinitionIdRef.current = selectedDefinitionId;
 
   useEffect(() => () => {
     actionEpoch.current += 1;
@@ -75,6 +81,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     importEpoch.current += 1;
     importedEnrollmentEpoch.current += 1;
     exportEpoch.current += 1;
+    retainedExportEpoch.current += 1;
     definitionDiscoveryEpoch.current += 1;
     confirmedEnrollment.current = null;
     confirmedCompletions.current.clear();
@@ -82,6 +89,13 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     readyDetails.current.clear();
     readyHistory.current.clear();
   }, [api]);
+
+  useEffect(() => {
+    retainedExportEpoch.current += 1;
+    setRetainedExportingVersionId('');
+    setRetainedExportError(null);
+    setRetainedExportedJson(null);
+  }, [api, selectedDefinitionId]);
 
   useEffect(() => {
     exportEpoch.current += 1;
@@ -300,6 +314,21 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     }
   }
 
+  async function exportSelectedRetainedDefinition(definition: PlanDefinitionVersion) {
+    if (!api || retainedExportingVersionId) return;
+    const epoch = ++retainedExportEpoch.current;
+    setRetainedExportingVersionId(definition.id); setRetainedExportError(null);
+    try {
+      const json = await api.exportPlanDefinitionJson(definition.id);
+      if (epoch !== retainedExportEpoch.current || selectedDefinitionIdRef.current !== definition.id) return;
+      setRetainedExportedJson({ versionId: definition.id, json });
+    } catch (error) {
+      if (epoch === retainedExportEpoch.current && selectedDefinitionIdRef.current === definition.id) setRetainedExportError({ versionId: definition.id, message: `Could not export retained plan JSON: ${String(error)}` });
+    } finally {
+      if (epoch === retainedExportEpoch.current && selectedDefinitionIdRef.current === definition.id) setRetainedExportingVersionId('');
+    }
+  }
+
   async function complete(assignment: PlanAssignment, definition: PlanDefinitionVersion) {
     if (!api || completingId || undoingId) return;
     const epoch = ++completionEpoch.current;
@@ -426,7 +455,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       {definitionListError && <div role="alert" className="plan-error">Could not load retained plan definitions: {definitionListError}<button onClick={() => setDefinitionListAttempt(value => value + 1)}>Retry retained definitions</button></div>}
       {retainedDefinitions?.length === 0 && !definitionListError && <p>No retained plan definitions yet.</p>}
       {retainedDefinitions && retainedDefinitions.length > 0 && <><label>Retained plan definition<select value={selectedDefinitionId} onChange={event => setSelectedDefinitionId(event.target.value)}>{retainedDefinitions.map(definition => <option key={definition.id} value={definition.id}>{definition.definition.name} · plan {definition.planId}</option>)}</select></label>
-        {selectedDefinition && <dl><dt>Name</dt><dd>{selectedDefinition.definition.name}</dd><dt>Plan identity</dt><dd>{selectedDefinition.planId}</dd><dt>Definition version</dt><dd>{selectedDefinition.version}</dd><dt>Schedule kind</dt><dd>{selectedDefinition.definition.schedule.kind === 'chapterStreams' ? 'Chapter streams' : 'Explicit schedule'}</dd></dl>}
+        {selectedDefinition && <><dl><dt>Name</dt><dd>{selectedDefinition.definition.name}</dd><dt>Plan identity</dt><dd>{selectedDefinition.planId}</dd><dt>Definition version</dt><dd>{selectedDefinition.version}</dd><dt>Schedule kind</dt><dd>{selectedDefinition.definition.schedule.kind === 'chapterStreams' ? 'Chapter streams' : 'Explicit schedule'}</dd></dl><section className="plan-export" aria-label="Export selected retained definition"><p>Export this selected retained immutable definition as portable JSON. This does not import, enroll, or modify a plan.</p><button disabled={!!retainedExportingVersionId} onClick={() => void exportSelectedRetainedDefinition(selectedDefinition)}>{retainedExportingVersionId === selectedDefinition.id ? 'Exporting retained definition JSON…' : retainedExportError?.versionId === selectedDefinition.id ? 'Retry retained definition JSON' : 'Export retained definition JSON'}</button>{retainedExportError?.versionId === selectedDefinition.id && <div role="alert" className="plan-error">{retainedExportError.message}</div>}{retainedExportedJson?.versionId === selectedDefinition.id && <label>Exported retained plan JSON<textarea readOnly value={retainedExportedJson.json} spellCheck={false} /></label>}</section></>}
       </>}
     </section>
     {enrollments?.length === 0 && <p>No retained plan enrollments yet.</p>}

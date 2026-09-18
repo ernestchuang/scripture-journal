@@ -112,6 +112,85 @@ describe('retained plan panel', () => {
     expect(plans.listPlanEnrollments).toHaveBeenCalledTimes(2);
   });
 
+  it('exports the exact selected retained version for duplicate names and both schedule kinds', async () => {
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedDefinition, retainedExplicit]);
+    render(<PlanPanel api={plans} />);
+    const select = await screen.findByLabelText('Retained plan definition');
+    fireEvent.click(screen.getByRole('button', { name: 'Export retained definition JSON' }));
+    expect((await screen.findByLabelText('Exported retained plan JSON') as HTMLTextAreaElement).value).toBe('{"versionId":"retained-version-1"}');
+    expect(plans.exportPlanDefinitionJson).toHaveBeenLastCalledWith(retainedDefinition.id);
+    fireEvent.change(select, { target: { value: retainedExplicit.id } });
+    expect(screen.queryByLabelText('Exported retained plan JSON')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Export retained definition JSON' }));
+    expect((await screen.findByLabelText('Exported retained plan JSON') as HTMLTextAreaElement).value).toBe('{"versionId":"retained-version-2"}');
+    expect(plans.exportPlanDefinitionJson).toHaveBeenLastCalledWith(retainedExplicit.id);
+    expect(plans.importPlanDefinitionJson).not.toHaveBeenCalled();
+    expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
+  });
+
+  it('shows a retained-definition export failure and permits a retry without changing other plan state', async () => {
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedExplicit]);
+    vi.mocked(plans.exportPlanDefinitionJson).mockRejectedValueOnce(new Error('export offline')).mockResolvedValueOnce('{"recovered":true}');
+    render(<PlanPanel api={plans} />);
+    await screen.findByLabelText('Retained plan definition');
+    fireEvent.click(screen.getByRole('button', { name: 'Export retained definition JSON' }));
+    expect(await screen.findByText(/Could not export retained plan JSON: Error: export offline/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry retained definition JSON' }));
+    expect((await screen.findByLabelText('Exported retained plan JSON') as HTMLTextAreaElement).value).toBe('{"recovered":true}');
+    expect(plans.listPlanEnrollments).toHaveBeenCalledTimes(1);
+    expect(plans.registerFourStreamPlan).not.toHaveBeenCalled();
+    expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
+  });
+
+  it('keeps retained-definition export state independent from an imported-definition export', async () => {
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedDefinition, retainedExplicit]);
+    render(<PlanPanel api={plans} />);
+    await screen.findByLabelText('Retained plan definition');
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"schemaVersion":1}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    await screen.findByText('Imported streams');
+    fireEvent.click(screen.getByRole('button', { name: 'Export imported version JSON' }));
+    expect((await screen.findByLabelText('Exported imported plan JSON') as HTMLTextAreaElement).value).toBe('{"versionId":"custom-version"}');
+    fireEvent.click(screen.getByRole('button', { name: 'Export retained definition JSON' }));
+    expect((await screen.findByLabelText('Exported retained plan JSON') as HTMLTextAreaElement).value).toBe('{"versionId":"retained-version-1"}');
+    fireEvent.change(screen.getByLabelText('Retained plan definition'), { target: { value: retainedExplicit.id } });
+    expect(screen.queryByLabelText('Exported retained plan JSON')).toBeNull();
+    expect((screen.getByLabelText('Exported imported plan JSON') as HTMLTextAreaElement).value).toBe('{"versionId":"custom-version"}');
+  });
+
+  it('discards deferred retained-definition export results after selection, API replacement, and unmount', async () => {
+    let resolveFirst!: (value: string) => void;
+    let rejectSecond!: (reason: unknown) => void;
+    let resolveThird!: (value: string) => void;
+    const oldApi = api();
+    const currentApi = api();
+    vi.mocked(oldApi.listLatestPlanDefinitionVersions).mockResolvedValue([retainedDefinition, retainedExplicit]);
+    vi.mocked(oldApi.exportPlanDefinitionJson)
+      .mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectSecond = reject; }));
+    vi.mocked(currentApi.listLatestPlanDefinitionVersions).mockResolvedValue([retainedDefinition]);
+    vi.mocked(currentApi.exportPlanDefinitionJson).mockImplementationOnce(() => new Promise(resolve => { resolveThird = resolve; }));
+    const view = render(<PlanPanel api={oldApi} />);
+    const select = await screen.findByLabelText('Retained plan definition');
+    fireEvent.click(screen.getByRole('button', { name: 'Export retained definition JSON' }));
+    fireEvent.change(select, { target: { value: retainedExplicit.id } });
+    await act(async () => { resolveFirst('{"stale":"first"}'); });
+    expect(screen.queryByLabelText('Exported retained plan JSON')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Export retained definition JSON' }));
+    fireEvent.change(select, { target: { value: retainedDefinition.id } });
+    await act(async () => { rejectSecond(new Error('stale rejection')); });
+    expect(screen.queryByText(/stale rejection/)).toBeNull();
+    view.rerender(<PlanPanel api={currentApi} />);
+    await screen.findByLabelText('Retained plan definition');
+    fireEvent.click(screen.getByRole('button', { name: 'Export retained definition JSON' }));
+    view.unmount();
+    await act(async () => { resolveThird('{"late":"replacement"}'); });
+    expect(view.container.textContent).toBe('');
+  });
+
   it('shows core-ordered enrollments and read-only current assignments', async () => {
     const plans = api(); render(<PlanPanel api={plans} />);
     expect(await screen.findByText('First plan')).toBeTruthy();
