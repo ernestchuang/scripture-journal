@@ -820,7 +820,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       <h3>M’Cheyne’s Daily Bible Readings</h3>
       <p>Register the retained 365-day calendar definition. Registration does not enroll you or schedule readings.</p>
       <button disabled={registeringMcheyne} onClick={() => void registerMcheyne()}>{registeringMcheyne ? 'Registering M’Cheyne plan…' : mcheyneResult?.message ? 'Retry M’Cheyne registration' : 'Register M’Cheyne plan'}</button>
-      {mcheyneResult?.version && <p role="status">Registered M’Cheyne definition version {mcheyneResult.version.version} for plan {mcheyneResult.version.planId}. Select the retained definition above, then explicitly create a calendar enrollment when ready. Registration does not enroll you or schedule readings.</p>}
+      {mcheyneResult?.version && <p role="status">Registered M’Cheyne definition version {mcheyneResult.version.version} for plan {mcheyneResult.version.planId}. Select the retained definition below, then explicitly create a calendar enrollment when ready. Registration does not enroll you or schedule readings.</p>}
       {mcheyneResult?.message && <div role="alert" className="plan-error">{mcheyneResult.message}</div>}
     </section>
     <section className="plan-import" aria-label="Import custom plan">
