@@ -406,10 +406,18 @@ async fn enroll_in_calendar_for_store(
     store: Arc<Mutex<JournalStore>>,
     request: CalendarEnrollmentRequest,
 ) -> Result<CalendarPlanEnrollment, String> {
+    let bytes = request.start_date.as_bytes();
+    let has_exact_iso_date_grammar = bytes.len() == 10
+        && bytes[0..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[7] == b'-'
+        && bytes[8..10].iter().all(u8::is_ascii_digit);
+    if !has_exact_iso_date_grammar {
+        return Err("Calendar start date must be an ISO local date (YYYY-MM-DD).".into());
+    }
     let start_date = chrono::NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d")
-        .ok()
-        .filter(|date| date.format("%Y-%m-%d").to_string() == request.start_date)
-        .ok_or_else(|| "Calendar start date must be an ISO local date (YYYY-MM-DD).".to_string())?;
+        .map_err(|_| "Calendar start date must be an ISO local date (YYYY-MM-DD).".to_string())?;
     run_store(store, move |journal| {
         journal
             .enroll_in_calendar(
@@ -749,19 +757,37 @@ mod plan_command_tests {
                     .await
                     .is_err()
             );
-            assert_eq!(
-                enroll_in_calendar_for_store(
-                    store,
-                    CalendarEnrollmentRequest {
-                        definition_version_id: definition.id,
-                        start_date: "2024-2-28".into(),
-                        schedule_mode: CalendarScheduleMode::DayOne,
-                    }
-                )
+            let retained_enrollments = list_plan_enrollments_for_store(store.clone())
                 .await
-                .unwrap_err(),
-                "Calendar start date must be an ISO local date (YYYY-MM-DD)."
-            );
+                .unwrap();
+            for start_date in [
+                "2024-2-28",
+                "+10000-01-01",
+                "-0001-01-01",
+                "2024-01-01Z",
+                "２０２４-01-01",
+            ] {
+                assert_eq!(
+                    enroll_in_calendar_for_store(
+                        store.clone(),
+                        CalendarEnrollmentRequest {
+                            definition_version_id: definition.id.clone(),
+                            start_date: start_date.into(),
+                            schedule_mode: CalendarScheduleMode::DayOne,
+                        }
+                    )
+                    .await
+                    .unwrap_err(),
+                    "Calendar start date must be an ISO local date (YYYY-MM-DD).",
+                    "{start_date}"
+                );
+                assert_eq!(
+                    list_plan_enrollments_for_store(store.clone())
+                        .await
+                        .unwrap(),
+                    retained_enrollments
+                );
+            }
         });
     }
 
