@@ -38,8 +38,10 @@ export class SaveCoordinator {
   get dirty() { return this.generation !== this.savedGeneration || this.pendingFinish; }
 
   flush(finish = false): Promise<void> {
+    // Publish intent must be visible to an already-running save. Otherwise that
+    // save can persist a newer edit as another draft before the queued finish runs.
+    if (finish) this.pendingFinish = true;
     const task = this.queue.catch(() => undefined).then(async () => {
-      if (finish) this.pendingFinish = true;
       while (this.dirty) {
         const publish = this.pendingFinish;
         const generation = this.generation;
@@ -55,7 +57,7 @@ export class SaveCoordinator {
           this.revisionId = entry.workingRevisionId;
           this.savedGeneration = generation;
           this.committed(entry);
-          this.pendingFinish = false;
+          if (publish) this.pendingFinish = false;
           this.status = this.dirty ? 'unsaved' : publish ? 'finished' : 'saved';
           this.changed();
         } catch (error) {

@@ -52,6 +52,31 @@ describe('serialized revision saves', () => {
     expect(session.status).toBe('finished');
   });
 
+  it('publishes the newest content when finish waits behind an in-flight save', async () => {
+    let resolveFirst!: (entry: Entry) => void;
+    const requests: SaveRequest[] = [];
+    const save = vi.fn((request: SaveRequest) => {
+      requests.push(request);
+      return requests.length === 1
+        ? new Promise<Entry>(resolve => { resolveFirst = resolve; })
+        : Promise.resolve(record(request, 'published'));
+    });
+    const session = new SaveCoordinator('entry', stub(save), blankContent(), undefined, () => {}, () => {});
+    session.update({ ...session.content, body: 'Autosaved text' });
+    const autosave = session.flush();
+    await Promise.resolve(); await Promise.resolve();
+    session.update({ ...session.content, body: 'Exact finished text' });
+    const finish = session.flush(true);
+    resolveFirst(record(requests[0], 'draft'));
+    await Promise.all([autosave, finish]);
+    expect(requests.map(request => ({ body: request.content.body, finish: request.finish }))).toEqual([
+      { body: 'Autosaved text', finish: false },
+      { body: 'Exact finished text', finish: true },
+    ]);
+    expect(session.status).toBe('finished');
+    expect(session.dirty).toBe(false);
+  });
+
   it('retries a failed finish even when the draft content was already saved', async () => {
     const content = blankContent();
     const existing = record({ entryId: 'entry', expectedRevisionId: null, content, finish: false }, 'draft');
