@@ -11,7 +11,7 @@ between work units. By default, at 80% usage in any reported window it sleeps un
 that window's reset, plus a one-minute margin. With `--quota-window primary`, only
 the primary (normally five-hour) window triggers this proactive reserve. Weekly
 usage remains visible but does not trigger a reserve pause. The user selected this
-primary-only policy for the Luna worker. Actual provider denials still stop work;
+primary-only policy for the worker team. Actual provider denials still stop work;
 this option does not override subscription limits or authorize credit purchases.
 Sleeping and quota metadata requests do not invoke a model or generate model
 tokens. Actual work, checkpointing, and resuming consume tokens normally.
@@ -28,8 +28,26 @@ credits, consume reset credits, or switch accounts/models to bypass limits.
 python scripts/quota_runner.py --check --quota-window primary
 
 # Run from an existing dedicated worktree, until this issue is done or blocked.
-python scripts/quota_runner.py --worktree "$PWD" --issue sj-kfw --model gpt-5.6-luna --quota-window primary
+python scripts/quota_runner.py --worktree "$PWD" --issue sj-kfw \
+  --model gpt-5.6-terra --routine-model gpt-5.6-luna \
+  --review-model gpt-6-astra --review-every 4 --quota-window primary
 ```
+
+Terra is the default coding worker. It can assign an explicit bounded routine task
+to Luna through the structured `next_kind`/`next_task` handoff; examples include
+styling, documentation and fixtures. Core persistence, recovery, filesystem and
+architectural work stays with the main coder or reviewer. Workers run sequentially
+in the same dedicated worktree, with separate coding/routine session identities.
+
+With `--review-model`, Astra runs an independent fresh-session review initially,
+when a worker requests milestone review, after at most four implementation units,
+and before accepting completion. A worker's `done` becomes a pending completion
+review. Findings are recorded in Beads and routed back to coding; only a review
+can confirm completion. Reviewers inspect code/tests and change only review
+bookkeeping. Missing essential access or user decisions still stop the runner.
+The review gate governs supervisor completion; worker adherence to issue status
+and code-scope instructions is also checked by the reviewer, not enforced by a
+filesystem sandbox. All roles pass through the same five-hour quota check.
 
 The user has authorized noninteractive unrestricted development for this project.
 The runner therefore passes `approval_policy="never"` and

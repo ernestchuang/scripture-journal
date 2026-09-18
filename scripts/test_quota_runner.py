@@ -16,6 +16,32 @@ def quota(primary=10, secondary=20, primary_reset=1500, secondary_reset=9000):
 
 
 class QuotaRunnerTests(unittest.TestCase):
+    def test_routing_reviews_first_and_bounds_time_between_reviews(self):
+        self.assertEqual(runner.choose_role({}, True, True, 4), "review")
+        state = {"review_initialized": True, "units_since_review": 0}
+        self.assertEqual(runner.choose_role(state, True, True, 4), "coding")
+        state.update(next_kind="routine", next_task="Adjust button spacing")
+        self.assertEqual(runner.choose_role(state, True, True, 4), "routine")
+        state["next_task"] = ""
+        self.assertEqual(runner.choose_role(state, True, True, 4), "coding")
+        state["units_since_review"] = 4
+        self.assertEqual(runner.choose_role(state, True, True, 4), "review")
+        state.update(units_since_review=0, next_kind="review")
+        self.assertEqual(runner.choose_role(state, True, True, 4), "review")
+
+    def test_worker_cannot_complete_without_review(self):
+        state = {"review_initialized": True}
+        result = {"status": "done", "summary": "Candidate complete", "next_kind": "coding", "next_task": ""}
+        runner.record_result(state, result, "coding", True)
+        self.assertEqual(state["status"], "continue")
+        self.assertEqual(runner.choose_role(state, True, True, 4), "review")
+        runner.record_result(state, {**result, "status": "continue", "next_task": "Fix race"}, "review", True)
+        self.assertFalse(state["completion_pending"])
+        self.assertEqual(runner.choose_role(state, True, True, 4), "coding")
+        runner.record_result(state, result, "coding", True)
+        runner.record_result(state, result, "review", True)
+        self.assertEqual(state["status"], "done")
+
     def test_preserves_reserve_and_observes_longer_window(self):
         self.assertIsNone(runner.quota_decision(quota(), 80, 1000)[1])
         self.assertEqual(runner.quota_decision(quota(primary=80), 80, 1000)[1], 1560)
@@ -98,7 +124,7 @@ else:
     assert 'ONE small' in prompt
     assert sys.argv[sys.argv.index('--model')+1] == 'gpt-5.6-luna'
     print(json.dumps({'type':'thread.started','thread_id':'test-thread'}), flush=True)
-    Path(sys.argv[sys.argv.index('-o')+1]).write_text(json.dumps({'status':'continue','summary':'Checkpoint saved'}))
+    Path(sys.argv[sys.argv.index('-o')+1]).write_text(json.dumps({'status':'continue','summary':'Checkpoint saved','next_kind':'coding','next_task':'Next task'}))
 ''')
             fake.chmod(0o700)
             self.assertEqual(runner.read_quota(str(fake))["rateLimits"]["primary"]["usedPercent"], 12)
@@ -109,6 +135,25 @@ else:
             self.assertEqual(json.loads((root / "state.json").read_text())["thread"], "test-thread")
             # A second unit explicitly resumes the same saved session.
             self.assertEqual(runner.execute_unit(str(fake), root, root, state, "sj-example", "gpt-5.6-luna")["status"], "continue")
+
+    def test_review_starts_fresh_and_preserves_coding_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "codex"
+            fake.write_text('''#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+assert 'resume' not in sys.argv
+assert sys.argv[sys.argv.index('--model')+1] == 'gpt-6-astra'
+assert 'independent reviewer' in sys.stdin.read()
+print(json.dumps({'type':'thread.started','thread_id':'review-session'}), flush=True)
+Path(sys.argv[sys.argv.index('-o')+1]).write_text(json.dumps({'status':'continue','summary':'Needs fixes','next_kind':'coding','next_task':'Fix identified race'}))
+''')
+            fake.chmod(0o700)
+            state = {"thread": "coding-session", "review_thread": "older-review"}
+            runner.execute_unit(str(fake), root, root, state, "sj-example", "gpt-6-astra", "review", True)
+            self.assertEqual(state["thread"], "coding-session")
+            self.assertEqual(state["review_thread"], "review-session")
 
 
 if __name__ == "__main__":
