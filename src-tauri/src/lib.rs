@@ -12,10 +12,58 @@ use std::{
 };
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
+mod scripture;
+use scripture::{ScriptureStore, Verse};
 
 struct AppState {
     journal: Arc<Mutex<JournalStore>>,
+    scripture: Arc<Mutex<ScriptureStore>>,
     export_directories: Mutex<HashSet<PathBuf>>,
+}
+
+#[tauri::command]
+async fn scripture_chapter(
+    state: State<'_, AppState>,
+    translation: String,
+    book: u16,
+    chapter: u16,
+) -> Result<Vec<Verse>, String> {
+    let store = state.scripture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .lock()
+            .map_err(|_| "Scripture library is unavailable.".to_string())?
+            .chapter(&translation, book, chapter)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn scripture_kjv_status(state: State<'_, AppState>) -> Result<bool, String> {
+    let store = state.scripture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .lock()
+            .map_err(|_| "Scripture library is unavailable.".to_string())?
+            .has_kjv()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn download_kjv_library(state: State<'_, AppState>) -> Result<(), String> {
+    let store = state.scripture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let verses = scripture::download_kjv()?;
+        store
+            .lock()
+            .map_err(|_| "Scripture library is unavailable.".to_string())?
+            .install_kjv(verses)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Deserialize)]
@@ -1730,8 +1778,11 @@ pub fn run() {
             let root = app.path().app_data_dir()?;
             std::fs::create_dir_all(&root)?;
             let journal = JournalStore::open(&root.join("journal.sqlite3"))?;
+            let scripture = ScriptureStore::open(&root.join("scripture.sqlite3"))
+                .map_err(std::io::Error::other)?;
             app.manage(AppState {
                 journal: Arc::new(Mutex::new(journal)),
+                scripture: Arc::new(Mutex::new(scripture)),
                 export_directories: Mutex::new(HashSet::new()),
             });
             Ok(())
@@ -1765,7 +1816,10 @@ pub fn run() {
             export_journal,
             apply_appearance,
             read_omarchy_theme,
-            startup_appearance
+            startup_appearance,
+            scripture_chapter,
+            scripture_kjv_status,
+            download_kjv_library
         ])
         .run(tauri::generate_context!())
         .expect("Could not start Scripture Journal");
