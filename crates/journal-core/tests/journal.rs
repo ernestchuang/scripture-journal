@@ -1,4 +1,7 @@
-use journal_core::{EntryContent, JournalStore, Passage, SaveRequest};
+use journal_core::{
+    ChapterRef, ChapterStream, EntryContent, ExplicitScheduleDay, JournalStore, Passage,
+    PlanDefinition, PlanSchedule, SaveRequest,
+};
 use std::fs;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -21,6 +24,192 @@ fn request(title: &str, finish: bool) -> SaveRequest {
             links: vec![],
         },
     }
+}
+
+fn stream_definition(name: &str) -> PlanDefinition {
+    PlanDefinition {
+        schema_version: 1,
+        name: name.into(),
+        description: Some("Independent chapter streams".into()),
+        schedule: PlanSchedule::ChapterStreams {
+            streams: vec![
+                ChapterStream {
+                    id: "old-testament".into(),
+                    name: "Old Testament".into(),
+                    chapters: vec![
+                        ChapterRef {
+                            book: 1,
+                            chapter: 1,
+                        },
+                        ChapterRef {
+                            book: 1,
+                            chapter: 2,
+                        },
+                    ],
+                },
+                ChapterStream {
+                    id: "new-testament".into(),
+                    name: "New Testament".into(),
+                    chapters: vec![ChapterRef {
+                        book: 40,
+                        chapter: 1,
+                    }],
+                },
+            ],
+        },
+    }
+}
+
+#[test]
+fn plan_definitions_round_trip_and_prior_versions_are_retained() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let first_definition = stream_definition("Four streams");
+    let first = store
+        .create_plan_definition(first_definition.clone())
+        .unwrap();
+    assert_eq!(first.version, 1);
+    assert_eq!(first.definition, first_definition);
+
+    let second_definition = PlanDefinition {
+        schema_version: 1,
+        name: "Four streams, revised".into(),
+        description: None,
+        schedule: PlanSchedule::ExplicitSchedule {
+            days: vec![ExplicitScheduleDay {
+                day: 1,
+                passages: vec![Passage {
+                    book: 43,
+                    chapter: 3,
+                    start_verse: Some(16),
+                    end_verse: Some(21),
+                }],
+            }],
+        },
+    };
+    let second = store
+        .create_plan_definition_version(&first.plan_id, second_definition.clone())
+        .unwrap();
+    assert_eq!(second.version, 2);
+    assert_eq!(second.definition, second_definition);
+    assert_eq!(
+        store
+            .get_plan_definition_version(&first.id)
+            .unwrap()
+            .unwrap()
+            .definition,
+        first_definition
+    );
+    assert_eq!(
+        store
+            .list_plan_definition_versions(&first.plan_id)
+            .unwrap()
+            .iter()
+            .map(|version| version.version)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    drop(store);
+
+    let conn = rusqlite::Connection::open(path).unwrap();
+    assert!(conn
+        .execute(
+            "UPDATE plan_definition_versions SET definition='{}' WHERE id=?1",
+            [&first.id],
+        )
+        .is_err());
+    assert!(conn
+        .execute(
+            "DELETE FROM plan_definition_versions WHERE id=?1",
+            [&first.id]
+        )
+        .is_err());
+}
+
+#[test]
+fn malformed_plan_definitions_are_rejected_without_partial_rows() {
+    let dir = TempDir::new().unwrap();
+    let mut store = JournalStore::open(&dir.path().join("j.db")).unwrap();
+    let mut invalid = stream_definition("Invalid");
+    let PlanSchedule::ChapterStreams { streams } = &mut invalid.schedule else {
+        unreachable!()
+    };
+    streams[0].chapters[0].chapter = 51;
+    assert!(store.create_plan_definition(invalid).is_err());
+
+    let mut invalid = stream_definition("Duplicate IDs");
+    let PlanSchedule::ChapterStreams { streams } = &mut invalid.schedule else {
+        unreachable!()
+    };
+    streams[1].id = streams[0].id.clone();
+    assert!(store.create_plan_definition(invalid).is_err());
+
+    let invalid = PlanDefinition {
+        schema_version: 1,
+        name: "Skipped day".into(),
+        description: None,
+        schedule: PlanSchedule::ExplicitSchedule {
+            days: vec![ExplicitScheduleDay {
+                day: 2,
+                passages: vec![Passage {
+                    book: 67,
+                    chapter: 1,
+                    start_verse: None,
+                    end_verse: None,
+                }],
+            }],
+        },
+    };
+    assert!(store.create_plan_definition(invalid).is_err());
+    assert!(serde_json::from_str::<PlanDefinition>(
+        r#"{"schemaVersion":1,"name":"Imported","schedule":{"kind":"chapterStreams","streams":[]},"executable":"code"}"#
+    )
+    .is_err());
+
+    let valid = store
+        .create_plan_definition(stream_definition("Valid after failures"))
+        .unwrap();
+    assert_eq!(valid.version, 1);
+}
+
+#[test]
+fn schema_one_journal_data_survives_plan_migration() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let saved_request = request("Existing journal data", true);
+    let saved = store.save_entry(saved_request.clone()).unwrap();
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER plans_retained;
+         DROP TRIGGER plan_definition_versions_retained;
+         DROP TRIGGER plan_definition_versions_immutable;
+         DROP TABLE plan_definition_versions;
+         DROP TABLE plans;
+         PRAGMA user_version=1;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut migrated = JournalStore::open(&path).unwrap();
+    let entries = migrated.list_entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, saved.id);
+    assert_eq!(entries[0].content, saved_request.content);
+    let plan = migrated
+        .create_plan_definition(stream_definition("After migration"))
+        .unwrap();
+    assert_eq!(plan.version, 1);
+    drop(migrated);
+    let conn = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        2
+    );
 }
 
 fn export_fixture(dir: &TempDir, name: &str) -> std::path::PathBuf {

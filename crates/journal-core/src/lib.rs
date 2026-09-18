@@ -9,7 +9,12 @@ use uuid::Uuid;
 mod export;
 #[cfg(unix)]
 mod export_directory;
+mod plans;
 pub use export::ExportReport;
+pub use plans::{
+    ChapterRef, ChapterStream, ExplicitScheduleDay, PlanDefinition, PlanDefinitionVersion,
+    PlanSchedule,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -74,7 +79,7 @@ impl JournalStore {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(
-            version == 0 || version == 1,
+            (0..=2).contains(&version),
             "Unsupported journal schema version {version}"
         );
         if version == 0 {
@@ -89,7 +94,13 @@ impl JournalStore {
                 "INSERT INTO metadata(key,value) VALUES ('journal_id',?1),('installation_id',?2)",
                 params![Uuid::new_v4().to_string(), Uuid::new_v4().to_string()],
             )?;
-            tx.pragma_update(None, "user_version", 1)?;
+            tx.execute_batch(plans::PLAN_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 2)?;
+            tx.commit()?;
+        } else if version == 1 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(plans::PLAN_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 2)?;
             tx.commit()?;
         }
         let store = Self { conn };
@@ -234,6 +245,38 @@ impl JournalStore {
         Ok(())
     }
 
+    pub fn create_plan_definition(
+        &mut self,
+        definition: PlanDefinition,
+    ) -> Result<PlanDefinitionVersion> {
+        plans::create_definition(&mut self.conn, None, definition)
+    }
+
+    pub fn create_plan_definition_version(
+        &mut self,
+        plan_id: &str,
+        definition: PlanDefinition,
+    ) -> Result<PlanDefinitionVersion> {
+        validate_id(plan_id)?;
+        plans::create_definition(&mut self.conn, Some(plan_id), definition)
+    }
+
+    pub fn get_plan_definition_version(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<PlanDefinitionVersion>> {
+        validate_id(version_id)?;
+        plans::definition_version(&self.conn, version_id)
+    }
+
+    pub fn list_plan_definition_versions(
+        &self,
+        plan_id: &str,
+    ) -> Result<Vec<PlanDefinitionVersion>> {
+        validate_id(plan_id)?;
+        plans::definition_versions(&self.conn, plan_id)
+    }
+
     fn identity(&self, key: &str) -> Result<String> {
         Ok(self
             .conn
@@ -243,7 +286,7 @@ impl JournalStore {
     }
 }
 
-fn validate_id(id: &str) -> Result<()> {
+pub(crate) fn validate_id(id: &str) -> Result<()> {
     let parsed = Uuid::parse_str(id).context("Invalid entry or revision UUID")?;
     ensure!(
         parsed.to_string() == id,
@@ -266,28 +309,32 @@ fn validate_content(content: &EntryContent) -> Result<()> {
     for id in &content.links {
         validate_id(id)?;
     }
-    const CHAPTERS: [u32; 66] = [
-        50, 40, 27, 36, 34, 24, 21, 4, 31, 24, 22, 25, 29, 36, 10, 13, 10, 42, 150, 31, 12, 8, 66,
-        52, 5, 48, 12, 14, 3, 9, 1, 4, 7, 3, 3, 3, 2, 14, 4, 28, 16, 24, 21, 28, 16, 16, 13, 6, 6,
-        4, 4, 5, 3, 6, 4, 3, 1, 13, 5, 5, 3, 5, 1, 1, 1, 22,
-    ];
     for p in &content.passages {
+        validate_passage(p)?;
+    }
+    Ok(())
+}
+
+pub(crate) const CHAPTERS: [u32; 66] = [
+    50, 40, 27, 36, 34, 24, 21, 4, 31, 24, 22, 25, 29, 36, 10, 13, 10, 42, 150, 31, 12, 8, 66, 52,
+    5, 48, 12, 14, 3, 9, 1, 4, 7, 3, 3, 3, 2, 14, 4, 28, 16, 24, 21, 28, 16, 16, 13, 6, 6, 4, 4, 5,
+    3, 6, 4, 3, 1, 13, 5, 5, 3, 5, 1, 1, 1, 22,
+];
+
+pub(crate) fn validate_passage(p: &Passage) -> Result<()> {
+    ensure!(
+        (1..=66).contains(&p.book) && p.chapter > 0 && p.chapter <= CHAPTERS[(p.book - 1) as usize],
+        "Invalid book or chapter"
+    );
+    ensure!(
+        p.start_verse != Some(0) && p.end_verse != Some(0),
+        "Verse numbers start at one"
+    );
+    if let Some(end) = p.end_verse {
         ensure!(
-            (1..=66).contains(&p.book)
-                && p.chapter > 0
-                && p.chapter <= CHAPTERS[(p.book - 1) as usize],
-            "Invalid book or chapter"
+            p.start_verse.is_some_and(|start| start <= end),
+            "Invalid verse range"
         );
-        ensure!(
-            p.start_verse != Some(0) && p.end_verse != Some(0),
-            "Verse numbers start at one"
-        );
-        if let Some(end) = p.end_verse {
-            ensure!(
-                p.start_verse.is_some_and(|start| start <= end),
-                "Invalid verse range"
-            );
-        }
     }
     Ok(())
 }
