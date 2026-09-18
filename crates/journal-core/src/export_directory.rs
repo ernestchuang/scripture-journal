@@ -3,7 +3,7 @@ use anyhow::{ensure, Result};
 use std::{
     ffi::CString,
     fs::File,
-    io::{self, Read},
+    io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::ffi::OsStrExt,
@@ -12,6 +12,54 @@ use std::{
 };
 
 pub(super) struct ExportDirectory(File);
+
+// Used by the next exporter migration step; keep staging independently reviewable.
+#[allow(dead_code)]
+pub(super) struct StagedFile<'a> {
+    directory: &'a ExportDirectory,
+    name: CString,
+}
+
+#[allow(dead_code)]
+impl StagedFile<'_> {
+    pub(super) fn install_noclobber(self, target: &str) -> Result<()> {
+        let target = managed_name(target)?;
+        // SAFETY: both names are single C-string leaves and the directory is live.
+        // linkat fails if target exists, including a dangling symlink.
+        let result = unsafe {
+            libc::linkat(
+                self.directory.0.as_raw_fd(),
+                self.name.as_ptr(),
+                self.directory.0.as_raw_fd(),
+                target.as_ptr(),
+                0,
+            )
+        };
+        if result < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        self.directory.0.sync_all()?;
+        Ok(())
+    }
+}
+
+impl Drop for StagedFile<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the borrowed directory outlives this single-leaf staging name.
+        // A crash or cleanup failure may leave a temporary file, never a pruned revision.
+        unsafe {
+            libc::unlinkat(self.directory.0.as_raw_fd(), self.name.as_ptr(), 0);
+        }
+    }
+}
+
+fn managed_name(name: &str) -> Result<CString> {
+    ensure!(
+        !name.is_empty() && name != "." && name != ".." && !name.contains('/'),
+        "Expected a single managed filename"
+    );
+    Ok(CString::new(name)?)
+}
 
 impl ExportDirectory {
     pub(super) fn open(path: &Path) -> Result<Self> {
@@ -66,11 +114,7 @@ impl ExportDirectory {
 
     /// Read one managed leaf without resolving the original directory path again.
     pub(super) fn read_optional(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        ensure!(
-            !name.is_empty() && name != "." && name != ".." && !name.contains('/'),
-            "Expected a single managed filename"
-        );
-        let name = CString::new(name)?;
+        let name = managed_name(name)?;
         // SAFETY: self owns the live directory fd and name is one C-string leaf.
         let fd = unsafe {
             libc::openat(
@@ -99,6 +143,32 @@ impl ExportDirectory {
         file.take(64_000_001).read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= 64_000_000, "Managed file exceeds size limit");
         Ok(Some(bytes))
+    }
+
+    #[allow(dead_code)] // Wired into manifest writes in the next bounded migration.
+    pub(super) fn stage(&self, bytes: &[u8]) -> Result<StagedFile<'_>> {
+        let name = CString::new(format!(".scripture-journal-stage-{}", uuid::Uuid::new_v4()))?;
+        // SAFETY: self owns the directory; name is a generated single C-string leaf.
+        let fd = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        // SAFETY: openat returned a new owned descriptor.
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let staged = StagedFile {
+            directory: self,
+            name,
+        };
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(staged)
     }
 
     pub(super) fn open_lock(&self) -> Result<File> {
@@ -223,5 +293,67 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("size limit"));
+    }
+    #[test]
+    fn staging_installation_and_cleanup_stay_pinned_after_directory_swaps() {
+        for swap_before_staging in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let selected = root.path().canonicalize().unwrap().join("selected");
+            let handle = ExportDirectory::open(&selected).unwrap();
+            let outside = root.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            let moved = root.path().join("moved");
+            let swap = || {
+                fs::rename(&selected, &moved).unwrap();
+                symlink(&outside, &selected).unwrap();
+            };
+            if swap_before_staging {
+                swap();
+            }
+            let staged = handle.stage(b"synthetic private output").unwrap();
+            if !swap_before_staging {
+                swap();
+            }
+            staged.install_noclobber("entry.md").unwrap();
+            assert_eq!(
+                fs::read(moved.join("entry.md")).unwrap(),
+                b"synthetic private output"
+            );
+            assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+            assert_eq!(fs::read_dir(&moved).unwrap().count(), 1);
+            drop(handle.stage(b"abandoned output").unwrap());
+            assert_eq!(fs::read_dir(&moved).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn staged_installation_preserves_collisions_and_rejects_escape_names() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let handle = ExportDirectory::open(&base).unwrap();
+        fs::write(base.join("entry.md"), b"external bytes").unwrap();
+        symlink(base.join("absent"), base.join("link")).unwrap();
+        for target in [
+            "entry.md",
+            "link",
+            "../escape",
+            "/escape",
+            "",
+            ".",
+            "..",
+            "bad\0name",
+        ] {
+            assert!(handle
+                .stage(b"new bytes")
+                .unwrap()
+                .install_noclobber(target)
+                .is_err());
+        }
+        assert_eq!(fs::read(base.join("entry.md")).unwrap(), b"external bytes");
+        assert!(fs::symlink_metadata(base.join("link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_dir(&base).unwrap().count(), 2);
     }
 }
