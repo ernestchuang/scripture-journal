@@ -95,6 +95,10 @@ Beads issue across quota resets without invoking a model while waiting.
   backup, and restoration.
 - [Decision record](docs/decisions/0001-local-authority.md): database authority
   and the one-way export boundary.
+- [Release defaults](docs/decisions/0002-release-defaults.md): delegated desktop
+  implementation policies and their scope.
+- [Plan-version adoption](docs/decisions/0003-plan-version-adoption.md): explicit
+  compatibility, retained-history, cutover, and concurrency contracts.
 - [Development workflow](docs/DEVELOPMENT.md): worktrees, Beads, and resumption.
 
 The local journal database owns entries, revisions, passage associations, and
