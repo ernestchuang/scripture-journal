@@ -30,6 +30,17 @@ describe('retained plan panel', () => {
     expect(await screen.findByText('No retained plan enrollments yet.')).toBeTruthy();
   });
 
+  it('shows loading and retains the enrollment order returned by the core', async () => {
+    let resolveList!: (value: PlanEnrollment[]) => void;
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments).mockImplementationOnce(() => new Promise(resolve => { resolveList = resolve; }));
+    render(<PlanPanel api={plans} />);
+    expect(screen.getByRole('status').textContent).toBe('Loading retained plans…');
+    await act(async () => { resolveList([second, first]); });
+    const select = await screen.findByLabelText('Retained enrollment') as HTMLSelectElement;
+    expect(Array.from(select.options, option => option.value)).toEqual([second.id, first.id]);
+  });
+
   it('reports a rejected list and retries without falsely showing empty', async () => {
     const plans = api(); vi.mocked(plans.listPlanEnrollments).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce([first]);
     render(<PlanPanel api={plans} />);
@@ -70,6 +81,20 @@ describe('retained plan panel', () => {
     await act(async () => { resolveFirst(definition(first.definitionVersionId, 'Stale first plan')); });
     expect(screen.getByText('Second plan')).toBeTruthy();
     expect(screen.queryByText('Stale first plan')).toBeNull();
+  });
+
+  it('ignores a late detail rejection after selecting another enrollment', async () => {
+    let rejectFirst!: (reason: unknown) => void;
+    const plans = api();
+    vi.mocked(plans.getPlanDefinitionVersion).mockImplementation(id => id === first.definitionVersionId
+      ? new Promise((_resolve, reject) => { rejectFirst = reject; }) : Promise.resolve(definition(id, 'Second plan')));
+    render(<PlanPanel api={plans} />);
+    const select = await screen.findByLabelText('Retained enrollment');
+    fireEvent.change(select, { target: { value: second.id } });
+    expect(await screen.findByText('Second plan')).toBeTruthy();
+    await act(async () => { rejectFirst(new Error('stale rejection')); });
+    expect(screen.getByText('Second plan')).toBeTruthy();
+    expect(screen.queryByText(/stale rejection/i)).toBeNull();
   });
 
   it('discards pending list and detail responses after unmount', async () => {

@@ -73,7 +73,10 @@ beforeEach(() => {
   native.activePlanAssignments.mockReset();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe('native application close lifecycle', () => {
   it('clears a transient native appearance error after a later successful update', async () => {
@@ -150,5 +153,27 @@ describe('native application close lifecycle', () => {
     await screen.findByText('version-2');
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this draft');
     expect(native.saveEntry).not.toHaveBeenCalled();
+  });
+
+  it('autosaves a dirty editor after browsing retained plan assignments', async () => {
+    native.listPlanEnrollments.mockResolvedValueOnce([
+      { id: 'enrollment-1', definitionVersionId: 'version-1', createdAt: '2026-09-18T00:00:00Z' },
+      { id: 'enrollment-2', definitionVersionId: 'version-2', createdAt: '2026-09-18T00:00:01Z' },
+    ]);
+    native.getPlanDefinitionVersion.mockImplementation(async (id: string) => ({ id, planId: 'plan', version: 1, createdAt: '2026-09-18T00:00:00Z', definition: { schemaVersion: 1, name: id, schedule: { kind: 'chapterStreams', streams: [] } } }));
+    native.activePlanAssignments.mockResolvedValue([]);
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    const select = await screen.findByLabelText('Retained enrollment');
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Save this after browsing' } });
+    fireEvent.change(select, { target: { value: 'enrollment-2' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(native.saveEntry).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Save this after browsing' } });
+    expect(screen.getByRole('status').textContent).toBe('Draft saved');
+    expect((editor as HTMLTextAreaElement).value).toBe('Save this after browsing');
   });
 });
