@@ -56,6 +56,9 @@ async fn scripture_kjv_status(state: State<'_, AppState>) -> Result<bool, String
 async fn download_kjv_library(state: State<'_, AppState>) -> Result<(), String> {
     let store = state.scripture.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        if !store.lock().map_err(|_| "Scripture library is unavailable.".to_string())?.is_persistent() {
+            return Err("Offline Scripture storage needs repair. Restart the app after checking application-data permissions.".into());
+        }
         let verses = scripture::download_kjv()?;
         store
             .lock()

@@ -10,7 +10,7 @@ export interface ReaderProps {
   onSelectionChange: (passage: Passage) => void;
   onReflect: (passage: Passage) => void;
 }
-function Chapter({ passage, selected, translation }: { passage: Passage; selected: Passage; translation: Translation }) {
+function Chapter({ passage, selected, translation, generation, onAnchorRestored }: { passage: Passage; selected: Passage; translation: Translation; generation: number; onAnchorRestored: () => void }) {
   const sectionRef = useRef<HTMLElement>(null);
   const beforeLoad = useRef<{ height: number; above: boolean } | null>(null);
   const [verses, setVerses] = useState<Verse[] | null>(null);
@@ -30,7 +30,7 @@ function Chapter({ passage, selected, translation }: { passage: Passage; selecte
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'Unable to load scripture.');
     });
     return () => controller.abort();
-  }, [passage.book, passage.chapter, translation, attempt]);
+  }, [passage.book, passage.chapter, translation, attempt, generation]);
   useLayoutEffect(() => {
     const section = sectionRef.current;
     if (section?.parentElement && beforeLoad.current?.above) section.parentElement.scrollTop += section.offsetHeight - beforeLoad.current.height;
@@ -39,6 +39,7 @@ function Chapter({ passage, selected, translation }: { passage: Passage; selecte
   useEffect(() => {
     if (verses && selected.startVerse && chapterKey(selected) === chapterKey(passage)) {
       sectionRef.current?.querySelector(`[data-verse="${selected.startVerse}"]`)?.scrollIntoView?.({ block: 'start' });
+      onAnchorRestored();
     }
   }, [verses, selected.startVerse, selected.book, selected.chapter]);
   return <section ref={sectionRef} className="scripture-chapter" data-chapter={chapterKey(passage)} aria-label={formatPassage(passage)}>
@@ -63,6 +64,8 @@ export function Reader({ selection, onSelectionChange, onReflect }: ReaderProps)
   const [offline, setOffline] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState('');
+  const [libraryGeneration, setLibraryGeneration] = useState(0);
+  const restoringTranslation = useRef(false);
   const viewport = useRef<HTMLDivElement>(null);
   const reported = useRef(chapterKey(safeSelection));
   const lastScrollTop = useRef(0);
@@ -76,13 +79,15 @@ export function Reader({ selection, onSelectionChange, onReflect }: ReaderProps)
     const section = verse?.closest<HTMLElement>('[data-chapter]');
     if (verse && section) {
       const [book, chapter] = section.dataset.chapter!.split(':').map(Number);
+      restoringTranslation.current = true;
+      setChapters([{ book, chapter }]);
       onSelectionChange({ book, chapter, startVerse: Number(verse.dataset.verse) });
     }
     setTranslation(value); try { window.localStorage?.setItem('scripture-journal.translation', value); } catch { /* Selection remains active for this session. */ }
   }
   async function installKjv() {
     setDownloading(true); setDownloadError('');
-    try { await downloadKjv(); invalidateKjvCache(); setOffline(true); setChapters(current => [...current]); }
+    try { await downloadKjv(); invalidateKjvCache(); setOffline(true); setLibraryGeneration(value => value + 1); }
     catch (error) { setDownloadError(error instanceof Error ? error.message : String(error)); }
     finally { setDownloading(false); }
   }
@@ -147,6 +152,7 @@ export function Reader({ selection, onSelectionChange, onReflect }: ReaderProps)
     });
   }
   function handleScroll() {
+    if (restoringTranslation.current) return;
     const element = viewport.current;
     if (!element) return;
     const top = element.getBoundingClientRect().top + 100;
@@ -181,7 +187,7 @@ export function Reader({ selection, onSelectionChange, onReflect }: ReaderProps)
     </header>
     <div ref={viewport} className="scripture-scroll" tabIndex={0} aria-label="Continuous scripture reading" onScroll={handleScroll} onWheel={event => { if (event.deltaY < 0 && (viewport.current?.scrollTop ?? 1) < 10) extend(-1); }}>
       {previous && <button className="scripture-boundary" onClick={() => extend(-1)}>Read preceding chapter · {formatPassage(previous)}</button>}
-      {chapters.map(p => <Chapter key={`${translation}:${chapterKey(p)}`} passage={p} selected={safeSelection} translation={translation} />)}
+      {chapters.map(p => <Chapter key={`${translation}:${chapterKey(p)}`} passage={p} selected={safeSelection} translation={translation} generation={libraryGeneration} onAnchorRestored={() => { restoringTranslation.current = false; }} />)}
       {next ? <button className="scripture-boundary" onClick={() => extend(1)}>Continue reading · {formatPassage(next)}</button> : <p>End of Revelation</p>}
       <p className="scripture-attribution">{translation === 'KJV' ? <>King James Version · Public-domain offline package from <a href="https://ebible.org/details.php?id=eng-kjv2006" target="_blank" rel="noreferrer">eBible.org</a>; online fallback by bible-api.com.</> : `${translation} · authorized pack required`}</p>
     </div>

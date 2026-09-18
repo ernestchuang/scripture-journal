@@ -36,19 +36,29 @@ pub struct Verse {
 
 pub struct ScriptureStore {
     connection: Connection,
+    persistent: bool,
 }
 
 impl ScriptureStore {
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(|e| e.to_string())?;
-        Self::initialize(connection)
+        Self::initialize(connection, true)
     }
     pub fn temporary() -> Result<Self, String> {
-        Self::initialize(Connection::open_in_memory().map_err(|e| e.to_string())?)
+        Self::initialize(
+            Connection::open_in_memory().map_err(|e| e.to_string())?,
+            false,
+        )
     }
-    fn initialize(connection: Connection) -> Result<Self, String> {
+    fn initialize(connection: Connection, persistent: bool) -> Result<Self, String> {
         connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS verses(translation TEXT NOT NULL, book INTEGER NOT NULL, chapter INTEGER NOT NULL, verse INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(translation,book,chapter,verse)); CREATE TABLE IF NOT EXISTS translations(id TEXT PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL, complete INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS reader_state(id INTEGER PRIMARY KEY CHECK(id=1), translation TEXT NOT NULL, book INTEGER NOT NULL, chapter INTEGER NOT NULL, verse INTEGER);").map_err(|e| e.to_string())?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            persistent,
+        })
+    }
+    pub fn is_persistent(&self) -> bool {
+        self.persistent
     }
     pub fn chapter(
         &self,
