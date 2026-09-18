@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 const DEFINITION_SCHEMA_VERSION: u32 = 1;
+const FOUR_STREAM_BUILT_IN_ID: &str = "four-stream";
 
 /// The built-in completion-driven plan: one independently advancing chapter
 /// stream from each canonical category. This is definition data only; callers
@@ -533,6 +534,41 @@ pub(crate) fn create_definition(
     Ok(result)
 }
 
+pub(crate) fn register_four_stream(conn: &mut Connection) -> Result<PlanDefinitionVersion> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some(version_id) = tx
+        .query_row(
+            "SELECT definition_version_id FROM built_in_plan_registrations WHERE built_in_id=?1",
+            [FOUR_STREAM_BUILT_IN_ID],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        return definition_version(&tx, &version_id)?.context("Registered built-in plan missing");
+    }
+    let definition = four_stream_plan_definition();
+    validate_definition(&definition)?;
+    let plan_id = Uuid::new_v4().to_string();
+    let version_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO plans(id,created_at) VALUES(?1,?2)",
+        params![plan_id, now],
+    )?;
+    tx.execute(
+        "INSERT INTO plan_definition_versions(id,plan_id,version,created_at,definition) VALUES(?1,?2,1,?3,?4)",
+        params![version_id, plan_id, now, serde_json::to_string(&definition)?],
+    )?;
+    tx.execute(
+        "INSERT INTO built_in_plan_registrations(built_in_id,definition_version_id) VALUES(?1,?2)",
+        params![FOUR_STREAM_BUILT_IN_ID, version_id],
+    )?;
+    let result =
+        definition_version(&tx, &version_id)?.context("Registered built-in plan missing")?;
+    tx.commit()?;
+    Ok(result)
+}
+
 pub(crate) fn definition_version(
     conn: &Connection,
     version_id: &str,
@@ -668,6 +704,17 @@ CREATE TRIGGER plan_definition_versions_retained BEFORE DELETE ON plan_definitio
 BEGIN SELECT RAISE(ABORT,'Plan definition versions are retained'); END;
 CREATE TRIGGER plans_retained BEFORE DELETE ON plans
 BEGIN SELECT RAISE(ABORT,'Plans are retained'); END;
+";
+
+pub(crate) const BUILT_IN_PLAN_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS built_in_plan_registrations(
+ built_in_id TEXT PRIMARY KEY,
+ definition_version_id TEXT NOT NULL UNIQUE REFERENCES plan_definition_versions(id)
+);
+CREATE TRIGGER IF NOT EXISTS built_in_plan_registrations_immutable BEFORE UPDATE ON built_in_plan_registrations
+BEGIN SELECT RAISE(ABORT,'Built-in plan registrations are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS built_in_plan_registrations_retained BEFORE DELETE ON built_in_plan_registrations
+BEGIN SELECT RAISE(ABORT,'Built-in plan registrations are retained'); END;
 ";
 
 pub(crate) const PLAN_PROGRESS_SCHEMA: &str = "

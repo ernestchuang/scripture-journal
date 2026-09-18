@@ -204,6 +204,154 @@ fn built_in_four_stream_definition_covers_every_canonical_chapter_and_enrolls() 
 }
 
 #[test]
+fn four_stream_registration_is_idempotent_and_ignores_matching_custom_names() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let custom = store
+        .create_plan_definition(four_stream_plan_definition())
+        .unwrap();
+    let registered = store.register_four_stream_plan().unwrap();
+    assert_ne!(registered.plan_id, custom.plan_id);
+    assert_eq!(registered.definition, four_stream_plan_definition());
+    assert_eq!(store.register_four_stream_plan().unwrap(), registered);
+    drop(store);
+
+    let mut reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(reopened.register_four_stream_plan().unwrap(), registered);
+    assert_eq!(
+        reopened
+            .list_plan_definition_versions(&custom.plan_id)
+            .unwrap(),
+        vec![custom]
+    );
+}
+
+#[test]
+fn four_stream_registration_rolls_back_after_partial_writes() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let store = JournalStore::open(&path).unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER inject_built_in_registration_failure BEFORE INSERT ON built_in_plan_registrations
+         BEGIN SELECT RAISE(ABORT,'injected built-in registration failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut store = JournalStore::open(&path).unwrap();
+    assert!(store
+        .register_four_stream_plan()
+        .unwrap_err()
+        .to_string()
+        .contains("injected built-in registration failure"));
+    drop(store);
+    let conn = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT (SELECT count(*) FROM plans),(SELECT count(*) FROM plan_definition_versions),(SELECT count(*) FROM built_in_plan_registrations)",
+            [],
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, u32>(2)?)),
+        )
+        .unwrap(),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn simultaneous_stores_register_exactly_one_four_stream_plan() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let first = JournalStore::open(&path).unwrap();
+    let second = JournalStore::open(&path).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let registrations = std::thread::scope(|scope| {
+        let first_barrier = barrier.clone();
+        let first_registration = scope.spawn(move || {
+            let mut store = first;
+            first_barrier.wait();
+            store.register_four_stream_plan().unwrap()
+        });
+        let second_registration = scope.spawn(move || {
+            let mut store = second;
+            barrier.wait();
+            store.register_four_stream_plan().unwrap()
+        });
+        [
+            first_registration.join().unwrap(),
+            second_registration.join().unwrap(),
+        ]
+    });
+    assert_eq!(registrations[0], registrations[1]);
+    let conn = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT (SELECT count(*) FROM plans),(SELECT count(*) FROM plan_definition_versions),(SELECT count(*) FROM built_in_plan_registrations)",
+            [],
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, u32>(2)?)),
+        )
+        .unwrap(),
+        (1, 1, 1)
+    );
+}
+
+#[test]
+fn schema_six_registration_migration_preserves_existing_plan_progress() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let existing = store
+        .create_plan_definition(stream_definition("Existing custom plan"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&existing.id, stream_selections(false))
+        .unwrap();
+    let assignment = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|value| value.stream_id == "old-testament")
+        .unwrap();
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id,
+            stream_id: assignment.stream_id,
+            expected_assignment_id: assignment.id,
+            expected_progress_id: assignment.progress_id,
+        })
+        .unwrap();
+    drop(store);
+    let retained_plans = schema_two_retained_fingerprint(&path);
+    let retained_progress = progress_fingerprint(&path);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("DROP TABLE built_in_plan_registrations", [])
+        .unwrap();
+    conn.pragma_update(None, "user_version", 6).unwrap();
+    drop(conn);
+
+    let mut migrated = JournalStore::open(&path).unwrap();
+    assert_eq!(schema_two_retained_fingerprint(&path), retained_plans);
+    assert_eq!(progress_fingerprint(&path), retained_progress);
+    assert_eq!(
+        migrated
+            .list_plan_definition_versions(&existing.plan_id)
+            .unwrap(),
+        vec![existing]
+    );
+    migrated.register_four_stream_plan().unwrap();
+    drop(migrated);
+    let conn = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        7
+    );
+}
+
+#[test]
 fn plan_definitions_round_trip_and_prior_versions_are_retained() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
@@ -437,7 +585,7 @@ fn schema_one_journal_data_survives_plan_migration() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        6
+        7
     );
 }
 
@@ -1163,7 +1311,7 @@ fn populated_schema_two_journal_and_plan_versions_survive_migration_and_reopen()
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        6
+        7
     );
     assert_eq!(
         conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
@@ -1238,7 +1386,7 @@ fn schema_three_progress_migration_preserves_history_and_adds_command_epoch() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        6
+        7
     );
 }
 
