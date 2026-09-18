@@ -80,18 +80,19 @@ if sys.argv[1] == 'app-server':
 else:
     prompt = sys.stdin.read()
     assert 'ONE small' in prompt
+    assert sys.argv[sys.argv.index('--model')+1] == 'gpt-5.6-luna'
     print(json.dumps({'type':'thread.started','thread_id':'test-thread'}), flush=True)
     Path(sys.argv[sys.argv.index('-o')+1]).write_text(json.dumps({'status':'continue','summary':'Checkpoint saved'}))
 ''')
             fake.chmod(0o700)
             self.assertEqual(runner.read_quota(str(fake))["rateLimits"]["primary"]["usedPercent"], 12)
             state = {}
-            result = runner.execute_unit(str(fake), root, root, state, "sj-example")
+            result = runner.execute_unit(str(fake), root, root, state, "sj-example", "gpt-5.6-luna")
             self.assertEqual(result["status"], "continue")
             self.assertEqual(state["thread"], "test-thread")
             self.assertEqual(json.loads((root / "state.json").read_text())["thread"], "test-thread")
             # A second unit explicitly resumes the same saved session.
-            self.assertEqual(runner.execute_unit(str(fake), root, root, state, "sj-example")["status"], "continue")
+            self.assertEqual(runner.execute_unit(str(fake), root, root, state, "sj-example", "gpt-5.6-luna")["status"], "continue")
 
 
 if __name__ == "__main__":

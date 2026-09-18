@@ -1,7 +1,8 @@
 # Quota-aware continuation
 
 `scripts/quota_runner.py` is a local supervisor for a bounded Beads issue. It uses
-the installed Codex CLI login and its configured model. It starts a separate CLI
+the installed Codex CLI login and an explicitly selected model, or the CLI/session
+default when `--model` is omitted. It starts a separate CLI
 session; it does not remotely control the current desktop conversation or assume
 their accounts/quotas match.
 
@@ -23,7 +24,7 @@ credits, consume reset credits, or switch accounts/models to bypass limits.
 python scripts/quota_runner.py --check
 
 # Run from an existing dedicated worktree, until this issue is done or blocked.
-python scripts/quota_runner.py --worktree "$PWD" --issue sj-kfw
+python scripts/quota_runner.py --worktree "$PWD" --issue sj-kfw --model gpt-5.6-luna
 ```
 
 The user has authorized noninteractive unrestricted development for this project.

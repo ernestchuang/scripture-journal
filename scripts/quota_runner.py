@@ -105,7 +105,7 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def execute_unit(codex, worktree, state_dir, state, issue):
+def execute_unit(codex, worktree, state_dir, state, issue, model=None):
     output = state_dir / "last-result.json"
     output.unlink(missing_ok=True)
     schema = state_dir / "result-schema.json"
@@ -120,7 +120,10 @@ def execute_unit(codex, worktree, state_dir, state, issue):
         "Do not attempt the entire release in one turn. Do not spawn agents. "
         "Preserve existing work. Verify changes, record remaining work in Beads, export its snapshot, "
         "commit and push before returning. Work only in this existing Git worktree. "
-        "Use the current installed CLI model/account; do not change accounts, buy credits, or change limits. "
+        "Use the model selected by the supervisor and the current CLI account; do not change models/accounts, buy credits, or change limits. "
+        "You are the coding worker. Keep changes focused and tested. If a task needs unresolved architectural "
+        "judgment or you cannot resolve a correctness problem, checkpoint the evidence for a separate review "
+        "and return blocked rather than repeatedly guessing. "
         "Do not modify or launch the quota runner. If an essential decision/access is missing, checkpoint "
         "and return blocked. Return done only when this issue is actually complete and pushed; "
         "otherwise continue. Before starting another substantial subtask, checkpoint and return so "
@@ -130,6 +133,8 @@ def execute_unit(codex, worktree, state_dir, state, issue):
     command = [codex, "exec"]
     if state.get("thread"):
         command += ["resume", state["thread"]]
+    if model:
+        command += ["--model", model]
     # Explicitly inherit the user's authorized unrestricted, noninteractive workflow.
     command += ["-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"',
                 "--json", "--output-schema", str(schema), "-o", str(output), "-"]
@@ -177,6 +182,7 @@ def main():
     parser.add_argument("--issue", default="sj-kfw", help="Bounded Beads issue to finish")
     parser.add_argument("--threshold", type=float, default=80, help="Pause at this used percentage (default: 80)")
     parser.add_argument("--codex", default="codex")
+    parser.add_argument("--model", help="Explicit coding-worker model; omitted uses the CLI/session default")
     parser.add_argument("--check", action="store_true", help="Read quota only; never invoke a model")
     parser.add_argument("--max-turns", type=int, default=50, help="Safety ceiling for this invocation")
     parser.add_argument("--delay", type=float, default=0, help="Initial delay in seconds, without model calls")
@@ -224,7 +230,7 @@ def main():
                 print("STOP requested; no further work launched.", flush=True)
                 return
             print(f"Starting one checkpoint-sized unit for {args.issue}.", flush=True)
-            result = execute_unit(args.codex, worktree, state_dir, state, args.issue)
+            result = execute_unit(args.codex, worktree, state_dir, state, args.issue, args.model)
             if result is None:
                 _, wake = quota_decision(read_quota(args.codex), args.threshold, time.time())
                 if wake is None:
