@@ -10,7 +10,8 @@ export class SaveCoordinator {
   status: 'unsaved' | 'saving' | 'saved' | 'finished' | 'error';
   error = '';
   private queue: Promise<unknown> = Promise.resolve();
-  private pendingFinish = false;
+  /** Generation selected by an explicit Finish request, if it has not committed. */
+  private finishGeneration: number | null = null;
 
   constructor(
     readonly id: string,
@@ -31,20 +32,25 @@ export class SaveCoordinator {
   update(content: EntryContent) {
     this.content = structuredClone(content);
     this.generation++;
+    // A failed Finish may be retried only for the generation the user selected.
+    // Later edits remain drafts until the user explicitly finishes them.
+    if (this.finishGeneration !== null && this.generation > this.finishGeneration) {
+      this.finishGeneration = null;
+    }
     if (this.status !== 'error') this.status = 'unsaved';
     this.changed();
   }
 
-  get dirty() { return this.generation !== this.savedGeneration || this.pendingFinish; }
+  get dirty() { return this.generation !== this.savedGeneration || this.finishGeneration !== null; }
 
   flush(finish = false): Promise<void> {
-    // Publish intent must be visible to an already-running save. Otherwise that
-    // save can persist a newer edit as another draft before the queued finish runs.
-    if (finish) this.pendingFinish = true;
+    // Publish intent must be visible to an already-running save, but only for
+    // this exact generation. A later edit must not be published implicitly.
+    if (finish) this.finishGeneration = this.generation;
     const task = this.queue.catch(() => undefined).then(async () => {
       while (this.dirty) {
-        const publish = this.pendingFinish;
         const generation = this.generation;
+        const publish = this.finishGeneration === generation;
         const content = structuredClone(this.content);
         this.status = 'saving';
         this.error = '';
@@ -57,7 +63,7 @@ export class SaveCoordinator {
           this.revisionId = entry.workingRevisionId;
           this.savedGeneration = generation;
           this.committed(entry);
-          if (publish) this.pendingFinish = false;
+          if (publish) this.finishGeneration = null;
           this.status = this.dirty ? 'unsaved' : publish ? 'finished' : 'saved';
           this.changed();
         } catch (error) {

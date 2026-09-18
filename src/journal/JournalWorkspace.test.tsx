@@ -64,4 +64,34 @@ describe('journal workspace', () => {
       content: { body: 'Close-safe draft' },
     });
   });
+
+  it('keeps edits after a failed Finish unpublished until Finish is clicked again', async () => {
+    const api = fakeApi();
+    let persistence: { flush: () => Promise<void> } | undefined;
+    vi.mocked(api.saveEntry)
+      .mockRejectedValueOnce(new Error('Storage unavailable'))
+      .mockImplementation(async (request: SaveRequest) => ({
+        id: request.entryId, createdAt: '2026-09-17T00:00:00Z', updatedAt: '2026-09-17T00:00:00Z',
+        workingRevisionId: request.finish ? 'published' : 'later-draft',
+        publishedRevisionId: request.finish ? 'published' : null,
+        content: request.content,
+      }));
+    render(<JournalWorkspace api={api} passage={{ book: 43, chapter: 3 }} reflectRequest={0}
+      onPersistenceChange={state => { persistence = state; }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    fireEvent.change(editor, { target: { value: 'Finish request' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Finish entry' }));
+    await screen.findByText('Save failed — draft remains open');
+    fireEvent.change(editor, { target: { value: 'Later unfinished edit' } });
+    await persistence!.flush();
+    expect(vi.mocked(api.saveEntry).mock.calls[1][0]).toMatchObject({
+      finish: false, content: { body: 'Later unfinished edit' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Finish entry' }));
+    await waitFor(() => expect(vi.mocked(api.saveEntry)).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(api.saveEntry).mock.calls[2][0]).toMatchObject({
+      finish: true, content: { body: 'Later unfinished edit' },
+    });
+  });
 });

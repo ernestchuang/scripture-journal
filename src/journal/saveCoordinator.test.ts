@@ -89,6 +89,26 @@ describe('serialized revision saves', () => {
     expect(session.status).toBe('finished');
   });
 
+  it('does not publish later edits after a failed finish', async () => {
+    const content = { ...blankContent(), body: 'Finished request' };
+    const existing = record({ entryId: 'entry', expectedRevisionId: null, content, finish: false }, 'draft');
+    const requests: SaveRequest[] = [];
+    const save = vi.fn((request: SaveRequest) => {
+      requests.push(request);
+      if (requests.length === 1) return Promise.reject(new Error('disk full'));
+      return Promise.resolve(record(request, request.finish ? 'published' : 'later-draft'));
+    });
+    const session = new SaveCoordinator('entry', stub(save), content, existing, () => {}, () => {});
+    await expect(session.flush(true)).rejects.toThrow('disk full');
+    session.update({ ...session.content, body: 'Later unfinished edit' });
+    await session.flush();
+    expect(requests[1]).toMatchObject({ finish: false, content: { body: 'Later unfinished edit' } });
+    expect(session.status).toBe('saved');
+    await session.flush(true);
+    expect(requests[2]).toMatchObject({ finish: true, content: { body: 'Later unfinished edit' } });
+    expect(session.status).toBe('finished');
+  });
+
   it('captures passage values independently of the reader object', () => {
     const passage = { book: 43, chapter: 3 };
     const session = new SaveCoordinator('entry', stub(vi.fn()), blankContent([passage]), undefined, () => {}, () => {});
