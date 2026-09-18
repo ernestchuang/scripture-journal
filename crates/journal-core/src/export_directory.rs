@@ -109,6 +109,36 @@ impl ExportDirectory {
         Ok(Self(directory))
     }
 
+    pub(super) fn open_child(&self, name: &str) -> Result<Self> {
+        use rustix::fs::{mkdirat, openat, Mode, OFlags};
+        let name = managed_name(name)?;
+        let open = || {
+            openat(
+                &self.0,
+                name.as_c_str(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+        };
+        let fd = match open() {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => {
+                match mkdirat(
+                    &self.0,
+                    name.as_c_str(),
+                    Mode::RUSR | Mode::WUSR | Mode::XUSR,
+                ) {
+                    Ok(()) => self.sync()?,
+                    Err(rustix::io::Errno::EXIST) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                open()?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Self(File::from(fd)))
+    }
+
     /// Enumerate names in the held directory without following any entry.
     pub(super) fn contains_name_prefix(&self, prefix: &str) -> Result<bool> {
         for entry in rustix::fs::Dir::read_from(&self.0)? {
@@ -178,32 +208,46 @@ impl ExportDirectory {
     }
 
     pub(super) fn rename(&self, source: &str, target: &str) -> Result<()> {
+        self.rename_to(source, self, target)
+    }
+
+    pub(super) fn rename_to(&self, source: &str, destination: &Self, target: &str) -> Result<()> {
         let source = managed_name(source)?;
         let target = managed_name(target)?;
-        // SAFETY: both single-leaf names are relative to this live directory.
+        // SAFETY: single-leaf names are relative to their live directory handles.
         let result = unsafe {
             libc::renameat(
                 self.0.as_raw_fd(),
                 source.as_ptr(),
-                self.0.as_raw_fd(),
+                destination.0.as_raw_fd(),
                 target.as_ptr(),
             )
         };
         if result < 0 {
             return Err(io::Error::last_os_error().into());
         }
+        destination.sync()?;
         self.sync()
     }
 
     pub(super) fn link_noclobber(&self, source: &str, target: &str) -> Result<()> {
+        self.link_to_noclobber(source, self, target)
+    }
+
+    pub(super) fn link_to_noclobber(
+        &self,
+        source: &str,
+        destination: &Self,
+        target: &str,
+    ) -> Result<()> {
         let source = managed_name(source)?;
         let target = managed_name(target)?;
-        // SAFETY: both single-leaf names are relative to this live directory.
+        // SAFETY: single-leaf names are relative to their live directory handles.
         let result = unsafe {
             libc::linkat(
                 self.0.as_raw_fd(),
                 source.as_ptr(),
-                self.0.as_raw_fd(),
+                destination.0.as_raw_fd(),
                 target.as_ptr(),
                 0,
             )
@@ -211,7 +255,7 @@ impl ExportDirectory {
         if result < 0 {
             return Err(io::Error::last_os_error().into());
         }
-        self.sync()
+        destination.sync()
     }
 
     pub(super) fn sync(&self) -> Result<()> {
@@ -247,6 +291,47 @@ impl ExportDirectory {
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::symlink};
+
+    #[test]
+    fn child_acquisition_is_pinned_and_rejects_symlinks_and_unsafe_names() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().canonicalize().unwrap().join("selected");
+        let parent = ExportDirectory::open(&selected).unwrap();
+        let moved = root.path().join("moved");
+        let outside = root.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::rename(&selected, &moved).unwrap();
+        symlink(&outside, &selected).unwrap();
+        let child = parent.open_child("recovery").unwrap();
+        child
+            .stage(b"retained")
+            .unwrap()
+            .install_noclobber("entry")
+            .unwrap();
+        assert_eq!(fs::read(moved.join("recovery/entry")).unwrap(), b"retained");
+        assert!(parent
+            .open_child("recovery")
+            .unwrap()
+            .read_optional("entry")
+            .unwrap()
+            .is_some());
+        symlink(&outside, moved.join("link")).unwrap();
+        fs::write(moved.join("file"), b"not a directory").unwrap();
+        for name in [
+            "link",
+            "file",
+            "../outside",
+            "/absolute",
+            "nested/child",
+            ".",
+            "..",
+            "",
+            "bad\0name",
+        ] {
+            assert!(parent.open_child(name).is_err(), "accepted {name:?}");
+        }
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    }
 
     #[test]
     fn enumeration_stays_pinned_and_restarts_each_scan() {

@@ -1,13 +1,11 @@
 use super::*;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 #[cfg(not(unix))]
-use std::io::Write;
 use std::{
-    collections::BTreeMap,
-    fs::{self, File, OpenOptions},
-    io::Read,
-    path::PathBuf,
+    fs::{File, OpenOptions},
+    io::{Read, Write},
 };
 #[cfg(not(unix))]
 use tempfile::NamedTempFile;
@@ -138,7 +136,7 @@ impl JournalStore {
 }
 
 fn export_one(
-    directory: &Path,
+    #[cfg_attr(unix, allow(unused_variables))] directory: &Path,
     manifest_directory: &ManifestDirectory,
     revision: &Revision,
     published: &[Revision],
@@ -147,6 +145,7 @@ fn export_one(
 ) -> Result<bool> {
     validate_id(&revision.entry_id)?;
     let name = format!("{}.md", revision.entry_id);
+    #[cfg(not(unix))]
     let target = directory.join(&name);
     let output = render(revision, published)?;
     let expected = digest(output.as_bytes());
@@ -197,6 +196,12 @@ fn export_one(
         read_target()? == existing,
         "Destination changed during export; file preserved"
     );
+    #[cfg(unix)]
+    if let Some(old_bytes) = &existing {
+        let recovery = manifest_directory.open_child(".scripture-journal-recovery")?;
+        displace_entry(manifest_directory, &recovery, &name, old_bytes)?;
+    }
+    #[cfg(not(unix))]
     if let Some(old_bytes) = &existing {
         // Preserve displaced bytes before installing a replacement. A crash can leave
         // the visible file missing; recovery bytes remain, and the next run conflicts.
@@ -232,6 +237,24 @@ fn export_one(
     receipt.revision_id = Some(revision.id.clone());
     write_manifest(manifest_directory, manifest, manifest_bytes)?;
     Ok(true)
+}
+
+#[cfg(unix)]
+fn displace_entry(
+    directory: &ManifestDirectory,
+    recovery: &ManifestDirectory,
+    name: &str,
+    expected: &[u8],
+) -> Result<()> {
+    let saved = format!("{}-{}.md", name.trim_end_matches(".md"), Uuid::new_v4());
+    directory.rename_to(name, recovery, &saved)?;
+    let displaced = recovery.read_optional(&saved);
+    if !matches!(&displaced, Ok(Some(bytes)) if bytes.as_slice() == expected) {
+        // Restore only to a vacant name; always retain the displaced inode.
+        let _ = recovery.link_to_noclobber(&saved, directory, name);
+        bail!("Concurrent edit detected; displaced file preserved in recovery as {saved}");
+    }
+    Ok(())
 }
 
 fn render(revision: &Revision, published: &[Revision]) -> Result<String> {
@@ -275,6 +298,7 @@ fn check_components(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
 fn open_regular(path: &Path, create: bool) -> Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(create).create(create);
@@ -291,6 +315,7 @@ fn open_regular(path: &Path, create: bool) -> Result<File> {
     Ok(file)
 }
 
+#[cfg(not(unix))]
 fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -492,6 +517,62 @@ mod manifest_tests {
         fs::write(&path, b"external manifest").unwrap();
         assert!(install_manifest(temp, directory, None).is_err());
         assert_eq!(fs::read(path).unwrap(), b"external manifest");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn entry_displacement_and_restoration_use_both_pinned_directories() {
+        for late_edit in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let base = root.path().canonicalize().unwrap();
+            let selected = base.join("selected");
+            let moved = base.join("moved");
+            let outside = base.join("outside");
+            let directory = ManifestDirectory::open(&selected).unwrap();
+            let recovery = directory.open_child(".scripture-journal-recovery").unwrap();
+            let retained = base.join("retained");
+            fs::create_dir(&outside).unwrap();
+            fs::write(outside.join("entry.md"), b"outside").unwrap();
+            fs::rename(selected.join(".scripture-journal-recovery"), &retained).unwrap();
+            std::os::unix::fs::symlink(&outside, selected.join(".scripture-journal-recovery"))
+                .unwrap();
+            fs::rename(&selected, &moved).unwrap();
+            std::os::unix::fs::symlink(&outside, &selected).unwrap();
+            let actual: &[u8] = if late_edit { b"late edit" } else { b"original" };
+            fs::write(moved.join("entry.md"), actual).unwrap();
+            let result = displace_entry(&directory, &recovery, "entry.md", b"original");
+            if late_edit {
+                assert!(result.unwrap_err().to_string().contains("Concurrent edit"));
+                assert_eq!(fs::read(moved.join("entry.md")).unwrap(), actual);
+            } else {
+                result.unwrap();
+                assert!(!moved.join("entry.md").exists());
+                directory
+                    .stage(b"replacement")
+                    .unwrap()
+                    .install_noclobber("entry.md")
+                    .unwrap();
+                assert_eq!(fs::read(moved.join("entry.md")).unwrap(), b"replacement");
+            }
+            let saved: Vec<_> = fs::read_dir(&retained)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(fs::read(&saved[0]).unwrap(), actual);
+            // Restoration cannot clobber an independently created target.
+            fs::write(moved.join("entry.md"), b"new occupant").unwrap();
+            assert!(recovery
+                .link_to_noclobber(
+                    saved[0].file_name().unwrap().to_str().unwrap(),
+                    &directory,
+                    "entry.md"
+                )
+                .is_err());
+            assert_eq!(fs::read(moved.join("entry.md")).unwrap(), b"new occupant");
+            assert_eq!(fs::read(outside.join("entry.md")).unwrap(), b"outside");
+            assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+        }
     }
 
     #[cfg(unix)]
