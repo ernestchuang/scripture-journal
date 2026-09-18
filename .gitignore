@@ -1,5 +1,5 @@
 # Local application data and secrets never belong in the source repository.
-node_modules/
+node_modules
 dist/
 target/
 .env
@@ -18,3 +18,5 @@ test-results/
 playwright-report/
 .DS_Store
 .worktrees/
+__pycache__/
+src-tauri/gen/

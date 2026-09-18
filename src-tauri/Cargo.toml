@@ -1,0 +1,22 @@
+[package]
+name = "scripture-journal"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "scripture_journal_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+journal-core = { path = "../crates/journal-core" }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"

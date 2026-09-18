@@ -29,6 +29,7 @@ Whether one installation supports switching between multiple local journals rema
 
 | Area | Required behavior |
 | --- | --- |
+| Appearance | Themes are an important usability requirement; avoid a bright startup window during nighttime use and testing. |
 | Scripture | Read and navigate passages, resume reading, and support offline scripture availability. |
 | Translations | Switch among LSB, NASB1995, ESV, and KJV; no side-by-side comparison initially. |
 | Continuous reading | Scroll beyond assigned passages and across chapter/book boundaries. |
@@ -47,6 +48,15 @@ Translation selection expresses product intent, not a claim of acquired distribu
 Source access, offline storage, and export permissions must be verified for each translation.
 
 ## Read flow
+
+**Appearance implementation:** Light, Dark, and System choices share semantic
+color tokens across reader, journal, history, controls, and errors. System is the
+default and responds to OS appearance changes; explicit choices are stored as a
+device-local preference. Theme changes do not recreate an editor or modify its
+content. Apply the preference before app rendering and reveal the desktop window
+only after appearance initialization. Native debug smoke tests request dark mode
+in their isolated profile. Additional named palettes can use the same token
+contract without changing feature components.
 
 Open the reader from a saved location, direct passage navigation, or a reading-plan assignment.
 The active assignment supplies a destination and reading context; it never bounds the Bible reader.
