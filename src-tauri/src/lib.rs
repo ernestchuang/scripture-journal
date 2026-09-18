@@ -1,5 +1,6 @@
 use journal_core::{
-    Entry, ExportReport, JournalStore, PlanDefinitionVersion, Revision, SaveRequest,
+    CompleteStreamRequest, Entry, ExportReport, JournalStore, PlanAssignment, PlanCompletion,
+    PlanDefinitionVersion, PlanEnrollment, Revision, SaveRequest, StreamEnrollment,
 };
 use std::{
     collections::HashSet,
@@ -299,6 +300,88 @@ async fn list_plan_definition_versions(
     list_plan_definition_versions_for_store(state.journal.clone(), plan_id).await
 }
 
+async fn enroll_in_chapter_streams_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    definition_version_id: String,
+    streams: Vec<StreamEnrollment>,
+) -> Result<PlanEnrollment, String> {
+    run_store(store, move |journal| {
+        journal
+            .enroll_in_chapter_streams(&definition_version_id, streams)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn enroll_in_chapter_streams(
+    state: State<'_, AppState>,
+    definition_version_id: String,
+    streams: Vec<StreamEnrollment>,
+) -> Result<PlanEnrollment, String> {
+    enroll_in_chapter_streams_for_store(state.journal.clone(), definition_version_id, streams).await
+}
+
+async fn active_plan_assignments_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    enrollment_id: String,
+) -> Result<Vec<PlanAssignment>, String> {
+    run_store(store, move |journal| {
+        journal
+            .active_plan_assignments(&enrollment_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn active_plan_assignments(
+    state: State<'_, AppState>,
+    enrollment_id: String,
+) -> Result<Vec<PlanAssignment>, String> {
+    active_plan_assignments_for_store(state.journal.clone(), enrollment_id).await
+}
+
+async fn complete_plan_stream_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    request: CompleteStreamRequest,
+) -> Result<PlanCompletion, String> {
+    run_store(store, move |journal| {
+        journal
+            .complete_plan_stream(request)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn complete_plan_stream(
+    state: State<'_, AppState>,
+    request: CompleteStreamRequest,
+) -> Result<PlanCompletion, String> {
+    complete_plan_stream_for_store(state.journal.clone(), request).await
+}
+
+async fn undo_plan_completion_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    completion_id: String,
+) -> Result<(), String> {
+    run_store(store, move |journal| {
+        journal
+            .undo_plan_completion(&completion_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn undo_plan_completion(
+    state: State<'_, AppState>,
+    completion_id: String,
+) -> Result<(), String> {
+    undo_plan_completion_for_store(state.journal.clone(), completion_id).await
+}
+
 #[tauri::command]
 async fn get_history(
     state: State<'_, AppState>,
@@ -400,6 +483,117 @@ mod plan_command_tests {
             );
         });
     }
+
+    #[test]
+    fn typed_progress_commands_preserve_stale_completion_protection() {
+        tauri::async_runtime::block_on(async {
+            let (_directory, store) = test_store();
+            let definition = register_four_stream_plan_for_store(store.clone())
+                .await
+                .unwrap();
+            let enrollment = enroll_in_chapter_streams_for_store(
+                store.clone(),
+                definition.id.clone(),
+                vec![
+                    StreamEnrollment {
+                        stream_id: "old-testament".into(),
+                        starting_position: 0,
+                        loop_after_end: true,
+                    },
+                    StreamEnrollment {
+                        stream_id: "new-testament".into(),
+                        starting_position: 0,
+                        loop_after_end: true,
+                    },
+                    StreamEnrollment {
+                        stream_id: "psalms".into(),
+                        starting_position: 0,
+                        loop_after_end: true,
+                    },
+                    StreamEnrollment {
+                        stream_id: "proverbs".into(),
+                        starting_position: 0,
+                        loop_after_end: true,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&enrollment).unwrap()["definitionVersionId"],
+                enrollment.definition_version_id
+            );
+            let assignments =
+                active_plan_assignments_for_store(store.clone(), enrollment.id.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(assignments.len(), 4);
+            let assignment = assignments
+                .iter()
+                .find(|assignment| assignment.stream_id == "old-testament")
+                .unwrap()
+                .clone();
+            assert_eq!(
+                serde_json::to_value(&assignment).unwrap()["progressId"],
+                assignment.progress_id
+            );
+            let request = CompleteStreamRequest {
+                enrollment_id: enrollment.id.clone(),
+                stream_id: assignment.stream_id.clone(),
+                expected_assignment_id: assignment.id.clone(),
+                expected_progress_id: assignment.progress_id.clone(),
+            };
+            assert_eq!(
+                serde_json::to_value(&request).unwrap()["expectedProgressId"],
+                request.expected_progress_id
+            );
+            let completion = complete_plan_stream_for_store(store.clone(), request.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&completion).unwrap()["assignmentId"],
+                assignment.id
+            );
+            undo_plan_completion_for_store(store.clone(), completion.id)
+                .await
+                .unwrap();
+
+            let restored = active_plan_assignments_for_store(store.clone(), enrollment.id.clone())
+                .await
+                .unwrap();
+            let restored_assignment = restored
+                .iter()
+                .find(|candidate| candidate.stream_id == request.stream_id)
+                .unwrap();
+            assert_eq!(restored_assignment.id, request.expected_assignment_id);
+            assert_ne!(
+                restored_assignment.progress_id,
+                request.expected_progress_id
+            );
+            assert!(complete_plan_stream_for_store(store.clone(), request)
+                .await
+                .unwrap_err()
+                .contains("Conflict: assignment changed"));
+            assert_eq!(
+                active_plan_assignments_for_store(store.clone(), enrollment.id.clone())
+                    .await
+                    .unwrap(),
+                restored
+            );
+
+            let invalid =
+                enroll_in_chapter_streams_for_store(store.clone(), definition.id, Vec::new())
+                    .await
+                    .unwrap_err();
+            assert!(invalid.contains("Select one starting chapter for every stream"));
+            assert_eq!(
+                active_plan_assignments_for_store(store, enrollment.id)
+                    .await
+                    .unwrap(),
+                restored
+            );
+        });
+    }
 }
 
 #[tauri::command]
@@ -490,6 +684,10 @@ pub fn run() {
             export_plan_definition_json,
             get_plan_definition_version,
             list_plan_definition_versions,
+            enroll_in_chapter_streams,
+            active_plan_assignments,
+            complete_plan_stream,
+            undo_plan_completion,
             get_history,
             restore_revision,
             choose_export_directory,
