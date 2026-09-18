@@ -1836,8 +1836,11 @@ fn maintained_export_status(
 }
 
 #[tauri::command]
-async fn run_maintained_export(state: State<'_, AppState>) -> Result<Option<ExportReport>, String> {
-    let Some(path) = state.maintained_export.begin()? else {
+async fn run_maintained_export(
+    state: State<'_, AppState>,
+    resume: bool,
+) -> Result<Option<ExportReport>, String> {
+    let Some(path) = state.maintained_export.begin(resume)? else {
         return Ok(None);
     };
     let journal = state.journal.clone();

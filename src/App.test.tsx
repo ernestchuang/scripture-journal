@@ -485,14 +485,20 @@ describe('native application close lifecycle', () => {
 
   it('shows maintained export health and retries the bounded queue', async () => {
     const status = { directory: '/tmp/Journal export', lastSuccess: '2026-09-18T12:00:00Z', pending: 3, conflicts: ['entry-1'], running: false, canceled: false, error: null };
+    let finishRun: ((value: unknown) => void) | undefined;
     native.invoke.mockImplementation(async (command: string) => {
       if (command === 'maintained_export_status') return status;
-      if (command === 'run_maintained_export') return { written: 1, unchanged: 0, conflicts: [], directory: status.directory, pending: 2, cursor: 10 };
+      if (command === 'run_maintained_export') return new Promise(resolve => { finishRun = resolve; });
+      if (command === 'cancel_maintained_export') { status.canceled = true; return undefined; }
       return undefined;
     });
     render(<App />);
     expect(await screen.findByText(/Maintained export: 3 pending · 1 conflicts/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Retry export' }));
     await waitFor(() => expect(native.invoke.mock.calls.some(([command]) => command === 'run_maintained_export')).toBe(true));
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(native.invoke.mock.calls.some(([command]) => command === 'cancel_maintained_export')).toBe(true));
+    await act(async () => { finishRun?.({ written: 1, unchanged: 0, conflicts: [], directory: status.directory, pending: 2, cursor: 10 }); });
+    await waitFor(() => expect(screen.getByText(/Maintained export: 3 pending/)).toBeTruthy());
   });
 });

@@ -54,11 +54,12 @@ export function App() {
     if (status) setExportStatus(status);
   }, []);
 
-  const runMaintainedExport = useCallback(async () => {
+  const runMaintainedExport = useCallback(async (resume = false) => {
     if (!isDesktop) return;
     setExporting(true);
+    setExportStatus(current => ({ ...current, running: true, canceled: resume ? false : current.canceled }));
     try {
-      const result = await invoke<ExportReport | null>('run_maintained_export');
+      const result = await invoke<ExportReport | null>('run_maintained_export', { resume });
       if (result?.conflicts.length) setNotice(`${result.conflicts.length} managed files need attention. Existing files were preserved.`);
     } catch (error) { setNotice(`Maintained export could not finish: ${String(error)}`); }
     finally { setExporting(false); await refreshExportStatus().catch(() => undefined); }
@@ -84,7 +85,8 @@ export function App() {
       if (exportStatus.directory && !window.confirm(`Change the maintained export folder?\n\nCurrent: ${exportStatus.directory}\n\nThe old folder will remain untouched.`)) return;
       const directory = await invoke<string | null>('choose_export_directory');
       if (!directory) return;
-      const result = await invoke<ExportReport | null>('run_maintained_export');
+      setExportStatus(current => ({ ...current, running: true, canceled: false }));
+      const result = await invoke<ExportReport | null>('run_maintained_export', { resume: true });
       if (!result) return;
       setNotice(result.conflicts.length
         ? `${result.written} entries exported. ${result.conflicts.length} files need attention: ${result.conflicts.join(', ')}. Existing files were preserved.`
@@ -124,7 +126,7 @@ export function App() {
             title={isDesktop ? 'Export finished entries to an Obsidian folder' : 'Folder export is available in the desktop app'}>
             {exporting ? 'Exporting…' : 'Export to Obsidian'}
           </button>
-          {exportStatus.directory && <button className="export-button" disabled={exporting} onClick={() => void runMaintainedExport()}>Retry export</button>}
+          {exportStatus.directory && <button className="export-button" disabled={exporting} onClick={() => void runMaintainedExport(true)}>Retry export</button>}
           {exportStatus.running && <button className="export-button" onClick={() => void invoke('cancel_maintained_export').then(refreshExportStatus)}>Cancel</button>}
         </div>
       </header>
@@ -145,6 +147,7 @@ export function App() {
       {isDesktop && exportStatus.directory && <div className="preview-note" role="status">
         Maintained export: {exportStatus.pending} pending · {exportStatus.conflicts.length} conflicts
         {exportStatus.lastSuccess ? ` · last success ${new Date(exportStatus.lastSuccess).toLocaleString()}` : ' · awaiting first success'}
+        {exportStatus.canceled ? ' · paused' : ''}
         {exportStatus.error ? ` · ${exportStatus.error}` : ''}
         <button onClick={() => void invoke('disconnect_maintained_export').then(refreshExportStatus)}>Stop maintaining</button>
       </div>}

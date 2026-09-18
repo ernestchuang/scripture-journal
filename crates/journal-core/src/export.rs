@@ -438,6 +438,11 @@ fn prepare_pending(
                     || receipt.pending_hash.as_deref() == Some(&actual),
                 "Export changed externally; file preserved"
             );
+            if receipt.pending_hash.as_deref() == Some(&actual) {
+                let receipt = manifest.receipts.get_mut(&revision.entry_id).unwrap();
+                receipt.hash = Some(actual);
+                receipt.pending_hash = None;
+            }
         }
         _ => {}
     }

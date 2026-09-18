@@ -29,6 +29,8 @@ struct DeviceConfig {
     last_success: Option<String>,
     #[serde(default)]
     conflicts: Vec<String>,
+    #[serde(default)]
+    paused: bool,
 }
 
 pub struct MaintainedExport {
@@ -50,6 +52,7 @@ impl MaintainedExport {
                 directory: Some(config.directory),
                 last_success: config.last_success,
                 conflicts: config.conflicts,
+                canceled: config.paused,
                 ..Status::default()
             })
             .unwrap_or_default();
@@ -67,6 +70,7 @@ impl MaintainedExport {
             directory: directory.to_string_lossy().into_owned(),
             last_success: None,
             conflicts: vec![],
+            paused: false,
         };
         self.persist(&config)?;
         let mut status = self
@@ -92,12 +96,12 @@ impl MaintainedExport {
         Ok(())
     }
 
-    pub fn begin(&self) -> Result<Option<PathBuf>, String> {
+    pub fn begin(&self, resume: bool) -> Result<Option<PathBuf>, String> {
         let mut status = self
             .status
             .lock()
             .map_err(|_| "Export status is unavailable.")?;
-        if status.running || self.canceled.swap(false, Ordering::AcqRel) {
+        if status.running || (status.canceled && !resume) {
             return Ok(None);
         }
         let Some(directory) = status.directory.clone() else {
@@ -105,6 +109,7 @@ impl MaintainedExport {
         };
         status.running = true;
         status.canceled = false;
+        self.canceled.store(false, Ordering::Release);
         Ok(Some(PathBuf::from(directory)))
     }
 
@@ -128,6 +133,7 @@ impl MaintainedExport {
                     directory: directory.clone(),
                     last_success: status.last_success.clone(),
                     conflicts: status.conflicts.clone(),
+                    paused: status.canceled,
                 });
             }
         }
@@ -140,6 +146,15 @@ impl MaintainedExport {
             .lock()
             .map_err(|_| "Export status is unavailable.")?;
         status.canceled = true;
+        if let Some(directory) = &status.directory {
+            self.persist(&DeviceConfig {
+                version: 1,
+                directory: directory.clone(),
+                last_success: status.last_success.clone(),
+                conflicts: status.conflicts.clone(),
+                paused: true,
+            })?;
+        }
         Ok(())
     }
 
@@ -205,7 +220,11 @@ mod tests {
         let state = MaintainedExport::open(root.path());
         state.associate(target.path()).unwrap();
         state.cancel().unwrap();
-        assert!(state.begin().unwrap().is_none());
+        let reopened = MaintainedExport::open(root.path());
+        assert!(reopened.status().unwrap().canceled);
+        assert!(reopened.begin(false).unwrap().is_none());
+        assert!(state.begin(false).unwrap().is_none());
         assert!(state.status().unwrap().canceled);
+        assert!(state.begin(true).unwrap().is_some());
     }
 }

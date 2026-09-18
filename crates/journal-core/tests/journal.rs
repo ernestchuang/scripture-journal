@@ -3774,8 +3774,8 @@ fn finish_without_changed_content_reuses_revision_and_serializes_contract() {
 fn export_recovers_receipt_after_file_was_written() {
     let dir = TempDir::new().unwrap();
     let mut store = JournalStore::open(&dir.path().join("j.db")).unwrap();
-    let req = request("Published", true);
-    store.save_entry(req.clone()).unwrap();
+    let mut req = request("Published", true);
+    let installed = store.save_entry(req.clone()).unwrap();
     let out = dir.path().canonicalize().unwrap().join("out");
     store.export_journal(&out).unwrap();
     let manifest_path = out.join(".scripture-journal-export.json");
@@ -3790,9 +3790,15 @@ fn export_recovers_receipt_after_file_was_written() {
         serde_json::to_vec_pretty(&manifest).unwrap(),
     )
     .unwrap();
+    req.expected_revision_id = Some(installed.working_revision_id);
+    req.content.body = "New publication after interrupted receipt".into();
+    store.save_entry(req.clone()).unwrap();
     let report = store.export_journal(&out).unwrap();
-    assert_eq!(report.unchanged, 1);
+    assert_eq!(report.written, 1);
     assert!(report.conflicts.is_empty());
+    assert!(fs::read_to_string(out.join(format!("{}.md", req.entry_id)))
+        .unwrap()
+        .contains("New publication after interrupted receipt"));
 }
 
 #[test]
