@@ -105,7 +105,7 @@ describe('retained plan panel', () => {
     expect((screen.getByRole('button', { name: 'Registering M’Cheyne plan…' }) as HTMLButtonElement).disabled).toBe(true);
     expect(plans.registerMcheynePlan).toHaveBeenCalledTimes(1);
     await act(async () => { resolveRegistration(mcheyne); });
-    expect(await screen.findByText(/Registered M’Cheyne definition version 1 for plan mcheyne-plan/)).toBeTruthy();
+    expect(await screen.findByText('Registered M’Cheyne definition version 1 for plan mcheyne-plan. Select the retained definition above, then explicitly create a calendar enrollment when ready. Registration does not enroll you or schedule readings.')).toBeTruthy();
     await waitFor(() => expect(plans.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(2));
     expect(Array.from(select.options, option => option.value)).toContain(mcheyne.id);
     fireEvent.click(screen.getByRole('button', { name: 'Register M’Cheyne plan' }));
