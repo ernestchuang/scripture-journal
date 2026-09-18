@@ -368,7 +368,14 @@ pub struct PlanAssignment {
     pub cycle: u32,
     pub passage: Passage,
     pub stream_position: Option<u32>,
+    pub definition_version_id: String,
+    pub generation_id: String,
     pub progress_id: String,
+}
+
+struct AssignmentProvenance<'a> {
+    definition_version_id: &'a str,
+    generation_id: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -442,13 +449,28 @@ pub(crate) fn enroll(
         "INSERT INTO plan_enrollments(id,definition_version_id,created_at) VALUES(?1,?2,?3)",
         params![id, version_id, now],
     )?;
+    tx.execute(
+        "INSERT INTO plan_assignment_generations(id,enrollment_id,definition_version_id,created_at) VALUES(?1,?1,?2,?3)",
+        params![id, version_id, now],
+    )?;
     for selection in selections {
         let stream = streams
             .iter()
             .find(|stream| stream.id == selection.stream_id)
             .unwrap();
         tx.execute("INSERT INTO plan_enrollment_streams(enrollment_id,stream_id,loop_after_end) VALUES(?1,?2,?3)", params![id, selection.stream_id, selection.loop_after_end])?;
-        let assignment_id = insert_assignment(&tx, &id, stream, 1, 1, selection.starting_position)?;
+        let assignment_id = insert_assignment(
+            &tx,
+            &id,
+            stream,
+            1,
+            1,
+            selection.starting_position,
+            AssignmentProvenance {
+                definition_version_id: version_id,
+                generation_id: &id,
+            },
+        )?;
         insert_progress_epoch(&tx, &id, &stream.id, &assignment_id)?;
     }
     let result = PlanEnrollment {
@@ -695,7 +717,7 @@ pub(crate) fn active_assignments(
     enrollment_id: &str,
 ) -> Result<Vec<PlanAssignment>> {
     let mut statement = conn.prepare(
-        "SELECT a.id,a.enrollment_id,a.stream_id,a.ordinal,a.cycle,a.passage,e.id,a.stream_position
+        "SELECT a.id,a.enrollment_id,a.stream_id,a.ordinal,a.cycle,a.passage,e.id,a.stream_position,a.definition_version_id,a.generation_id
          FROM plan_stream_progress_epochs e JOIN plan_assignments a ON a.id=e.assignment_id
          WHERE a.enrollment_id=?1
          AND e.sequence=(SELECT MAX(e2.sequence) FROM plan_stream_progress_epochs e2 WHERE e2.enrollment_id=e.enrollment_id AND e2.stream_id=e.stream_id)
@@ -759,8 +781,8 @@ pub(crate) fn complete_stream(
         ],
     )?;
     let (definition_text, loop_after_end): (String, bool) = tx.query_row(
-        "SELECT v.definition,s.loop_after_end FROM plan_enrollments e JOIN plan_definition_versions v ON v.id=e.definition_version_id JOIN plan_enrollment_streams s ON s.enrollment_id=e.id AND s.stream_id=?2 WHERE e.id=?1",
-        params![request.enrollment_id, request.stream_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        "SELECT v.definition,s.loop_after_end FROM plan_definition_versions v JOIN plan_enrollment_streams s ON s.enrollment_id=?1 AND s.stream_id=?2 WHERE v.id=?3",
+        params![request.enrollment_id, request.stream_id, active.definition_version_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
     let definition: PlanDefinition = serde_json::from_str(&definition_text)?;
     let PlanSchedule::ChapterStreams { streams } = definition.schedule else {
         anyhow::bail!("Enrollment no longer references a chapter-stream definition")
@@ -787,7 +809,12 @@ pub(crate) fn complete_stream(
             active.ordinal + 1,
             active.cycle,
             (current + 1) as u32,
+            AssignmentProvenance {
+                definition_version_id: &active.definition_version_id,
+                generation_id: &active.generation_id,
+            },
         )?;
+        insert_assignment_successor(&tx, &active, &next_id)?;
         insert_progress_epoch(&tx, &request.enrollment_id, &stream.id, &next_id)?;
     } else if loop_after_end {
         let next_id = insert_assignment(
@@ -797,7 +824,12 @@ pub(crate) fn complete_stream(
             active.ordinal + 1,
             active.cycle + 1,
             0,
+            AssignmentProvenance {
+                definition_version_id: &active.definition_version_id,
+                generation_id: &active.generation_id,
+            },
         )?;
+        insert_assignment_successor(&tx, &active, &next_id)?;
         insert_progress_epoch(&tx, &request.enrollment_id, &stream.id, &next_id)?;
     }
     tx.commit()?;
@@ -838,6 +870,7 @@ fn insert_assignment(
     ordinal: u32,
     cycle: u32,
     position: u32,
+    provenance: AssignmentProvenance<'_>,
 ) -> Result<String> {
     let chapter = &stream.chapters[position as usize];
     let passage = Passage {
@@ -847,26 +880,55 @@ fn insert_assignment(
         end_verse: None,
     };
     let content = serde_json::to_string(&passage)?;
-    let existing: Option<(String, u32, String, Option<u32>)> = conn
+    let existing: Option<(String, u32, String, Option<u32>, String, String)> = conn
         .query_row(
-            "SELECT id,cycle,passage,stream_position FROM plan_assignments WHERE enrollment_id=?1 AND stream_id=?2 AND ordinal=?3",
+            "SELECT id,cycle,passage,stream_position,definition_version_id,generation_id FROM plan_assignments WHERE enrollment_id=?1 AND stream_id=?2 AND ordinal=?3",
             params![enrollment_id, stream.id, ordinal],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         )
         .optional()?;
-    if let Some((id, existing_cycle, existing_content, existing_position)) = existing {
+    if let Some((
+        id,
+        existing_cycle,
+        existing_content,
+        existing_position,
+        existing_version,
+        existing_generation,
+    )) = existing
+    {
         ensure!(
             existing_cycle == cycle
                 && existing_content == content
-                && existing_position == Some(position),
+                && existing_position == Some(position)
+                && existing_version == provenance.definition_version_id
+                && existing_generation == provenance.generation_id,
             "Existing assignment conflicts with pinned plan progress"
         );
         Ok(id)
     } else {
         let id = Uuid::new_v4().to_string();
-        conn.execute("INSERT INTO plan_assignments(id,enrollment_id,stream_id,ordinal,cycle,passage,stream_position) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![id, enrollment_id, stream.id, ordinal, cycle, content, position])?;
+        conn.execute("INSERT INTO plan_assignments(id,enrollment_id,stream_id,ordinal,cycle,passage,stream_position,definition_version_id,generation_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![id, enrollment_id, stream.id, ordinal, cycle, content, position, provenance.definition_version_id, provenance.generation_id])?;
         Ok(id)
     }
+}
+
+fn insert_assignment_successor(
+    conn: &Connection,
+    predecessor: &PlanAssignment,
+    successor_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO plan_assignment_successors(predecessor_assignment_id,successor_assignment_id,enrollment_id,stream_id) VALUES(?1,?2,?3,?4) ON CONFLICT(predecessor_assignment_id) DO NOTHING",
+        params![predecessor.id, successor_id, predecessor.enrollment_id, predecessor.stream_id],
+    )?;
+    let retained: String = conn.query_row(
+        "SELECT successor_assignment_id FROM plan_assignment_successors WHERE predecessor_assignment_id=?1",
+        [&predecessor.id], |row| row.get(0))?;
+    ensure!(
+        retained == successor_id,
+        "Assignment already has a different retained successor"
+    );
+    Ok(())
 }
 
 fn insert_progress_epoch(
@@ -898,6 +960,8 @@ fn assignment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanAssignment> {
         passage,
         progress_id: row.get(6)?,
         stream_position: row.get(7)?,
+        definition_version_id: row.get(8)?,
+        generation_id: row.get(9)?,
     })
 }
 
@@ -1397,4 +1461,61 @@ ALTER TABLE plan_assignments ADD COLUMN stream_position INTEGER CHECK(stream_pos
 pub(crate) const PLAN_ASSIGNMENT_POSITION_REPAIR_SCHEMA: &str = "
 DROP TRIGGER plan_assignments_immutable;
 DROP TRIGGER plan_assignments_position_required;
+";
+
+pub(crate) const PLAN_ASSIGNMENT_PROVENANCE_SCHEMA: &str = "
+CREATE TABLE plan_assignment_generations(
+ id TEXT PRIMARY KEY,
+ enrollment_id TEXT NOT NULL REFERENCES plan_enrollments(id),
+ definition_version_id TEXT NOT NULL REFERENCES plan_definition_versions(id),
+ created_at TEXT NOT NULL,
+ UNIQUE(id,enrollment_id,definition_version_id)
+);
+INSERT INTO plan_assignment_generations(id,enrollment_id,definition_version_id,created_at)
+SELECT e.id,e.id,e.definition_version_id,e.created_at FROM plan_enrollments e
+WHERE EXISTS(SELECT 1 FROM plan_enrollment_streams s WHERE s.enrollment_id=e.id);
+DROP TRIGGER plan_assignments_immutable;
+ALTER TABLE plan_assignments ADD COLUMN definition_version_id TEXT REFERENCES plan_definition_versions(id);
+ALTER TABLE plan_assignments ADD COLUMN generation_id TEXT;
+UPDATE plan_assignments SET
+ definition_version_id=(SELECT e.definition_version_id FROM plan_enrollments e WHERE e.id=plan_assignments.enrollment_id),
+ generation_id=enrollment_id;
+CREATE UNIQUE INDEX plan_assignment_owner ON plan_assignments(id,enrollment_id,stream_id);
+CREATE TABLE plan_assignment_successors(
+ predecessor_assignment_id TEXT PRIMARY KEY,
+ successor_assignment_id TEXT NOT NULL UNIQUE,
+ enrollment_id TEXT NOT NULL,
+ stream_id TEXT NOT NULL,
+ FOREIGN KEY(predecessor_assignment_id,enrollment_id,stream_id) REFERENCES plan_assignments(id,enrollment_id,stream_id),
+ FOREIGN KEY(successor_assignment_id,enrollment_id,stream_id) REFERENCES plan_assignments(id,enrollment_id,stream_id),
+ CHECK(predecessor_assignment_id<>successor_assignment_id)
+);
+INSERT INTO plan_assignment_successors(predecessor_assignment_id,successor_assignment_id,enrollment_id,stream_id)
+SELECT a.id,b.id,a.enrollment_id,a.stream_id
+FROM plan_assignments a JOIN plan_assignments b
+ ON b.enrollment_id=a.enrollment_id AND b.stream_id=a.stream_id AND b.ordinal=a.ordinal+1;
+CREATE TRIGGER plan_assignment_generations_immutable BEFORE UPDATE ON plan_assignment_generations
+BEGIN SELECT RAISE(ABORT,'Plan assignment generations are immutable'); END;
+CREATE TRIGGER plan_assignment_generations_retained BEFORE DELETE ON plan_assignment_generations
+BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER plan_assignments_immutable BEFORE UPDATE ON plan_assignments
+BEGIN SELECT RAISE(ABORT,'Plan assignments are immutable'); END;
+CREATE TRIGGER plan_assignments_provenance_required BEFORE INSERT ON plan_assignments
+WHEN NEW.definition_version_id IS NULL OR NEW.generation_id IS NULL OR NOT EXISTS(
+ SELECT 1 FROM plan_assignment_generations g WHERE g.id=NEW.generation_id
+ AND g.enrollment_id=NEW.enrollment_id AND g.definition_version_id=NEW.definition_version_id
+)
+BEGIN SELECT RAISE(ABORT,'Assignment provenance must belong to its enrollment generation'); END;
+CREATE TRIGGER plan_assignment_successors_immutable BEFORE UPDATE ON plan_assignment_successors
+BEGIN SELECT RAISE(ABORT,'Plan assignment successors are immutable'); END;
+CREATE TRIGGER plan_assignment_successors_retained BEFORE DELETE ON plan_assignment_successors
+BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER plan_assignment_successors_ordered BEFORE INSERT ON plan_assignment_successors
+WHEN NOT EXISTS(
+ SELECT 1 FROM plan_assignments p JOIN plan_assignments s
+ ON p.id=NEW.predecessor_assignment_id AND s.id=NEW.successor_assignment_id
+ WHERE p.enrollment_id=NEW.enrollment_id AND s.enrollment_id=NEW.enrollment_id
+ AND p.stream_id=NEW.stream_id AND s.stream_id=NEW.stream_id AND s.ordinal=p.ordinal+1
+)
+BEGIN SELECT RAISE(ABORT,'Assignment successor must be the next owned ordinal'); END;
 ";

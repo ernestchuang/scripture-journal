@@ -616,6 +616,7 @@ fn schema_ten_migration_preserves_valid_populated_undo_history() {
         .unwrap();
     let retained = store.calendar_completion_history(&enrollment.id).unwrap();
     drop(store);
+    downgrade_stream_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "DROP TRIGGER plan_calendar_completion_undos_match; PRAGMA user_version=10;",
@@ -656,6 +657,7 @@ fn schema_eight_migration_preserves_populated_calendar_rows() {
         .unwrap();
     let assignments = store.calendar_plan_assignments(&enrollment.id).unwrap();
     drop(store);
+    downgrade_stream_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch("DROP TRIGGER plan_calendar_completions_immutable; DROP TRIGGER plan_calendar_completions_retained; DROP TABLE plan_calendar_completions; DROP INDEX plan_calendar_assignment_owner; PRAGMA user_version=8;").unwrap();
     assert!(!schema_object_exists(&conn, "plan_calendar_completions"));
@@ -689,7 +691,7 @@ fn schema_eight_migration_preserves_populated_calendar_rows() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        11
+        12
     );
     assert_eq!(
         conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
@@ -724,6 +726,7 @@ fn schema_nine_migration_preserves_completion_and_enables_undo() {
         .complete_calendar_assignment(&enrollment.id, &assignment.id)
         .unwrap();
     drop(store);
+    downgrade_stream_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch("DROP TRIGGER plan_calendar_completion_undos_immutable; DROP TRIGGER plan_calendar_completion_undos_retained; DROP TRIGGER plan_calendar_completion_active; DROP TABLE plan_calendar_completion_undos; CREATE UNIQUE INDEX v9_calendar_completion_assignment ON plan_calendar_completions(assignment_id); PRAGMA user_version=9;").unwrap();
     drop(conn);
@@ -929,6 +932,7 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
     store.undo_plan_completion(&completion.id).unwrap();
     drop(store);
 
+    downgrade_stream_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "DROP TRIGGER plan_calendar_completions_immutable;
@@ -965,11 +969,11 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
         "plan_calendar_assignment_owner"
     ));
     drop(migrated);
-    assert_database_integrity(&path, 11);
+    assert_database_integrity(&path, 12);
 
     let mut reopened_again = JournalStore::open(&path).unwrap();
     assert_eq!(schema_seven_fingerprint(&path), retained);
-    assert_database_integrity(&path, 11);
+    assert_database_integrity(&path, 12);
     let calendar = reopened_again
         .enroll_in_calendar(
             &built_in.id,
@@ -1030,6 +1034,26 @@ fn schema_seven_fingerprint(path: &std::path::Path) -> Vec<String> {
             .unwrap_or_default()
     })
     .collect()
+}
+
+fn downgrade_stream_provenance_to_v11(path: &std::path::Path) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER plan_assignment_successors_ordered;
+         DROP TRIGGER plan_assignment_successors_retained;
+         DROP TRIGGER plan_assignment_successors_immutable;
+         DROP TABLE plan_assignment_successors;
+         DROP TRIGGER plan_assignments_provenance_required;
+         DROP TRIGGER plan_assignment_generations_retained;
+         DROP TRIGGER plan_assignment_generations_immutable;
+         DROP INDEX plan_assignment_owner;
+         ALTER TABLE plan_assignments DROP COLUMN generation_id;
+         ALTER TABLE plan_assignments DROP COLUMN definition_version_id;
+         DROP TABLE plan_assignment_generations;
+         PRAGMA user_version=11;",
+    )
+    .unwrap();
 }
 
 fn schema_object_exists(conn: &rusqlite::Connection, name: &str) -> bool {

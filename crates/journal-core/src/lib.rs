@@ -87,7 +87,7 @@ impl JournalStore {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(
-            (0..=11).contains(&version),
+            (0..=12).contains(&version),
             "Unsupported journal schema version {version}"
         );
         if version == 0 {
@@ -185,6 +185,24 @@ impl JournalStore {
             );
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
             tx.pragma_update(None, "user_version", 11)?;
+            tx.commit()?;
+        }
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version == 11 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let broken_chains: i64 = tx.query_row(
+                "SELECT count(*) FROM plan_assignments a WHERE a.ordinal>1 AND NOT EXISTS(
+                   SELECT 1 FROM plan_assignments p WHERE p.enrollment_id=a.enrollment_id
+                   AND p.stream_id=a.stream_id AND p.ordinal=a.ordinal-1)",
+                [],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                broken_chains == 0,
+                "Ambiguous retained assignment chain; refusing migration"
+            );
+            tx.execute_batch(plans::PLAN_ASSIGNMENT_PROVENANCE_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 12)?;
             tx.commit()?;
         }
         let store = Self { conn };

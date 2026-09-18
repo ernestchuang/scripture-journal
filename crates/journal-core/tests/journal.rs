@@ -955,6 +955,7 @@ fn schema_six_registration_migration_preserves_existing_plan_progress() {
     let retained_plans = schema_two_retained_fingerprint(&path);
     let retained_progress = progress_fingerprint(&path);
 
+    downgrade_assignment_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute("DROP TABLE built_in_plan_registrations", [])
         .unwrap();
@@ -990,7 +991,7 @@ fn schema_six_registration_migration_preserves_existing_plan_progress() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        11
+        12
     );
 }
 
@@ -1410,6 +1411,7 @@ fn schema_one_journal_data_survives_plan_migration() {
     let saved_source = store.save_entry(source_request.clone()).unwrap();
     drop(store);
 
+    downgrade_assignment_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "DROP TABLE built_in_plan_registrations;
@@ -1454,7 +1456,7 @@ fn schema_one_journal_data_survives_plan_migration() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        11
+        12
     );
 }
 
@@ -1944,6 +1946,269 @@ fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
 }
 
 #[test]
+fn stream_assignments_record_owned_provenance_and_retained_successors() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("provenance.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Provenance"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let first = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.stream_id == "old-testament")
+        .unwrap();
+    let other = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.stream_id == "new-testament")
+        .unwrap();
+    assert_eq!(first.definition_version_id, version.id);
+    assert_eq!(first.generation_id, enrollment.id);
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: first.stream_id.clone(),
+            expected_assignment_id: first.id.clone(),
+            expected_progress_id: first.progress_id.clone(),
+        })
+        .unwrap();
+    let second = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.stream_id == "old-testament")
+        .unwrap();
+    assert_eq!(second.definition_version_id, version.id);
+    assert_eq!(second.generation_id, enrollment.id);
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT successor_assignment_id FROM plan_assignment_successors WHERE predecessor_assignment_id=?1",
+            [&first.id], |row| row.get::<_, String>(0),
+        ).unwrap(),
+        second.id
+    );
+    let successor_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM plan_assignment_successors",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(conn
+        .execute(
+            "INSERT INTO plan_assignment_successors(predecessor_assignment_id,successor_assignment_id,enrollment_id,stream_id) VALUES(?1,?2,?3,'new-testament')",
+            rusqlite::params![other.id, second.id, enrollment.id],
+        )
+        .is_err());
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM plan_assignment_successors",
+            [],
+            |row| { row.get::<_, i64>(0) }
+        )
+        .unwrap(),
+        successor_count
+    );
+    for sql in [
+        "UPDATE plan_assignment_generations SET created_at=created_at",
+        "DELETE FROM plan_assignment_generations",
+        "UPDATE plan_assignment_successors SET stream_id=stream_id",
+        "DELETE FROM plan_assignment_successors",
+    ] {
+        assert!(conn.execute(sql, []).is_err(), "{sql}");
+    }
+    let before: i64 = conn
+        .query_row("SELECT count(*) FROM plan_assignments", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(conn.execute(
+        "INSERT INTO plan_assignments(id,enrollment_id,stream_id,ordinal,cycle,passage,stream_position,definition_version_id,generation_id)
+         VALUES(?1,?2,'old-testament',99,1,'{\"book\":1,\"chapter\":1}',0,?3,?4)",
+        rusqlite::params![Uuid::new_v4().to_string(), enrollment.id, version.id, Uuid::new_v4().to_string()],
+    ).unwrap_err().to_string().contains("Assignment provenance must belong"));
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM plan_assignments", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+    drop(conn);
+
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .active_plan_assignments(&enrollment.id)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.stream_id == "old-testament")
+            .unwrap(),
+        second
+    );
+}
+
+fn downgrade_assignment_provenance_to_v11(path: &std::path::Path) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER plan_assignment_successors_ordered;
+         DROP TRIGGER plan_assignment_successors_retained;
+         DROP TRIGGER plan_assignment_successors_immutable;
+         DROP TABLE plan_assignment_successors;
+         DROP TRIGGER plan_assignments_provenance_required;
+         DROP TRIGGER plan_assignment_generations_retained;
+         DROP TRIGGER plan_assignment_generations_immutable;
+         DROP INDEX plan_assignment_owner;
+         ALTER TABLE plan_assignments DROP COLUMN generation_id;
+         ALTER TABLE plan_assignments DROP COLUMN definition_version_id;
+         DROP TABLE plan_assignment_generations;
+         PRAGMA user_version=11;",
+    )
+    .unwrap();
+}
+
+#[test]
+fn populated_schema_eleven_migration_preserves_stream_history_and_builds_provenance() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("schema-eleven.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Historical v11"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let first = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.stream_id == "old-testament")
+        .unwrap();
+    let completion = store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: first.stream_id.clone(),
+            expected_assignment_id: first.id.clone(),
+            expected_progress_id: first.progress_id.clone(),
+        })
+        .unwrap();
+    let history = store.plan_completion_history(&enrollment.id).unwrap();
+    drop(store);
+    downgrade_assignment_provenance_to_v11(&path);
+
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.plan_completion_history(&enrollment.id).unwrap(),
+        history
+    );
+    let active = reopened
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.stream_id == "old-testament")
+        .unwrap();
+    assert_eq!(active.definition_version_id, version.id);
+    assert_eq!(active.generation_id, enrollment.id);
+    drop(reopened);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        12
+    );
+    assert_eq!(conn.query_row("SELECT successor_assignment_id FROM plan_assignment_successors WHERE predecessor_assignment_id=(SELECT assignment_id FROM reading_completions WHERE id=?1)", [&completion.id], |row| row.get::<_, String>(0)).unwrap(), active.id);
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+    drop(conn);
+    JournalStore::open(&path).unwrap();
+}
+
+#[test]
+fn ambiguous_schema_eleven_chain_rolls_back_provenance_migration() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("ambiguous-schema-eleven.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Ambiguous v11"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let first = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.stream_id == "old-testament")
+        .unwrap();
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: first.stream_id.clone(),
+            expected_assignment_id: first.id.clone(),
+            expected_progress_id: first.progress_id.clone(),
+        })
+        .unwrap();
+    drop(store);
+    downgrade_assignment_provenance_to_v11(&path);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER plan_progress_retained_assignments;
+         DROP TRIGGER plan_stream_progress_epochs_retained;
+         DROP TRIGGER plan_progress_retained_completions;",
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM plan_stream_progress_epochs WHERE assignment_id=?1",
+        [&first.id],
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM reading_completions WHERE assignment_id=?1",
+        [&first.id],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM plan_assignments WHERE id=?1", [&first.id])
+        .unwrap();
+    drop(conn);
+    let error = match JournalStore::open(&path) {
+        Ok(_) => panic!("ambiguous chain migration unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("Ambiguous retained assignment chain"));
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        11
+    );
+    assert_eq!(conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='plan_assignment_generations'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
 fn retained_enrollments_are_discoverable_without_changing_history() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
@@ -2182,6 +2447,7 @@ fn populated_schema_two_journal_and_plan_versions_survive_migration_and_reopen()
     drop(store);
 
     let retained_before = schema_two_retained_fingerprint(&path);
+    downgrade_assignment_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     for table in [
         "built_in_plan_registrations",
@@ -2257,7 +2523,7 @@ fn populated_schema_two_journal_and_plan_versions_survive_migration_and_reopen()
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        11
+        12
     );
     assert_eq!(
         conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
@@ -2300,6 +2566,7 @@ fn schema_three_progress_migration_preserves_history_and_adds_command_epoch() {
         .unwrap();
     drop(store);
 
+    downgrade_assignment_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "DROP TABLE built_in_plan_registrations;
@@ -2333,7 +2600,7 @@ fn schema_three_progress_migration_preserves_history_and_adds_command_epoch() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        11
+        12
     );
 }
 
@@ -2375,6 +2642,7 @@ fn exhausted_schema_three_stream_can_undo_and_recomplete_after_migration() {
         .unwrap();
     drop(store);
 
+    downgrade_assignment_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "DROP TABLE built_in_plan_registrations;
@@ -2829,6 +3097,7 @@ fn retained_completion_history_is_ordered_isolated_and_survives_undo_recompletio
     );
     drop(store);
 
+    downgrade_assignment_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let retained_after: (String, String, String, String) = conn
         .query_row(
@@ -2989,6 +3258,7 @@ fn schema_four_reconstructs_repeated_occurrences_without_rewriting_snapshots() {
     );
     drop(store);
 
+    downgrade_assignment_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let snapshots_before: String = conn
         .query_row(
@@ -3064,6 +3334,7 @@ fn ambiguous_legacy_occurrence_is_retained_and_refuses_guessed_progression() {
     }
     drop(store);
 
+    downgrade_assignment_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "DROP TABLE built_in_plan_registrations;
@@ -3135,6 +3406,7 @@ fn divergent_v5_suffix_is_invalidated_without_chapter_skips_or_history_rewrite()
     completions[3] = complete_active(&mut store, &enrollment.id);
     drop(store);
 
+    downgrade_assignment_provenance_to_v11(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "DROP TABLE built_in_plan_registrations;
