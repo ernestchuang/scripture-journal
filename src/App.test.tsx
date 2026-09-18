@@ -45,7 +45,11 @@ beforeEach(() => {
   window.scriptureAppearance = {
     getPreference: () => 'system',
     getResolved: () => 'dark',
+    getBackground: () => '#1d2420',
+    getThemes: () => [],
     setPreference: () => true,
+    saveTheme: () => true,
+    setOmarchyTheme: () => true,
   };
   native.closeHandler = undefined;
   native.onCloseRequested.mockReset().mockImplementation(async handler => {
@@ -74,7 +78,7 @@ describe('native application close lifecycle', () => {
       release = resolve;
     }));
     render(<App />);
-    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith('apply_appearance', { theme: 'dark' }));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith('apply_appearance', { theme: 'dark', background: '#1d2420' }));
     await waitFor(() => expect(native.closeHandler).toBeDefined());
     fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
     const editor = await screen.findByLabelText(/Reflection Markdown/);

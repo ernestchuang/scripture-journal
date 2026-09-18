@@ -25,15 +25,17 @@ fn startup_appearance() -> Option<&'static str> {
 }
 
 #[tauri::command]
-fn apply_appearance(window: tauri::WebviewWindow, theme: String) -> Result<(), String> {
-    let (theme, color) = match theme.as_str() {
-        "dark" => (tauri::Theme::Dark, tauri::window::Color(29, 36, 32, 255)),
-        "light" => (
-            tauri::Theme::Light,
-            tauri::window::Color(245, 242, 234, 255),
-        ),
+fn apply_appearance(window: tauri::WebviewWindow, theme: String, background: String) -> Result<(), String> {
+    let theme = match theme.as_str() {
+        "dark" => tauri::Theme::Dark,
+        "light" => tauri::Theme::Light,
         _ => return Err("Unknown appearance".into()),
     };
+    let hex = background.strip_prefix('#').filter(|value| value.len() == 6)
+        .ok_or_else(|| "Invalid appearance background".to_string())?;
+    let channel = |range| u8::from_str_radix(&hex[range], 16)
+        .map_err(|_| "Invalid appearance background".to_string());
+    let color = tauri::window::Color(channel(0..2)?, channel(2..4)?, channel(4..6)?, 255);
     let appearance = window
         .set_background_color(Some(color))
         .and_then(|_| window.set_theme(Some(theme)));
@@ -42,6 +44,23 @@ fn apply_appearance(window: tauri::WebviewWindow, theme: String) -> Result<(), S
         window.show().map_err(|e| e.to_string())?;
     }
     appearance.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn read_omarchy_theme() -> Result<Option<String>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(home) = std::env::var_os("HOME") else { return Ok(None); };
+        let path = PathBuf::from(home).join(".local/state/omarchy/current/theme/colors.toml");
+        match std::fs::read_to_string(path) {
+            Ok(source) if source.len() <= 64 * 1024 => Ok(Some(source)),
+            Ok(_) => Err("The active Omarchy palette is too large.".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    Ok(None)
 }
 
 async fn run_store<T, F>(store: Arc<Mutex<JournalStore>>, operation: F) -> Result<T, String>
@@ -174,6 +193,7 @@ pub fn run() {
             choose_export_directory,
             export_journal,
             apply_appearance,
+            read_omarchy_theme,
             startup_appearance
         ])
         .run(tauri::generate_context!())

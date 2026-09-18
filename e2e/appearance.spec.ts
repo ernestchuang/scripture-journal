@@ -52,6 +52,38 @@ test('invalid stored preference falls back to System', async ({ page }) => {
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 });
 
+test('imports a portable theme, persists it, and paints it before React on reload', async ({ page }) => {
+  await page.goto('/');
+  const colors = ['app-background', 'paper', 'surface', 'surface-raised', 'surface-subtle', 'surface-active', 'ink', 'muted', 'placeholder', 'line', 'line-strong', 'accent', 'accent-hover', 'accent-contrast', 'focus', 'selection', 'error-ink', 'error-surface', 'error-line']
+    .map((token, index) => `${token} = "#${String(index + 1).padStart(6, '0')}"`).join('\n');
+  await page.getByLabel('Import theme').setInputFiles({
+    name: 'test-night.toml', mimeType: 'text/plain',
+    buffer: Buffer.from(`schema_version = 1\nid = "test-night"\nname = "Test Night"\nmode = "dark"\n[colors]\n${colors}\n`),
+  });
+  const appearance = page.getByRole('combobox', { name: 'Appearance' });
+  await expect(appearance).toHaveValue('theme:test-night');
+  await expect(page.locator('html')).toHaveCSS('background-color', 'rgb(0, 0, 1)');
+  await page.reload();
+  await expect(appearance).toHaveValue('theme:test-night');
+  await expect(page.locator('html')).toHaveCSS('background-color', 'rgb(0, 0, 1)');
+});
+
+test('malformed imported and stored themes keep a usable fallback', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.addInitScript(() => {
+    localStorage.setItem('scripture-journal.appearance', 'theme:broken');
+    localStorage.setItem('scripture-journal.custom-themes', '[{"id":"broken","colors":{"app-background":"url(bad)"}}]');
+  });
+  await page.goto('/');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('html')).toHaveCSS('background-color', 'rgb(29, 36, 32)');
+  await page.getByLabel('Import theme').setInputFiles({
+    name: 'unsafe.toml', mimeType: 'text/plain', buffer: Buffer.from('schema_version = 1\nid = "unsafe"'),
+  });
+  await expect(page.getByText(/Theme import failed/)).toBeVisible();
+  await expect(page.locator('html')).toHaveCSS('background-color', 'rgb(29, 36, 32)');
+});
+
 test('unavailable preference storage does not prevent writing or theme changes', async ({ page }) => {
   await page.addInitScript(() => {
     Storage.prototype.getItem = () => { throw new Error('Storage unavailable'); };

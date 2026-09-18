@@ -71,7 +71,16 @@ export function App() {
           <label className="theme-control">Appearance
             <select value={appearance.preference} onChange={event => appearance.change(event.target.value as Appearance)}>
               <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
+              {appearance.supportsOmarchy && <option value="omarchy">Follow Omarchy</option>}
+              {appearance.themes.map(theme => <option key={theme.id} value={`theme:${theme.id}`}>{theme.name}</option>)}
             </select>
+          </label>
+          <label className="theme-import">Import theme
+            <input type="file" accept=".toml,text/plain" onChange={event => {
+              const file = event.target.files?.[0];
+              if (file) void appearance.importTheme(file);
+              event.target.value = '';
+            }} />
           </label>
           <span className="local-label"><i aria-hidden="true" /> {isDesktop ? 'Local journal' : 'Browser preview'}</span>
           <button className="export-button" onClick={() => void exportJournal()}
