@@ -43,6 +43,8 @@ export function JournalWorkspace({ api, passage, reflectRequest, refreshRequest 
   const [linkSelection, setLinkSelection] = useState('');
   const sessionRef = useRef<SaveCoordinator | null>(null);
   const committedEntries = useRef(new Map<string, Entry>());
+  const committedAt = useRef(new Map<string, number>());
+  const commitSequence = useRef(0);
   const queueRef = useRef<Promise<unknown>>(Promise.resolve());
   const mounted = useRef(true);
   const lastReflect = useRef(0);
@@ -53,11 +55,25 @@ export function JournalWorkspace({ api, passage, reflectRequest, refreshRequest 
   useEffect(() => {
     mounted.current = true;
     let active = true;
+    const refreshStartedAt = commitSequence.current;
     api.listEntries().then(items => {
       if (!active) return;
       setEntries(current => {
         const merged = new Map(items.map(entry => [entry.id, entry]));
-        current.forEach(entry => merged.set(entry.id, entry));
+        items.forEach(entry => {
+          const local = committedEntries.current.get(entry.id);
+          if ((committedAt.current.get(entry.id) ?? 0) > refreshStartedAt && local) {
+            merged.set(entry.id, local);
+          } else {
+            committedEntries.current.set(entry.id, entry);
+            committedAt.current.delete(entry.id);
+          }
+        });
+        current.forEach(entry => {
+          if (!merged.has(entry.id) && (committedAt.current.get(entry.id) ?? 0) > refreshStartedAt) {
+            merged.set(entry.id, committedEntries.current.get(entry.id) ?? entry);
+          }
+        });
         return [...merged.values()];
       });
       setLoaded(true);
@@ -74,7 +90,9 @@ export function JournalWorkspace({ api, passage, reflectRequest, refreshRequest 
     if (mounted.current) redraw(value => value + 1);
   };
   const committed = (entry: Entry) => {
+    commitSequence.current += 1;
     committedEntries.current.set(entry.id, entry);
+    committedAt.current.set(entry.id, commitSequence.current);
     if (mounted.current) setEntries(items => [entry, ...items.filter(item => item.id !== entry.id)]);
   };
   const open = (entry?: Entry, passages: Passage[] = []) => {

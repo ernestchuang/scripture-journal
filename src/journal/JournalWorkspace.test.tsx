@@ -17,20 +17,40 @@ const fakeApi = (): JournalApi => ({
 });
 
 describe('journal workspace', () => {
-  it('shows imported entries after refresh without replacing open writing', async () => {
+  it('uses a changed imported revision after refresh without replacing open writing or retaining an old committed cache', async () => {
     const api = fakeApi();
+    const original: Entry = {
+      id: 'imported', createdAt: '2026-09-17T00:00:00Z', updatedAt: '2026-09-17T00:00:00Z',
+      workingRevisionId: 'r-old', publishedRevisionId: 'r-old',
+      content: { ...blankContent([{ book: 43, chapter: 3 }]), title: 'Original reflection', body: 'Old body' },
+    };
     const imported: Entry = {
       id: 'imported', createdAt: '2026-09-17T00:00:00Z', updatedAt: '2026-09-17T00:00:00Z',
-      workingRevisionId: 'r1', publishedRevisionId: 'r1',
-      content: { ...blankContent([{ book: 43, chapter: 3 }]), title: 'Imported reflection' },
+      workingRevisionId: 'r-import', publishedRevisionId: 'r-import',
+      content: { ...blankContent([{ book: 43, chapter: 3 }]), title: 'Imported reflection', body: 'Changed legacy body' },
     };
-    vi.mocked(api.listEntries).mockResolvedValueOnce([]).mockResolvedValueOnce([imported]);
-    const { rerender } = render(<JournalWorkspace api={api} passage={{ book: 43, chapter: 3 }} reflectRequest={1} refreshRequest={0} />);
+    vi.mocked(api.listEntries).mockResolvedValueOnce([original]).mockResolvedValueOnce([imported]);
+    vi.mocked(api.saveEntry).mockImplementation(async request => ({
+      ...original, id: request.entryId, workingRevisionId: 'r-local', publishedRevisionId: request.finish ? 'r-local' : original.publishedRevisionId,
+      content: request.content,
+    }));
+    const { rerender } = render(<JournalWorkspace api={api} passage={{ book: 43, chapter: 3 }} reflectRequest={0} refreshRequest={0} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Original reflection/ }));
     const editor = await screen.findByLabelText(/Reflection Markdown/);
-    fireEvent.change(editor, { target: { value: 'Unsaved current writing' } });
-    rerender(<JournalWorkspace api={api} passage={{ book: 43, chapter: 3 }} reflectRequest={1} refreshRequest={1} />);
+    fireEvent.change(editor, { target: { value: 'Locally committed before import refresh' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Finish entry' }));
+    await screen.findByText('Finished');
+    rerender(<JournalWorkspace api={api} passage={{ book: 43, chapter: 3 }} reflectRequest={0} refreshRequest={1} />);
     await screen.findByRole('button', { name: /Imported reflection/ });
-    expect((editor as HTMLTextAreaElement).value).toBe('Unsaved current writing');
+    expect((editor as HTMLTextAreaElement).value).toBe('Locally committed before import refresh');
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const importedButton = screen.getByRole('button', { name: /Imported reflection/ }) as HTMLButtonElement;
+    await waitFor(() => expect(importedButton.disabled).toBe(false));
+    fireEvent.click(importedButton);
+    await waitFor(() => expect((screen.getByLabelText(/Reflection Markdown/) as HTMLTextAreaElement).value).toBe('Changed legacy body'));
+    fireEvent.change(screen.getByLabelText(/Reflection Markdown/), { target: { value: 'Edit imported revision' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Finish entry' }));
+    await waitFor(() => expect(vi.mocked(api.saveEntry).mock.calls.at(-1)?.[0].expectedRevisionId).toBe('r-import'));
   });
 
   it('combines revisit filters without changing open writing', async () => {
