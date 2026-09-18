@@ -301,6 +301,24 @@ async fn list_plan_definition_versions(
     list_plan_definition_versions_for_store(state.journal.clone(), plan_id).await
 }
 
+async fn list_latest_plan_definition_versions_for_store(
+    store: Arc<Mutex<JournalStore>>,
+) -> Result<Vec<PlanDefinitionVersion>, String> {
+    run_store(store, |journal| {
+        journal
+            .list_latest_plan_definition_versions()
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn list_latest_plan_definition_versions(
+    state: State<'_, AppState>,
+) -> Result<Vec<PlanDefinitionVersion>, String> {
+    list_latest_plan_definition_versions_for_store(state.journal.clone()).await
+}
+
 async fn list_plan_enrollments_for_store(
     store: Arc<Mutex<JournalStore>>,
 ) -> Result<Vec<PlanEnrollment>, String> {
@@ -515,6 +533,77 @@ mod plan_command_tests {
                 .await
                 .unwrap(),
                 before_invalid
+            );
+        });
+    }
+
+    #[test]
+    fn latest_plan_definition_discovery_is_empty_ordered_durable_and_propagates_errors() {
+        tauri::async_runtime::block_on(async {
+            let (directory, store) = test_store();
+            assert!(
+                list_latest_plan_definition_versions_for_store(store.clone())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+
+            let portable = r#"{"schemaVersion":1,"name":"Discovery","schedule":{"kind":"explicitSchedule","days":[{"day":1,"passages":[{"book":43,"chapter":3}]}]}}"#;
+            let first = import_plan_definition_json_for_store(store.clone(), portable.into())
+                .await
+                .unwrap();
+            let second = import_plan_definition_json_for_store(store.clone(), portable.into())
+                .await
+                .unwrap();
+            let expected = store
+                .lock()
+                .unwrap()
+                .list_latest_plan_definition_versions()
+                .unwrap();
+            assert_eq!(
+                list_latest_plan_definition_versions_for_store(store.clone())
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(expected.len(), 2);
+            assert!(expected.iter().any(|version| version.id == first.id));
+            assert!(expected.iter().any(|version| version.id == second.id));
+            assert!(store
+                .lock()
+                .unwrap()
+                .list_plan_enrollments()
+                .unwrap()
+                .is_empty());
+
+            let path = directory.path().join("journal.sqlite3");
+            drop(store);
+            let reopened = Arc::new(Mutex::new(JournalStore::open(&path).unwrap()));
+            assert_eq!(
+                list_latest_plan_definition_versions_for_store(reopened.clone())
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert!(reopened
+                .lock()
+                .unwrap()
+                .list_plan_enrollments()
+                .unwrap()
+                .is_empty());
+
+            let poisoned = reopened.clone();
+            assert!(std::thread::spawn(move || {
+                let _guard = poisoned.lock().unwrap();
+                panic!("poison the test mutex");
+            })
+            .join()
+            .is_err());
+            assert_eq!(
+                list_latest_plan_definition_versions_for_store(reopened)
+                    .await
+                    .unwrap_err(),
+                "Journal is unavailable; restart the app."
             );
         });
     }
@@ -923,6 +1012,7 @@ pub fn run() {
             export_plan_definition_json,
             get_plan_definition_version,
             list_plan_definition_versions,
+            list_latest_plan_definition_versions,
             list_plan_enrollments,
             enroll_in_chapter_streams,
             active_plan_assignments,

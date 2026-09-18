@@ -89,18 +89,21 @@ describe('native plan-definition adapter', () => {
       .mockResolvedValueOnce(streamVersion)
       .mockResolvedValueOnce('{"schemaVersion":1}')
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce([version]);
+      .mockResolvedValueOnce([version])
+      .mockResolvedValueOnce([streamVersion]);
 
     await expect(nativePlans.registerFourStreamPlan()).resolves.toEqual(version);
     await expect(nativePlans.importPlanDefinitionJson('{"schemaVersion":1}')).resolves.toEqual(streamVersion);
     await expect(nativePlans.exportPlanDefinitionJson('version-1')).resolves.toBe('{"schemaVersion":1}');
     await expect(nativePlans.getPlanDefinitionVersion('missing-version')).resolves.toBeNull();
     await expect(nativePlans.listPlanDefinitionVersions('plan-1')).resolves.toEqual([version]);
+    await expect(nativePlans.listLatestPlanDefinitionVersions()).resolves.toEqual([streamVersion]);
     expect(native.invoke).toHaveBeenNthCalledWith(1, 'register_four_stream_plan');
     expect(native.invoke).toHaveBeenNthCalledWith(2, 'import_plan_definition_json', { input: '{"schemaVersion":1}' });
     expect(native.invoke).toHaveBeenNthCalledWith(3, 'export_plan_definition_json', { versionId: 'version-1' });
     expect(native.invoke).toHaveBeenNthCalledWith(4, 'get_plan_definition_version', { versionId: 'missing-version' });
     expect(native.invoke).toHaveBeenNthCalledWith(5, 'list_plan_definition_versions', { planId: 'plan-1' });
+    expect(native.invoke).toHaveBeenNthCalledWith(6, 'list_latest_plan_definition_versions');
   });
 
   it('propagates a native mutation error without retrying the import', async () => {
@@ -142,6 +145,23 @@ describe('native plan-definition adapter', () => {
     await expect(nativePlans.listPlanEnrollments()).rejects.toBe(error);
     expect(native.invoke).toHaveBeenCalledTimes(1);
     expect(native.invoke).toHaveBeenCalledWith('list_plan_enrollments');
+  });
+
+  it('returns an empty latest-definition result unchanged', async () => {
+    native.invoke.mockResolvedValueOnce([]);
+
+    await expect(nativePlans.listLatestPlanDefinitionVersions()).resolves.toEqual([]);
+    expect(native.invoke).toHaveBeenCalledTimes(1);
+    expect(native.invoke).toHaveBeenCalledWith('list_latest_plan_definition_versions');
+  });
+
+  it('propagates latest-definition discovery errors without retrying', async () => {
+    const error = new Error('Journal is unavailable; restart the app.');
+    native.invoke.mockRejectedValueOnce(error);
+
+    await expect(nativePlans.listLatestPlanDefinitionVersions()).rejects.toBe(error);
+    expect(native.invoke).toHaveBeenCalledTimes(1);
+    expect(native.invoke).toHaveBeenCalledWith('list_latest_plan_definition_versions');
   });
 
   it('maps stream progress operations with the complete stale-completion precondition', async () => {
