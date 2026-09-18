@@ -350,6 +350,15 @@ pub struct DatedPlanAssignment {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CalendarAssignmentCompletion {
+    pub id: String,
+    pub assignment_id: String,
+    pub enrollment_id: String,
+    pub completed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlanAssignment {
     pub id: String,
     pub enrollment_id: String,
@@ -531,6 +540,57 @@ pub(crate) fn calendar_assignments(
             },
         )
         .collect()
+}
+
+pub(crate) fn complete_calendar_assignment(
+    conn: &mut Connection,
+    enrollment_id: &str,
+    assignment_id: &str,
+) -> Result<CalendarAssignmentCompletion> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT enrollment_id FROM plan_calendar_assignments WHERE id=?1",
+            [assignment_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    ensure!(
+        owner.as_deref() == Some(enrollment_id),
+        "Calendar assignment does not belong to enrollment"
+    );
+    let completion = CalendarAssignmentCompletion {
+        id: Uuid::new_v4().to_string(),
+        assignment_id: assignment_id.to_owned(),
+        enrollment_id: enrollment_id.to_owned(),
+        completed_at: Utc::now().to_rfc3339(),
+    };
+    tx.execute(
+        "INSERT INTO plan_calendar_completions(id,assignment_id,enrollment_id,completed_at) VALUES(?1,?2,?3,?4)",
+        params![completion.id, completion.assignment_id, completion.enrollment_id, completion.completed_at],
+    )?;
+    tx.commit()?;
+    Ok(completion)
+}
+
+pub(crate) fn calendar_completion_history(
+    conn: &Connection,
+    enrollment_id: &str,
+) -> Result<Vec<CalendarAssignmentCompletion>> {
+    let mut statement = conn.prepare(
+        "SELECT id,assignment_id,enrollment_id,completed_at FROM plan_calendar_completions WHERE enrollment_id=?1 ORDER BY completed_at,id",
+    )?;
+    let completions = statement
+        .query_map([enrollment_id], |row| {
+            Ok(CalendarAssignmentCompletion {
+                id: row.get(0)?,
+                assignment_id: row.get(1)?,
+                enrollment_id: row.get(2)?,
+                completed_at: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(completions)
 }
 
 pub(crate) fn calendar_enrollment(
@@ -1193,6 +1253,14 @@ CREATE TABLE IF NOT EXISTS plan_calendar_assignments(
  UNIQUE(enrollment_id,definition_day),
  UNIQUE(enrollment_id,local_date)
 );
+CREATE TABLE IF NOT EXISTS plan_calendar_completions(
+ id TEXT PRIMARY KEY,
+ assignment_id TEXT NOT NULL UNIQUE REFERENCES plan_calendar_assignments(id),
+ enrollment_id TEXT NOT NULL REFERENCES plan_calendar_enrollments(enrollment_id),
+ completed_at TEXT NOT NULL,
+ FOREIGN KEY(assignment_id,enrollment_id) REFERENCES plan_calendar_assignments(id,enrollment_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS plan_calendar_assignment_owner ON plan_calendar_assignments(id,enrollment_id);
 CREATE TRIGGER IF NOT EXISTS plan_calendar_enrollments_immutable BEFORE UPDATE ON plan_calendar_enrollments
 BEGIN SELECT RAISE(ABORT,'Calendar enrollments are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS plan_calendar_enrollments_retained BEFORE DELETE ON plan_calendar_enrollments
@@ -1200,6 +1268,10 @@ BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
 CREATE TRIGGER IF NOT EXISTS plan_calendar_assignments_immutable BEFORE UPDATE ON plan_calendar_assignments
 BEGIN SELECT RAISE(ABORT,'Calendar assignments are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS plan_calendar_assignments_retained BEFORE DELETE ON plan_calendar_assignments
+BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER IF NOT EXISTS plan_calendar_completions_immutable BEFORE UPDATE ON plan_calendar_completions
+BEGIN SELECT RAISE(ABORT,'Calendar completions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS plan_calendar_completions_retained BEFORE DELETE ON plan_calendar_completions
 BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
 CREATE TRIGGER IF NOT EXISTS plan_calendar_assignments_match BEFORE INSERT ON plan_calendar_assignments
 WHEN NOT EXISTS(

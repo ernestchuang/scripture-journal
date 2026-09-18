@@ -15,10 +15,10 @@ pub use export::ExportReport;
 pub use plans::{
     expand_calendar_assignments, four_stream_plan_definition, mcheyne_plan_definition,
     parse_plan_definition_json, serialize_plan_definition_json, CalendarAssignment,
-    CalendarPlanEnrollment, CalendarScheduleMode, ChapterRef, ChapterStream, CompleteStreamRequest,
-    DatedPlanAssignment, ExplicitScheduleDay, PlanAssignment, PlanCompletion,
-    PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, PlanSchedule,
-    StreamEnrollment, MAX_PLAN_DEFINITION_JSON_BYTES,
+    CalendarAssignmentCompletion, CalendarPlanEnrollment, CalendarScheduleMode, ChapterRef,
+    ChapterStream, CompleteStreamRequest, DatedPlanAssignment, ExplicitScheduleDay, PlanAssignment,
+    PlanCompletion, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion,
+    PlanEnrollment, PlanSchedule, StreamEnrollment, MAX_PLAN_DEFINITION_JSON_BYTES,
 };
 
 /// A passage in canonical Protestant 66-book order using KJV versification.
@@ -87,7 +87,7 @@ impl JournalStore {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(
-            (0..=8).contains(&version),
+            (0..=9).contains(&version),
             "Unsupported journal schema version {version}"
         );
         if version == 0 {
@@ -109,7 +109,7 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 8)?;
+            tx.pragma_update(None, "user_version", 9)?;
             tx.commit()?;
         } else if version == 1 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -120,7 +120,7 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 8)?;
+            tx.pragma_update(None, "user_version", 9)?;
             tx.commit()?;
         } else if version == 2 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -130,7 +130,7 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 8)?;
+            tx.pragma_update(None, "user_version", 9)?;
             tx.commit()?;
         } else if version == 3 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -139,7 +139,7 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 8)?;
+            tx.pragma_update(None, "user_version", 9)?;
             tx.commit()?;
         } else if version == 4 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -147,7 +147,7 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 8)?;
+            tx.pragma_update(None, "user_version", 9)?;
             tx.commit()?;
         } else if version == 5 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -155,18 +155,18 @@ impl JournalStore {
             plans::migrate_assignment_positions(&tx)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 8)?;
+            tx.pragma_update(None, "user_version", 9)?;
             tx.commit()?;
         } else if version == 6 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::BUILT_IN_PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 8)?;
+            tx.pragma_update(None, "user_version", 9)?;
             tx.commit()?;
-        } else if version == 7 {
+        } else if version == 7 || version == 8 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::PLAN_CALENDAR_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 8)?;
+            tx.pragma_update(None, "user_version", 9)?;
             tx.commit()?;
         }
         let store = Self { conn };
@@ -404,6 +404,24 @@ impl JournalStore {
     ) -> Result<Option<CalendarPlanEnrollment>> {
         validate_id(enrollment_id)?;
         plans::calendar_enrollment(&self.conn, enrollment_id)
+    }
+
+    pub fn complete_calendar_assignment(
+        &mut self,
+        enrollment_id: &str,
+        assignment_id: &str,
+    ) -> Result<CalendarAssignmentCompletion> {
+        validate_id(enrollment_id)?;
+        validate_id(assignment_id)?;
+        plans::complete_calendar_assignment(&mut self.conn, enrollment_id, assignment_id)
+    }
+
+    pub fn calendar_completion_history(
+        &self,
+        enrollment_id: &str,
+    ) -> Result<Vec<CalendarAssignmentCompletion>> {
+        validate_id(enrollment_id)?;
+        plans::calendar_completion_history(&self.conn, enrollment_id)
     }
 
     /// Lists retained enrollments oldest first, breaking timestamp ties by enrollment ID.

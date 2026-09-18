@@ -237,6 +237,189 @@ fn calendar_enrollment_failures_leave_exactly_no_partial_state() {
 }
 
 #[test]
+fn calendar_completion_is_owned_immutable_and_durable() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(mcheyne_plan_definition())
+        .unwrap();
+    let first = store
+        .enroll_in_calendar(&version.id, date(2026, 1, 1), CalendarScheduleMode::DayOne)
+        .unwrap();
+    let second = store
+        .enroll_in_calendar(&version.id, date(2026, 2, 1), CalendarScheduleMode::DayOne)
+        .unwrap();
+    let assignment = store
+        .calendar_plan_assignments(&first.id)
+        .unwrap()
+        .remove(0);
+    let other = store
+        .calendar_plan_assignments(&second.id)
+        .unwrap()
+        .remove(0);
+
+    assert!(store
+        .complete_calendar_assignment(&second.id, &assignment.id)
+        .unwrap_err()
+        .to_string()
+        .contains("does not belong"));
+    assert!(store
+        .complete_calendar_assignment(&first.id, &other.id)
+        .unwrap_err()
+        .to_string()
+        .contains("does not belong"));
+    assert!(store
+        .calendar_completion_history(&first.id)
+        .unwrap()
+        .is_empty());
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER inject_calendar_completion_failure BEFORE INSERT ON plan_calendar_completions
+         BEGIN SELECT RAISE(ABORT,'injected calendar completion failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+    let mut store = JournalStore::open(&path).unwrap();
+    assert!(store
+        .complete_calendar_assignment(&first.id, &assignment.id)
+        .unwrap_err()
+        .to_string()
+        .contains("injected calendar completion failure"));
+    assert!(store
+        .calendar_completion_history(&first.id)
+        .unwrap()
+        .is_empty());
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TRIGGER inject_calendar_completion_failure;")
+        .unwrap();
+    drop(conn);
+    let mut store = JournalStore::open(&path).unwrap();
+    let completion = store
+        .complete_calendar_assignment(&first.id, &assignment.id)
+        .unwrap();
+    assert_eq!(completion.assignment_id, assignment.id);
+    assert_eq!(completion.enrollment_id, first.id);
+    assert!(store
+        .complete_calendar_assignment(&first.id, &assignment.id)
+        .is_err());
+    assert_eq!(
+        store.calendar_completion_history(&second.id).unwrap(),
+        vec![]
+    );
+    drop(store);
+
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.calendar_completion_history(&first.id).unwrap(),
+        vec![completion.clone()]
+    );
+    drop(reopened);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert!(conn
+        .execute(
+            "UPDATE plan_calendar_completions SET completed_at=completed_at",
+            []
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("immutable"));
+    assert!(conn
+        .execute("DELETE FROM plan_calendar_completions", [])
+        .unwrap_err()
+        .to_string()
+        .contains("retained"));
+}
+
+#[test]
+fn simultaneous_stores_create_only_one_calendar_completion() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut setup = JournalStore::open(&path).unwrap();
+    let version = setup
+        .create_plan_definition(mcheyne_plan_definition())
+        .unwrap();
+    let enrollment = setup
+        .enroll_in_calendar(&version.id, date(2026, 1, 1), CalendarScheduleMode::DayOne)
+        .unwrap();
+    let assignment = setup
+        .calendar_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    drop(setup);
+    let mut first = JournalStore::open(&path).unwrap();
+    let mut second = JournalStore::open(&path).unwrap();
+    let completion = first
+        .complete_calendar_assignment(&enrollment.id, &assignment.id)
+        .unwrap();
+    assert!(second
+        .complete_calendar_assignment(&enrollment.id, &assignment.id)
+        .is_err());
+    assert_eq!(
+        second.calendar_completion_history(&enrollment.id).unwrap(),
+        vec![completion]
+    );
+}
+
+#[test]
+fn schema_eight_migration_preserves_populated_calendar_rows() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(mcheyne_plan_definition())
+        .unwrap();
+    let enrollment = store
+        .enroll_in_calendar(
+            &version.id,
+            date(2026, 12, 31),
+            CalendarScheduleMode::CalendarAligned,
+        )
+        .unwrap();
+    let assignments = store.calendar_plan_assignments(&enrollment.id).unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TRIGGER plan_calendar_completions_immutable; DROP TRIGGER plan_calendar_completions_retained; DROP TABLE plan_calendar_completions; PRAGMA user_version=8;").unwrap();
+    drop(conn);
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .get_calendar_plan_enrollment(&enrollment.id)
+            .unwrap(),
+        Some(enrollment.clone())
+    );
+    assert_eq!(
+        reopened.calendar_plan_assignments(&enrollment.id).unwrap(),
+        assignments
+    );
+    assert!(reopened
+        .calendar_completion_history(&enrollment.id)
+        .unwrap()
+        .is_empty());
+    drop(reopened);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        9
+    );
+    assert_eq!(
+        conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn calendar_rows_are_immutable_retained_and_version_owned() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
@@ -440,11 +623,11 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
         vec![version, second_version]
     );
     drop(reopened);
-    assert_database_integrity(&path, 8);
+    assert_database_integrity(&path, 9);
 
     let mut reopened_again = JournalStore::open(&path).unwrap();
     assert_eq!(schema_seven_fingerprint(&path), retained);
-    assert_database_integrity(&path, 8);
+    assert_database_integrity(&path, 9);
     let calendar = reopened_again
         .enroll_in_calendar(
             &built_in.id,
