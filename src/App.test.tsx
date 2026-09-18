@@ -20,6 +20,9 @@ const native = vi.hoisted(() => ({
   createPlanDefinitionVersion: vi.fn(),
   exportPlanDefinitionJson: vi.fn(),
   enrollInChapterStreams: vi.fn(),
+  enrollInCalendar: vi.fn(),
+  getCalendarPlanEnrollment: vi.fn(),
+  calendarPlanAssignments: vi.fn(),
   completePlanStream: vi.fn(),
   undoPlanCompletion: vi.fn(),
 }));
@@ -52,6 +55,9 @@ vi.mock('./platform/plans', () => ({
     createPlanDefinitionVersion: native.createPlanDefinitionVersion,
     exportPlanDefinitionJson: native.exportPlanDefinitionJson,
     enrollInChapterStreams: native.enrollInChapterStreams,
+    enrollInCalendar: native.enrollInCalendar,
+    getCalendarPlanEnrollment: native.getCalendarPlanEnrollment,
+    calendarPlanAssignments: native.calendarPlanAssignments,
     completePlanStream: native.completePlanStream,
     undoPlanCompletion: native.undoPlanCompletion,
   },
@@ -99,6 +105,9 @@ beforeEach(() => {
   native.createPlanDefinitionVersion.mockReset();
   native.exportPlanDefinitionJson.mockReset();
   native.enrollInChapterStreams.mockReset();
+  native.enrollInCalendar.mockReset();
+  native.getCalendarPlanEnrollment.mockReset().mockResolvedValue(null);
+  native.calendarPlanAssignments.mockReset().mockResolvedValue([]);
   native.completePlanStream.mockReset();
   native.undoPlanCompletion.mockReset();
 });
