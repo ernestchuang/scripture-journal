@@ -454,4 +454,43 @@ describe('retained plan panel', () => {
     expect(plans.activePlanAssignments).toHaveBeenCalledTimes(2);
     expect(plans.completePlanStream).toHaveBeenCalledTimes(1);
   });
+
+  it('recovers retained details when completion refresh fails after A-to-B-to-A navigation', async () => {
+    let resolveCompletion!: (value: { id: string; assignmentId: string; completedAt: string }) => void;
+    let resolveOldDetails!: (value: Awaited<ReturnType<PlanDefinitionApi['activePlanAssignments']>>) => void;
+    let rejectRefresh!: (reason: unknown) => void;
+    const plans = api();
+    const current = { id: 'assignment-1', enrollmentId: first.id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' };
+    const independent = { id: 'assignment-2', enrollmentId: first.id, streamId: 'old', ordinal: 1, cycle: 1, passage: { book: 1, chapter: 1 }, streamPosition: 0, progressId: 'progress-2' };
+    const advanced = { ...current, id: 'assignment-3', ordinal: 2, passage: { book: 19, chapter: 2 }, streamPosition: 1, progressId: 'progress-3' };
+    vi.mocked(plans.activePlanAssignments)
+      .mockResolvedValueOnce([current, independent])
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(() => new Promise(resolve => { resolveOldDetails = resolve; }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRefresh = reject; }))
+      .mockResolvedValueOnce([advanced, independent]);
+    vi.mocked(plans.completePlanStream).mockImplementationOnce(() => new Promise(resolve => { resolveCompletion = resolve; }));
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete psalms' }));
+    const select = screen.getByLabelText('Retained enrollment');
+    fireEvent.change(select, { target: { value: second.id } });
+    expect(await screen.findByText('Second plan')).toBeTruthy();
+    fireEvent.change(select, { target: { value: first.id } });
+    expect(await screen.findByText('Loading current assignments…')).toBeTruthy();
+
+    await act(async () => { resolveCompletion({ id: 'completion-1', assignmentId: current.id, completedAt: '2026-09-18T00:00:03Z' }); });
+    await waitFor(() => expect(plans.activePlanAssignments).toHaveBeenCalledTimes(4));
+    await act(async () => { rejectRefresh(new Error('refresh failed')); });
+    await act(async () => { resolveOldDetails([current, independent]); });
+    expect(screen.queryByText('Loading current assignments…')).toBeNull();
+    expect(await screen.findByText(/Chapter was completed, but assignments could not be refreshed: Error: refresh failed/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete psalms' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete old' })).toBeTruthy();
+    expect((select as HTMLSelectElement).value).toBe(first.id);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry assignments' }));
+    expect(await screen.findByText('Book 19 · Chapter 2')).toBeTruthy();
+    expect(screen.getByText('Book 1 · Chapter 1')).toBeTruthy();
+    expect(plans.completePlanStream).toHaveBeenCalledTimes(1);
+  });
 });
