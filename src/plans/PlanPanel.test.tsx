@@ -17,6 +17,7 @@ const fourStream = {
     { id: 'proverbs', name: 'Proverbs', chapters: [{ book: 20, chapter: 1 }] },
   ] } },
 };
+const mcheyne = { id: 'mcheyne-version', planId: 'mcheyne-plan', version: 1, createdAt: first.createdAt, definition: { schemaVersion: 1, name: "M’Cheyne's Daily Bible Readings", schedule: { kind: 'explicitSchedule' as const, days: [{ day: 1, passages: [{ book: 1, chapter: 1 }] }] } } };
 const created: PlanEnrollment = { id: 'enrollment-new', definitionVersionId: fourStream.id, createdAt: '2026-09-18T00:00:02Z' };
 const history = (id: string, enrollmentId = first.id, undone = false) => ({ id, assignmentId: 'assignment-1', enrollmentId, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, completedAt: '2026-09-18T00:00:03Z', undone });
 const importedPlan = { id: 'custom-version', planId: 'custom-plan', version: 1, createdAt: first.createdAt, definition: { schemaVersion: 1, name: 'Imported streams', schedule: { kind: 'chapterStreams' as const, streams: [] } } };
@@ -29,13 +30,14 @@ const importedStreams = { ...importedPlan, definition: { ...importedPlan.definit
 const customEnrollment: PlanEnrollment = { id: 'custom-enrollment', definitionVersionId: importedStreams.id, createdAt: '2026-09-18T00:00:04Z' };
 const retainedStreams = { ...importedStreams, id: retainedDefinition.id, planId: retainedDefinition.planId, definition: { ...importedStreams.definition, name: 'Duplicate name' } };
 const retainedEnrollment: PlanEnrollment = { id: 'retained-enrollment', definitionVersionId: retainedStreams.id, createdAt: '2026-09-18T00:00:05Z' };
-const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
+const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   listLatestPlanDefinitionVersions: vi.fn(async () => []),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
   activePlanAssignments: vi.fn(async id => id === first.id ? [{ id: 'assignment-1', enrollmentId: id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' }] : []),
   planCompletionHistory: vi.fn(async () => []),
   registerFourStreamPlan: vi.fn(async () => fourStream),
+  registerMcheynePlan: vi.fn(async () => mcheyne),
   importPlanDefinitionJson: vi.fn(async () => importedPlan),
   createPlanDefinitionVersion: vi.fn(async (_planId, definition) => ({ ...retainedDefinition, id: 'retained-version-3', version: 2, definition })),
   exportPlanDefinitionJson: vi.fn(async id => `{"versionId":"${id}"}`),
@@ -45,6 +47,64 @@ const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanD
 });
 
 describe('retained plan panel', () => {
+  it('registers M’Cheyne only after explicit guarded submission, retains its identity, and does not enroll it', async () => {
+    let resolveRegistration!: (value: typeof mcheyne) => void;
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValueOnce([retainedDefinition]).mockResolvedValueOnce([retainedDefinition, mcheyne]).mockResolvedValueOnce([retainedDefinition, mcheyne]);
+    vi.mocked(plans.registerMcheynePlan).mockImplementationOnce(() => new Promise(resolve => { resolveRegistration = resolve; }));
+    render(<PlanPanel api={plans} />);
+    const select = await screen.findByLabelText('Retained plan definition') as HTMLSelectElement;
+    expect(plans.registerMcheynePlan).not.toHaveBeenCalled();
+    const register = screen.getByRole('button', { name: 'Register M’Cheyne plan' });
+    fireEvent.click(register);
+    fireEvent.click(register);
+    expect((screen.getByRole('button', { name: 'Registering M’Cheyne plan…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(plans.registerMcheynePlan).toHaveBeenCalledTimes(1);
+    await act(async () => { resolveRegistration(mcheyne); });
+    expect(await screen.findByText(/Registered M’Cheyne definition version 1 for plan mcheyne-plan/)).toBeTruthy();
+    await waitFor(() => expect(plans.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(2));
+    expect(Array.from(select.options, option => option.value)).toContain(mcheyne.id);
+    fireEvent.click(screen.getByRole('button', { name: 'Register M’Cheyne plan' }));
+    await waitFor(() => expect(plans.registerMcheynePlan).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(plans.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(3));
+    expect(Array.from(select.options, option => option.value).filter(id => id === mcheyne.id)).toHaveLength(1);
+    expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
+  });
+
+  it('keeps a confirmed M’Cheyne definition and preserved inputs through refresh failure, then retries discovery without registering again', async () => {
+    const selectedStreams = { ...retainedStreams, id: 'selected-streams-version', planId: 'selected-streams-plan' };
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions)
+      .mockResolvedValueOnce([retainedDefinition, selectedStreams])
+      .mockRejectedValueOnce(new Error('MCheyne discovery offline'))
+      .mockResolvedValueOnce([retainedDefinition, selectedStreams, mcheyne]);
+    render(<PlanPanel api={plans} />);
+    const select = await screen.findByLabelText('Retained plan definition') as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: selectedStreams.id } });
+    const starts = await screen.findAllByLabelText('Retained starting chapter');
+    fireEvent.change(starts[0], { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"keep":true}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Register M’Cheyne plan' }));
+    expect(await screen.findByText(/Retained definitions could not be refreshed after the confirmed write: Error: MCheyne discovery offline/)).toBeTruthy();
+    expect(Array.from(select.options, option => option.value)).toContain(mcheyne.id);
+    expect(select.value).toBe(selectedStreams.id);
+    expect((screen.getByLabelText('Custom plan JSON') as HTMLTextAreaElement).value).toBe('{"keep":true}');
+    expect((screen.getAllByLabelText('Retained starting chapter')[0] as HTMLSelectElement).value).toBe('1');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry retained definitions' }));
+    await waitFor(() => expect(plans.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(3));
+    expect(plans.registerMcheynePlan).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a M’Cheyne registration failure and permits one explicit retry', async () => {
+    const plans = api();
+    vi.mocked(plans.registerMcheynePlan).mockRejectedValueOnce(new Error('native unavailable'));
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Register M’Cheyne plan' }));
+    expect(await screen.findByText(/Could not register M’Cheyne plan: Error: native unavailable/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry M’Cheyne registration' }));
+    await waitFor(() => expect(plans.registerMcheynePlan).toHaveBeenCalledTimes(2));
+  });
+
   it('loads retained definitions in core order and distinguishes duplicate names by identity', async () => {
     let resolveDefinitions!: (value: PlanDefinitionVersion[]) => void;
     const plans = api();

@@ -14,7 +14,7 @@ type PlanHistory =
   | { kind: 'ready'; items: PlanCompletionHistoryItem[] };
 type ReadyPlanHistory = Extract<PlanHistory, { kind: 'ready' }>;
 
-type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'>;
+type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'>;
 
 function mergeConfirmedDefinitions(items: PlanDefinitionVersion[], confirmed: Map<string, PlanDefinitionVersion>, acknowledge = true) {
   const visible = items.map(item => {
@@ -45,6 +45,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [choices, setChoices] = useState<StreamEnrollment[]>([]);
   const [offerError, setOfferError] = useState('');
   const [preparing, setPreparing] = useState(false);
+  const [registeringMcheyne, setRegisteringMcheyne] = useState(false);
+  const [mcheyneResult, setMcheyneResult] = useState<{ version?: PlanDefinitionVersion; message?: string } | null>(null);
   const [enrolling, setEnrolling] = useState(false);
   const [completingId, setCompletingId] = useState('');
   const [completionMessage, setCompletionMessage] = useState('');
@@ -76,6 +78,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const detailEpoch = useRef(0);
   const historyEpoch = useRef(0);
   const actionEpoch = useRef(0);
+  const mcheyneEpoch = useRef(0);
   const completionEpoch = useRef(0);
   const undoEpoch = useRef(0);
   const importEpoch = useRef(0);
@@ -101,6 +104,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
 
   useEffect(() => () => {
     actionEpoch.current += 1;
+    mcheyneEpoch.current += 1;
     completionEpoch.current += 1;
     undoEpoch.current += 1;
     importEpoch.current += 1;
@@ -323,6 +327,26 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       if (epoch === actionEpoch.current) setOfferError(`Could not prepare four-stream enrollment: ${String(error)}`);
     } finally {
       if (epoch === actionEpoch.current) setPreparing(false);
+    }
+  }
+
+  async function registerMcheyne() {
+    if (!api || registeringMcheyne) return;
+    const epoch = ++mcheyneEpoch.current;
+    setRegisteringMcheyne(true);
+    setMcheyneResult(null);
+    try {
+      const version = await api.registerMcheynePlan();
+      if (epoch !== mcheyneEpoch.current) return;
+      if (version.definition.schedule.kind !== 'explicitSchedule') {
+        throw new Error('The native M’Cheyne definition is unavailable.');
+      }
+      setMcheyneResult({ version });
+      void refreshDefinitionsAfterWrite(version);
+    } catch (error) {
+      if (epoch === mcheyneEpoch.current) setMcheyneResult({ message: `Could not register M’Cheyne plan: ${String(error)}` });
+    } finally {
+      if (epoch === mcheyneEpoch.current) setRegisteringMcheyne(false);
     }
   }
 
@@ -580,6 +604,13 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
         <button disabled={enrolling || enrollingRetained || choices.length !== 4} onClick={() => void enroll()}>{enrolling ? 'Creating enrollment…' : 'Create enrollment'}</button>
       </>}
       {offerError && <div role="alert" className="plan-error">{offerError}</div>}
+    </section>
+    <section className="plan-enrollment" aria-label="Register M’Cheyne plan">
+      <h3>M’Cheyne’s Daily Bible Readings</h3>
+      <p>Register the retained 365-day calendar definition. Registration does not enroll you or schedule readings.</p>
+      <button disabled={registeringMcheyne} onClick={() => void registerMcheyne()}>{registeringMcheyne ? 'Registering M’Cheyne plan…' : mcheyneResult?.message ? 'Retry M’Cheyne registration' : 'Register M’Cheyne plan'}</button>
+      {mcheyneResult?.version && <p role="status">Registered M’Cheyne definition version {mcheyneResult.version.version} for plan {mcheyneResult.version.planId}. Calendar enrollment is not available yet.</p>}
+      {mcheyneResult?.message && <div role="alert" className="plan-error">{mcheyneResult.message}</div>}
     </section>
     <section className="plan-import" aria-label="Import custom plan">
       <h3>Import custom plan</h3>

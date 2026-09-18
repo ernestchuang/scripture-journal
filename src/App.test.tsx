@@ -15,6 +15,7 @@ const native = vi.hoisted(() => ({
   activePlanAssignments: vi.fn(),
   planCompletionHistory: vi.fn(),
   registerFourStreamPlan: vi.fn(),
+  registerMcheynePlan: vi.fn(),
   importPlanDefinitionJson: vi.fn(),
   createPlanDefinitionVersion: vi.fn(),
   exportPlanDefinitionJson: vi.fn(),
@@ -46,6 +47,7 @@ vi.mock('./platform/plans', () => ({
     activePlanAssignments: native.activePlanAssignments,
     planCompletionHistory: native.planCompletionHistory,
     registerFourStreamPlan: native.registerFourStreamPlan,
+    registerMcheynePlan: native.registerMcheynePlan,
     importPlanDefinitionJson: native.importPlanDefinitionJson,
     createPlanDefinitionVersion: native.createPlanDefinitionVersion,
     exportPlanDefinitionJson: native.exportPlanDefinitionJson,
@@ -92,6 +94,7 @@ beforeEach(() => {
   native.activePlanAssignments.mockReset();
   native.planCompletionHistory.mockReset().mockResolvedValue([]);
   native.registerFourStreamPlan.mockReset();
+  native.registerMcheynePlan.mockReset();
   native.importPlanDefinitionJson.mockReset();
   native.createPlanDefinitionVersion.mockReset();
   native.exportPlanDefinitionJson.mockReset();
@@ -327,6 +330,23 @@ describe('native application close lifecycle', () => {
     expect(native.saveEntry).toHaveBeenCalledTimes(1);
     expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while enrolling' } });
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this while enrolling');
+  });
+
+  it('preserves and autosaves dirty writing while explicitly registering M’Cheyne', async () => {
+    const version = { id: 'mcheyne-version', planId: 'mcheyne-plan', version: 1, createdAt: '2026-09-18T00:00:00Z', definition: { schemaVersion: 1, name: "M’Cheyne's Daily Bible Readings", schedule: { kind: 'explicitSchedule' as const, days: [{ day: 1, passages: [{ book: 1, chapter: 1 }] }] } } };
+    native.registerMcheynePlan.mockResolvedValue(version);
+    native.listLatestPlanDefinitionVersions.mockResolvedValueOnce([]).mockResolvedValueOnce([version]);
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Keep this while registering M’Cheyne' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Register M’Cheyne plan' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(native.registerMcheynePlan).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while registering M’Cheyne' } });
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this while registering M’Cheyne');
   });
 
   it('preserves and autosaves dirty writing while explicitly importing a custom plan', async () => {
