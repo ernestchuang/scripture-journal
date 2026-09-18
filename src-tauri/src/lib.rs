@@ -16,6 +16,7 @@ use tauri_plugin_dialog::DialogExt;
 struct AppState {
     journal: Arc<Mutex<JournalStore>>,
     journal_path: PathBuf,
+    restore_backups: Mutex<HashSet<PathBuf>>,
     export_directories: Mutex<HashSet<PathBuf>>,
 }
 
@@ -48,7 +49,7 @@ async fn create_full_backup(
 }
 
 #[tauri::command]
-async fn stage_full_restore(
+async fn choose_restore_backup(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
@@ -60,14 +61,42 @@ async fn stage_full_restore(
     let Some(folder) = selected else {
         return Ok(None);
     };
-    let folder = folder.into_path().map_err(|e| e.to_string())?;
+    let folder = folder
+        .into_path()
+        .map_err(|e| e.to_string())?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    state
+        .restore_backups
+        .lock()
+        .map_err(|_| "Restore selection is unavailable.")?
+        .insert(folder.clone());
+    Ok(Some(folder.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+async fn stage_full_restore(
+    directory: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let folder = PathBuf::from(directory)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !state
+        .restore_backups
+        .lock()
+        .map_err(|_| "Restore selection is unavailable.")?
+        .remove(&folder)
+    {
+        return Err("Choose the backup again before restoring.".into());
+    }
     let staged = state.journal_path.with_file_name("restore-pending.sqlite3");
     tauri::async_runtime::spawn_blocking(move || {
         journal_core::backup::stage_restore(&folder, &staged).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())??;
-    Ok(Some("Backup verified. Restart Scripture Journal to restore it. Export folders will need to be chosen again.".into()))
+    Ok("Backup verified. Restart Scripture Journal to restore it. Export folders will need to be chosen again.".into())
 }
 
 #[derive(Deserialize)]
@@ -1782,7 +1811,7 @@ pub fn run() {
             let root = app.path().app_data_dir()?;
             std::fs::create_dir_all(&root)?;
             let journal_path = root.join("journal.sqlite3");
-            journal_core::backup::activate_pending(
+            let _restore_result = journal_core::backup::activate_pending(
                 &journal_path,
                 &root.join("restore-pending.sqlite3"),
             )?;
@@ -1790,6 +1819,7 @@ pub fn run() {
             app.manage(AppState {
                 journal: Arc::new(Mutex::new(journal)),
                 journal_path,
+                restore_backups: Mutex::new(HashSet::new()),
                 export_directories: Mutex::new(HashSet::new()),
             });
             Ok(())
@@ -1825,6 +1855,7 @@ pub fn run() {
             read_omarchy_theme,
             startup_appearance,
             create_full_backup,
+            choose_restore_backup,
             stage_full_restore
         ])
         .run(tauri::generate_context!())

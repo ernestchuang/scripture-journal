@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use rusqlite::{backup::Backup, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,12 +13,13 @@ struct Manifest {
 }
 
 pub fn create(source: &Path, destination: &Path) -> Result<()> {
-    let temp = destination.with_extension("sjbackup.tmp");
-    if temp.exists() {
-        fs::remove_dir_all(&temp)?;
-    }
-    fs::create_dir(&temp)?;
-    let db_path = temp.join("journal.sqlite3");
+    let parent = destination
+        .parent()
+        .context("Backup destination needs a parent")?;
+    let temp = tempfile::Builder::new()
+        .prefix(".scripture-journal-backup-")
+        .tempdir_in(parent)?;
+    let db_path = temp.path().join("journal.sqlite3");
     let source = Connection::open(source)?;
     let mut target = Connection::open(&db_path)?;
     Backup::new(&source, &mut target)?.run_to_completion(
@@ -34,13 +35,13 @@ pub fn create(source: &Path, destination: &Path) -> Result<()> {
         sha256: checksum(&db_path)?,
     };
     fs::write(
-        temp.join("manifest.json"),
+        temp.path().join("manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
     )?;
     if destination.exists() {
         bail!("Backup destination already exists");
     }
-    fs::rename(temp, destination)?;
+    fs::rename(temp.keep(), destination)?;
     Ok(())
 }
 
@@ -53,11 +54,21 @@ pub fn stage_restore(backup: &Path, staged: &Path) -> Result<()> {
     if checksum(&source)? != manifest.sha256 {
         bail!("Backup checksum does not match");
     }
-    validate_db(&source)?;
-    let temp = staged.with_extension("tmp");
+    let parent = staged.parent().context("Restore staging needs a parent")?;
+    let temp_dir = tempfile::Builder::new()
+        .prefix(".scripture-journal-restore-")
+        .tempdir_in(parent)?;
+    let temp = temp_dir.path().join("journal.sqlite3");
     fs::copy(&source, &temp)?;
+    ensure!(
+        checksum(&temp)? == manifest.sha256,
+        "Copied backup checksum does not match"
+    );
     validate_db(&temp)?;
-    fs::rename(temp, staged)?;
+    if staged.exists() {
+        bail!("A restore is already pending");
+    }
+    fs::rename(&temp, staged)?;
     Ok(())
 }
 
@@ -65,19 +76,21 @@ pub fn activate_pending(live: &Path, staged: &Path) -> Result<bool> {
     if !staged.exists() {
         return Ok(false);
     }
-    validate_db(staged)?;
+    if let Err(error) = validate_db(staged) {
+        let quarantine = staged.with_extension(format!("invalid-{}.sqlite3", uuid::Uuid::new_v4()));
+        fs::rename(staged, quarantine)?;
+        return Err(
+            error.context("Pending restore was quarantined; current journal remains active")
+        );
+    }
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    let recovery = live.with_extension(format!("pre-restore-{stamp}.sqlite3"));
     create(
         live,
         &live.with_extension(format!("pre-restore-{stamp}.sjbackup")),
     )?;
-    fs::rename(live, &recovery)?;
-    if let Err(error) = fs::rename(staged, live) {
-        fs::rename(recovery, live)?;
-        return Err(error.into());
-    }
-    fs::remove_file(recovery)?;
+    // On supported Unix targets rename atomically replaces the live directory entry.
+    // The old bytes are already durably retained in the verified pre-restore package.
+    fs::rename(staged, live)?;
     Ok(true)
 }
 
@@ -117,6 +130,7 @@ mod tests {
         writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE backup_probe(value TEXT); INSERT INTO backup_probe VALUES('retained');").unwrap();
         let package = root.path().join("journal.sjbackup");
         create(&live, &package).unwrap();
+        let source_bytes = fs::read(package.join("journal.sqlite3")).unwrap();
         let snapshot = Connection::open(package.join("journal.sqlite3")).unwrap();
         assert_eq!(
             snapshot
@@ -127,6 +141,10 @@ mod tests {
         );
         let staged = root.path().join("restore-pending.sqlite3");
         stage_restore(&package, &staged).unwrap();
+        assert_eq!(
+            fs::read(package.join("journal.sqlite3")).unwrap(),
+            source_bytes
+        );
         assert!(JournalStore::open(&staged).is_ok());
     }
 
@@ -172,5 +190,22 @@ mod tests {
                 .is_some_and(|name| name.to_string_lossy().contains("pre-restore"))
                 && path.extension().is_some_and(|e| e == "sjbackup")
         }));
+    }
+
+    #[test]
+    fn invalid_pending_is_quarantined_and_live_journal_remains_openable() {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("journal.sqlite3");
+        drop(JournalStore::open(&live).unwrap());
+        let staged = root.path().join("restore-pending.sqlite3");
+        fs::write(&staged, b"broken pending restore").unwrap();
+        assert!(activate_pending(&live, &staged).is_err());
+        assert!(JournalStore::open(&live).is_ok());
+        assert!(!staged.exists());
+        assert!(root.path().read_dir().unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("restore-pending.invalid-")));
     }
 }

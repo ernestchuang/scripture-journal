@@ -66,7 +66,12 @@ export function App() {
     setBackupBusy(true); setNotice('');
     try {
       await persistence.current?.flush();
-      const result = await invoke<string | null>(command);
+      let result: string | null;
+      if (command === 'stage_full_restore') {
+        const directory = await invoke<string | null>('choose_restore_backup');
+        if (!directory || !window.confirm(`Replace the current journal from this backup after restart?\n\n${directory}\n\nA pre-restore backup will be created first.`)) return;
+        result = await invoke<string>('stage_full_restore', { directory });
+      } else result = await invoke<string | null>(command);
       if (result) setNotice(command === 'create_full_backup' ? `Full backup created: ${result}` : result);
     } catch (error) { setNotice(`Backup operation failed; the current journal was not replaced. ${String(error)}`); }
     finally { setBackupBusy(false); }
