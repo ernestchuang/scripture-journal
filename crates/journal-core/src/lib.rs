@@ -13,8 +13,9 @@ mod plans;
 mod verse_counts;
 pub use export::ExportReport;
 pub use plans::{
-    ChapterRef, ChapterStream, ExplicitScheduleDay, PlanDefinition, PlanDefinitionVersion,
-    PlanSchedule,
+    ChapterRef, ChapterStream, CompleteStreamRequest, ExplicitScheduleDay, PlanAssignment,
+    PlanCompletion, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, PlanSchedule,
+    StreamEnrollment,
 };
 
 /// A passage in canonical Protestant 66-book order using KJV versification.
@@ -83,7 +84,7 @@ impl JournalStore {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(
-            (0..=2).contains(&version),
+            (0..=3).contains(&version),
             "Unsupported journal schema version {version}"
         );
         if version == 0 {
@@ -99,12 +100,19 @@ impl JournalStore {
                 params![Uuid::new_v4().to_string(), Uuid::new_v4().to_string()],
             )?;
             tx.execute_batch(plans::PLAN_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 2)?;
+            tx.execute_batch(plans::PLAN_PROGRESS_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 3)?;
             tx.commit()?;
         } else if version == 1 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::PLAN_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 2)?;
+            tx.execute_batch(plans::PLAN_PROGRESS_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 3)?;
+            tx.commit()?;
+        } else if version == 2 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(plans::PLAN_PROGRESS_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 3)?;
             tx.commit()?;
         }
         let store = Self { conn };
@@ -279,6 +287,34 @@ impl JournalStore {
     ) -> Result<Vec<PlanDefinitionVersion>> {
         validate_id(plan_id)?;
         plans::definition_versions(&self.conn, plan_id)
+    }
+
+    pub fn enroll_in_chapter_streams(
+        &mut self,
+        definition_version_id: &str,
+        streams: Vec<StreamEnrollment>,
+    ) -> Result<PlanEnrollment> {
+        validate_id(definition_version_id)?;
+        plans::enroll(&mut self.conn, definition_version_id, streams)
+    }
+
+    pub fn active_plan_assignments(&self, enrollment_id: &str) -> Result<Vec<PlanAssignment>> {
+        validate_id(enrollment_id)?;
+        plans::active_assignments(&self.conn, enrollment_id)
+    }
+
+    pub fn complete_plan_stream(
+        &mut self,
+        request: CompleteStreamRequest,
+    ) -> Result<PlanCompletion> {
+        validate_id(&request.enrollment_id)?;
+        validate_id(&request.expected_assignment_id)?;
+        plans::complete_stream(&mut self.conn, request)
+    }
+
+    pub fn undo_plan_completion(&mut self, completion_id: &str) -> Result<()> {
+        validate_id(completion_id)?;
+        plans::undo_completion(&mut self.conn, completion_id)
     }
 
     fn identity(&self, key: &str) -> Result<String> {

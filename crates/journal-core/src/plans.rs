@@ -57,6 +57,265 @@ pub struct PlanDefinitionVersion {
     pub definition: PlanDefinition,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StreamEnrollment {
+    pub stream_id: String,
+    pub starting_chapter: ChapterRef,
+    pub loop_after_end: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanEnrollment {
+    pub id: String,
+    pub definition_version_id: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanAssignment {
+    pub id: String,
+    pub enrollment_id: String,
+    pub stream_id: String,
+    pub ordinal: u32,
+    pub cycle: u32,
+    pub passage: Passage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompleteStreamRequest {
+    pub enrollment_id: String,
+    pub stream_id: String,
+    pub expected_assignment_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanCompletion {
+    pub id: String,
+    pub assignment_id: String,
+    pub completed_at: String,
+}
+
+pub(crate) fn enroll(
+    conn: &mut Connection,
+    version_id: &str,
+    selections: Vec<StreamEnrollment>,
+) -> Result<PlanEnrollment> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version =
+        definition_version(&tx, version_id)?.context("Plan definition version not found")?;
+    let PlanSchedule::ChapterStreams { streams } = &version.definition.schedule else {
+        anyhow::bail!("Only chapter-stream definitions can use stream enrollment");
+    };
+    ensure!(
+        selections.len() == streams.len(),
+        "Select one starting chapter for every stream"
+    );
+    let mut selected_ids = HashSet::new();
+    for selection in &selections {
+        ensure!(
+            selected_ids.insert(&selection.stream_id),
+            "Stream selections must be unique"
+        );
+        let stream = streams
+            .iter()
+            .find(|stream| stream.id == selection.stream_id)
+            .context("Selected stream is not in this definition")?;
+        ensure!(
+            stream.chapters.contains(&selection.starting_chapter),
+            "Starting chapter is not in the selected stream"
+        );
+    }
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO plan_enrollments(id,definition_version_id,created_at) VALUES(?1,?2,?3)",
+        params![id, version_id, now],
+    )?;
+    for selection in selections {
+        let stream = streams
+            .iter()
+            .find(|stream| stream.id == selection.stream_id)
+            .unwrap();
+        let position = stream
+            .chapters
+            .iter()
+            .position(|chapter| chapter == &selection.starting_chapter)
+            .unwrap() as u32;
+        tx.execute("INSERT INTO plan_enrollment_streams(enrollment_id,stream_id,loop_after_end) VALUES(?1,?2,?3)", params![id, selection.stream_id, selection.loop_after_end])?;
+        insert_assignment(&tx, &id, stream, 1, 1, position)?;
+    }
+    let result = PlanEnrollment {
+        id,
+        definition_version_id: version_id.to_owned(),
+        created_at: now,
+    };
+    tx.commit()?;
+    Ok(result)
+}
+
+pub(crate) fn active_assignments(
+    conn: &Connection,
+    enrollment_id: &str,
+) -> Result<Vec<PlanAssignment>> {
+    let mut statement = conn.prepare(
+        "SELECT a.id,a.enrollment_id,a.stream_id,a.ordinal,a.cycle,a.passage
+         FROM plan_assignments a
+         WHERE a.enrollment_id=?1 AND NOT EXISTS (
+           SELECT 1 FROM reading_completions c WHERE c.assignment_id=a.id
+           AND NOT EXISTS (SELECT 1 FROM reading_completion_undos u WHERE u.completion_id=c.id)
+         )
+         AND a.ordinal=(SELECT MIN(a2.ordinal) FROM plan_assignments a2 WHERE a2.enrollment_id=a.enrollment_id AND a2.stream_id=a.stream_id AND NOT EXISTS (
+           SELECT 1 FROM reading_completions c2 WHERE c2.assignment_id=a2.id
+           AND NOT EXISTS (SELECT 1 FROM reading_completion_undos u2 WHERE u2.completion_id=c2.id)))
+         ORDER BY a.stream_id")?;
+    let assignments = statement
+        .query_map([enrollment_id], assignment_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(assignments)
+}
+
+pub(crate) fn complete_stream(
+    conn: &mut Connection,
+    request: CompleteStreamRequest,
+) -> Result<PlanCompletion> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let active = active_assignments(&tx, &request.enrollment_id)?
+        .into_iter()
+        .find(|assignment| assignment.stream_id == request.stream_id)
+        .context("No active assignment for this stream")?;
+    ensure!(
+        active.id == request.expected_assignment_id,
+        "Conflict: assignment changed since it was loaded; reload before completing"
+    );
+    let completion = PlanCompletion {
+        id: Uuid::new_v4().to_string(),
+        assignment_id: active.id.clone(),
+        completed_at: Utc::now().to_rfc3339(),
+    };
+    tx.execute(
+        "INSERT INTO reading_completions(id,assignment_id,completed_at) VALUES(?1,?2,?3)",
+        params![
+            completion.id,
+            completion.assignment_id,
+            completion.completed_at
+        ],
+    )?;
+    let (definition_text, loop_after_end): (String, bool) = tx.query_row(
+        "SELECT v.definition,s.loop_after_end FROM plan_enrollments e JOIN plan_definition_versions v ON v.id=e.definition_version_id JOIN plan_enrollment_streams s ON s.enrollment_id=e.id AND s.stream_id=?2 WHERE e.id=?1",
+        params![request.enrollment_id, request.stream_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let definition: PlanDefinition = serde_json::from_str(&definition_text)?;
+    let PlanSchedule::ChapterStreams { streams } = definition.schedule else {
+        anyhow::bail!("Enrollment no longer references a chapter-stream definition")
+    };
+    let stream = streams
+        .into_iter()
+        .find(|stream| stream.id == request.stream_id)
+        .context("Enrolled stream missing from definition")?;
+    let current = stream
+        .chapters
+        .iter()
+        .position(|chapter| {
+            chapter.book == active.passage.book && chapter.chapter == active.passage.chapter
+        })
+        .context("Assignment snapshot is not in its pinned definition")?;
+    if current + 1 < stream.chapters.len() {
+        insert_assignment(
+            &tx,
+            &request.enrollment_id,
+            &stream,
+            active.ordinal + 1,
+            active.cycle,
+            (current + 1) as u32,
+        )?;
+    } else if loop_after_end {
+        insert_assignment(
+            &tx,
+            &request.enrollment_id,
+            &stream,
+            active.ordinal + 1,
+            active.cycle + 1,
+            0,
+        )?;
+    }
+    tx.commit()?;
+    Ok(completion)
+}
+
+pub(crate) fn undo_completion(conn: &mut Connection, completion_id: &str) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (enrollment_id, stream_id, ordinal): (String, String, u32) = tx.query_row(
+        "SELECT a.enrollment_id,a.stream_id,a.ordinal FROM reading_completions c JOIN plan_assignments a ON a.id=c.assignment_id WHERE c.id=?1 AND NOT EXISTS (SELECT 1 FROM reading_completion_undos u WHERE u.completion_id=c.id)",
+        [completion_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?.context("Completion is missing or already undone")?;
+    let later: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM reading_completions c JOIN plan_assignments a ON a.id=c.assignment_id WHERE a.enrollment_id=?1 AND a.stream_id=?2 AND a.ordinal>?3 AND NOT EXISTS (SELECT 1 FROM reading_completion_undos u WHERE u.completion_id=c.id))",
+        params![enrollment_id, stream_id, ordinal], |row| row.get(0))?;
+    ensure!(!later, "Undo later active completions in this stream first");
+    tx.execute(
+        "INSERT INTO reading_completion_undos(id,completion_id,undone_at) VALUES(?1,?2,?3)",
+        params![
+            Uuid::new_v4().to_string(),
+            completion_id,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn insert_assignment(
+    conn: &Connection,
+    enrollment_id: &str,
+    stream: &ChapterStream,
+    ordinal: u32,
+    cycle: u32,
+    position: u32,
+) -> Result<()> {
+    let chapter = &stream.chapters[position as usize];
+    let passage = Passage {
+        book: chapter.book,
+        chapter: chapter.chapter,
+        start_verse: None,
+        end_verse: None,
+    };
+    let content = serde_json::to_string(&passage)?;
+    let existing: Option<(u32, String)> = conn
+        .query_row(
+            "SELECT cycle,passage FROM plan_assignments WHERE enrollment_id=?1 AND stream_id=?2 AND ordinal=?3",
+            params![enrollment_id, stream.id, ordinal],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((existing_cycle, existing_content)) = existing {
+        ensure!(
+            existing_cycle == cycle && existing_content == content,
+            "Existing assignment conflicts with pinned plan progress"
+        );
+    } else {
+        conn.execute("INSERT INTO plan_assignments(id,enrollment_id,stream_id,ordinal,cycle,passage) VALUES(?1,?2,?3,?4,?5,?6)", params![Uuid::new_v4().to_string(), enrollment_id, stream.id, ordinal, cycle, content])?;
+    }
+    Ok(())
+}
+
+fn assignment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanAssignment> {
+    let text: String = row.get(5)?;
+    let passage = serde_json::from_str(&text).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(PlanAssignment {
+        id: row.get(0)?,
+        enrollment_id: row.get(1)?,
+        stream_id: row.get(2)?,
+        ordinal: row.get(3)?,
+        cycle: row.get(4)?,
+        passage,
+    })
+}
+
 pub(crate) fn create_definition(
     conn: &mut Connection,
     existing_plan_id: Option<&str>,
@@ -232,4 +491,22 @@ CREATE TRIGGER plan_definition_versions_retained BEFORE DELETE ON plan_definitio
 BEGIN SELECT RAISE(ABORT,'Plan definition versions are retained'); END;
 CREATE TRIGGER plans_retained BEFORE DELETE ON plans
 BEGIN SELECT RAISE(ABORT,'Plans are retained'); END;
+";
+
+pub(crate) const PLAN_PROGRESS_SCHEMA: &str = "
+CREATE TABLE plan_enrollments(id TEXT PRIMARY KEY,definition_version_id TEXT NOT NULL REFERENCES plan_definition_versions(id),created_at TEXT NOT NULL);
+CREATE TABLE plan_enrollment_streams(enrollment_id TEXT NOT NULL REFERENCES plan_enrollments(id),stream_id TEXT NOT NULL,loop_after_end INTEGER NOT NULL CHECK(loop_after_end IN (0,1)),PRIMARY KEY(enrollment_id,stream_id));
+CREATE TABLE plan_assignments(id TEXT PRIMARY KEY,enrollment_id TEXT NOT NULL,stream_id TEXT NOT NULL,ordinal INTEGER NOT NULL CHECK(ordinal>0),cycle INTEGER NOT NULL CHECK(cycle>0),passage TEXT NOT NULL CHECK(json_valid(passage)),UNIQUE(enrollment_id,stream_id,ordinal),FOREIGN KEY(enrollment_id,stream_id) REFERENCES plan_enrollment_streams(enrollment_id,stream_id));
+CREATE TABLE reading_completions(id TEXT PRIMARY KEY,assignment_id TEXT NOT NULL REFERENCES plan_assignments(id),completed_at TEXT NOT NULL);
+CREATE TABLE reading_completion_undos(id TEXT PRIMARY KEY,completion_id TEXT NOT NULL UNIQUE REFERENCES reading_completions(id),undone_at TEXT NOT NULL);
+CREATE TRIGGER plan_enrollments_immutable BEFORE UPDATE ON plan_enrollments BEGIN SELECT RAISE(ABORT,'Plan enrollments are immutable'); END;
+CREATE TRIGGER plan_enrollment_streams_immutable BEFORE UPDATE ON plan_enrollment_streams BEGIN SELECT RAISE(ABORT,'Plan enrollments are immutable'); END;
+CREATE TRIGGER plan_assignments_immutable BEFORE UPDATE ON plan_assignments BEGIN SELECT RAISE(ABORT,'Plan assignments are immutable'); END;
+CREATE TRIGGER reading_completions_immutable BEFORE UPDATE ON reading_completions BEGIN SELECT RAISE(ABORT,'Reading completions are immutable'); END;
+CREATE TRIGGER reading_completion_undos_immutable BEFORE UPDATE ON reading_completion_undos BEGIN SELECT RAISE(ABORT,'Reading completion undos are immutable'); END;
+CREATE TRIGGER plan_progress_retained_enrollments BEFORE DELETE ON plan_enrollments BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER plan_progress_retained_streams BEFORE DELETE ON plan_enrollment_streams BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER plan_progress_retained_assignments BEFORE DELETE ON plan_assignments BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER plan_progress_retained_completions BEFORE DELETE ON reading_completions BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER plan_progress_retained_undos BEFORE DELETE ON reading_completion_undos BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
 ";

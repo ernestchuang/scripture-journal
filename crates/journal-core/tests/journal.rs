@@ -1,6 +1,6 @@
 use journal_core::{
-    ChapterRef, ChapterStream, EntryContent, ExplicitScheduleDay, JournalStore, Passage,
-    PlanDefinition, PlanSchedule, SaveRequest,
+    ChapterRef, ChapterStream, CompleteStreamRequest, EntryContent, ExplicitScheduleDay,
+    JournalStore, Passage, PlanDefinition, PlanSchedule, SaveRequest, StreamEnrollment,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -253,7 +253,12 @@ fn schema_one_journal_data_survives_plan_migration() {
 
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TRIGGER plans_retained;
+        "DROP TABLE reading_completion_undos;
+         DROP TABLE reading_completions;
+         DROP TABLE plan_assignments;
+         DROP TABLE plan_enrollment_streams;
+         DROP TABLE plan_enrollments;
+         DROP TRIGGER plans_retained;
          DROP TRIGGER plan_definition_versions_retained;
          DROP TRIGGER plan_definition_versions_immutable;
          DROP TABLE plan_definition_versions;
@@ -288,7 +293,225 @@ fn schema_one_journal_data_survives_plan_migration() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
+        3
+    );
+}
+
+fn stream_selections(loop_after_end: bool) -> Vec<StreamEnrollment> {
+    vec![
+        StreamEnrollment {
+            stream_id: "old-testament".into(),
+            starting_chapter: ChapterRef {
+                book: 1,
+                chapter: 1,
+            },
+            loop_after_end,
+        },
+        StreamEnrollment {
+            stream_id: "new-testament".into(),
+            starting_chapter: ChapterRef {
+                book: 40,
+                chapter: 1,
+            },
+            loop_after_end,
+        },
+    ]
+}
+
+#[test]
+fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Original"))
+        .unwrap();
+    let mut invalid = stream_selections(false);
+    invalid[0].starting_chapter.chapter = 50;
+    assert!(store
+        .enroll_in_chapter_streams(&version.id, invalid)
+        .is_err());
+    let enrollment = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    store
+        .create_plan_definition_version(&version.plan_id, stream_definition("Edited"))
+        .unwrap();
+    let before = store.active_plan_assignments(&enrollment.id).unwrap();
+    let old = before
+        .iter()
+        .find(|assignment| assignment.stream_id == "old-testament")
+        .unwrap();
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: old.stream_id.clone(),
+            expected_assignment_id: old.id.clone(),
+        })
+        .unwrap();
+    drop(store);
+
+    let store = JournalStore::open(&path).unwrap();
+    let after = store.active_plan_assignments(&enrollment.id).unwrap();
+    assert_eq!(after.len(), 2);
+    let old = after
+        .iter()
+        .find(|assignment| assignment.stream_id == "old-testament")
+        .unwrap();
+    assert_eq!(
+        (old.passage.book, old.passage.chapter, old.ordinal),
+        (1, 2, 2)
+    );
+    let new = after
+        .iter()
+        .find(|assignment| assignment.stream_id == "new-testament")
+        .unwrap();
+    assert_eq!(
+        new.id,
+        before
+            .iter()
+            .find(|a| a.stream_id == "new-testament")
+            .unwrap()
+            .id
+    );
+}
+
+#[test]
+fn stop_loop_stale_completion_and_ordered_undo_preserve_history() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Progress"))
+        .unwrap();
+    let stopped = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let first = store
+        .active_plan_assignments(&stopped.id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.stream_id == "old-testament")
+        .unwrap();
+    let first_completion = store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: stopped.id.clone(),
+            stream_id: first.stream_id.clone(),
+            expected_assignment_id: first.id.clone(),
+        })
+        .unwrap();
+    assert!(store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: stopped.id.clone(),
+            stream_id: first.stream_id.clone(),
+            expected_assignment_id: first.id,
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("Conflict"));
+    let second = store
+        .active_plan_assignments(&stopped.id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.stream_id == first.stream_id)
+        .unwrap();
+    let second_completion = store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: stopped.id.clone(),
+            stream_id: second.stream_id.clone(),
+            expected_assignment_id: second.id,
+        })
+        .unwrap();
+    assert!(store.undo_plan_completion(&first_completion.id).is_err());
+    store.undo_plan_completion(&second_completion.id).unwrap();
+    store.undo_plan_completion(&first_completion.id).unwrap();
+    assert_eq!(
+        store
+            .active_plan_assignments(&stopped.id)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.stream_id == first.stream_id)
+            .unwrap()
+            .ordinal,
+        1
+    );
+
+    let looped = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(true))
+        .unwrap();
+    for expected_cycle in [1, 1] {
+        let assignment = store
+            .active_plan_assignments(&looped.id)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.stream_id == "old-testament")
+            .unwrap();
+        assert_eq!(assignment.cycle, expected_cycle);
+        store
+            .complete_plan_stream(CompleteStreamRequest {
+                enrollment_id: looped.id.clone(),
+                stream_id: assignment.stream_id,
+                expected_assignment_id: assignment.id,
+            })
+            .unwrap();
+    }
+    let wrapped = store
+        .active_plan_assignments(&looped.id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.stream_id == "old-testament")
+        .unwrap();
+    assert_eq!(
+        (wrapped.ordinal, wrapped.cycle, wrapped.passage.chapter),
+        (3, 2, 1)
+    );
+
+    drop(store);
+    let conn = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM reading_completions", [], |r| r
+            .get::<_, u32>(0))
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM reading_completion_undos", [], |r| r
+            .get::<_, u32>(
+            0
+        ))
+        .unwrap(),
         2
+    );
+}
+
+#[test]
+fn schema_two_plan_rows_survive_progress_migration() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let plan = store
+        .create_plan_definition(stream_definition("Before progress"))
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for table in [
+        "reading_completion_undos",
+        "reading_completions",
+        "plan_assignments",
+        "plan_enrollment_streams",
+        "plan_enrollments",
+    ] {
+        conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
+    }
+    conn.pragma_update(None, "user_version", 2).unwrap();
+    drop(conn);
+    let store = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        store
+            .get_plan_definition_version(&plan.id)
+            .unwrap()
+            .unwrap(),
+        plan
     );
 }
 
