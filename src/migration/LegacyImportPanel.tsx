@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { LegacyImportApi, LegacyImportPreview, LegacyImportResult } from '../platform/legacyImport';
 import './legacy-import.css';
 
-export function LegacyImportPanel({ api }: { api?: LegacyImportApi }) {
+export function LegacyImportPanel({ api, onImported }: { api?: LegacyImportApi; onImported?: () => void }) {
   const [open, setOpen] = useState(false);
   const [directory, setDirectory] = useState('');
   const [preview, setPreview] = useState<LegacyImportPreview>();
@@ -11,7 +11,10 @@ export function LegacyImportPanel({ api }: { api?: LegacyImportApi }) {
   const [busy, setBusy] = useState(false);
   const request = useRef(0);
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; request.current += 1; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; request.current += 1; };
+  }, []);
 
   async function choose() {
     if (!api || busy) return;
@@ -40,6 +43,7 @@ export function LegacyImportPanel({ api }: { api?: LegacyImportApi }) {
       const imported = await api.confirm(directory, confirmedPreview.previewId);
       if (!mounted.current || current !== request.current) return;
       setResult(imported);
+      onImported?.();
       const refreshed = await api.preview(directory);
       if (!mounted.current || current !== request.current) return;
       setPreview(refreshed);

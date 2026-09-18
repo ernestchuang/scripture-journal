@@ -18,11 +18,12 @@ export interface JournalWorkspaceProps {
   api: JournalApi;
   passage: Passage;
   reflectRequest: number;
+  refreshRequest?: number;
   /** Native close handler must await flush and cancel closing if it rejects. */
   onPersistenceChange?: (state: JournalPersistenceState) => void;
 }
 
-export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceChange }: JournalWorkspaceProps) {
+export function JournalWorkspace({ api, passage, reflectRequest, refreshRequest = 0, onPersistenceChange }: JournalWorkspaceProps) {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [query, setQuery] = useState('');
   const [tagFilter, setTagFilter] = useState('');
@@ -62,7 +63,7 @@ export function JournalWorkspace({ api, passage, reflectRequest, onPersistenceCh
       setLoaded(true);
     }).catch(error => { if (active) setLoadError(String(error)); });
     return () => { active = false; mounted.current = false; };
-  }, [api]);
+  }, [api, refreshRequest]);
 
   const refresh = () => {
     const current = sessionRef.current;

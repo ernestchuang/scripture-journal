@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 mod deletion;
 mod export;
-pub const CURRENT_SCHEMA: u32 = 14;
+pub const CURRENT_SCHEMA: u32 = 15;
 #[cfg(unix)]
 mod export_directory;
 mod legacy_import;
@@ -93,7 +93,7 @@ impl JournalStore {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(
-            (0..=14).contains(&version),
+            (0..=15).contains(&version),
             "Unsupported journal schema version {version}"
         );
         if version == 0 {
@@ -221,6 +221,13 @@ impl JournalStore {
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version == 13 {
             deletion::migrate(&mut conn)?;
+        }
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version == 14 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(legacy_import::LEGACY_IMPORT_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 15)?;
+            tx.commit()?;
         }
         let store = Self { conn };
         validate_id(&store.identity("journal_id")?)?;

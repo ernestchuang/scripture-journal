@@ -5,31 +5,59 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
 
 const MAX_FILE_BYTES: u64 = 2_000_000;
 const MAX_FILES: usize = 20_000;
+const MAX_DIRECTORY_DEPTH: usize = 64;
 
 pub(crate) const LEGACY_IMPORT_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS legacy_import_sources(
  source_set_id TEXT NOT NULL,
  relative_path TEXT NOT NULL,
  content_hash TEXT NOT NULL,
- entry_id TEXT NOT NULL REFERENCES entries(id),
- revision_id TEXT NOT NULL REFERENCES revisions(id),
+ entry_id TEXT NOT NULL,
+ revision_id TEXT NOT NULL,
  source_root TEXT NOT NULL,
- source_bytes BLOB NOT NULL,
+ source_bytes BLOB,
+ purged_at TEXT,
  metadata_json TEXT NOT NULL CHECK(json_valid(metadata_json)),
  imported_at TEXT NOT NULL,
  PRIMARY KEY(source_set_id,relative_path,content_hash)
 );
 CREATE INDEX IF NOT EXISTS legacy_import_latest_path ON legacy_import_sources(source_set_id,relative_path,imported_at);
-CREATE TRIGGER IF NOT EXISTS legacy_import_sources_immutable BEFORE UPDATE ON legacy_import_sources BEGIN SELECT RAISE(ABORT,'Legacy import provenance is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS legacy_import_sources_immutable BEFORE UPDATE ON legacy_import_sources
+ WHEN NOT(OLD.source_bytes IS NOT NULL AND NEW.source_bytes IS NULL
+  AND OLD.purged_at IS NULL AND NEW.purged_at IS NOT NULL
+  AND NEW.source_set_id IS OLD.source_set_id AND NEW.relative_path IS OLD.relative_path
+  AND NEW.content_hash IS OLD.content_hash AND NEW.entry_id IS OLD.entry_id
+  AND NEW.revision_id IS OLD.revision_id AND NEW.source_root IS OLD.source_root
+  AND NEW.metadata_json IS OLD.metadata_json AND NEW.imported_at IS OLD.imported_at)
+ BEGIN SELECT RAISE(ABORT,'Legacy import provenance is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS legacy_import_sources_retained BEFORE DELETE ON legacy_import_sources BEGIN SELECT RAISE(ABORT,'Legacy import provenance is retained'); END;
 ";
+
+pub(crate) fn purge_provenance(
+    conn: &Connection,
+    entry_id: &str,
+    revision_id: Option<&str>,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    match revision_id {
+        Some(revision_id) => conn.execute(
+            "UPDATE legacy_import_sources SET source_bytes=NULL,purged_at=?1 WHERE entry_id=?2 AND revision_id=?3 AND source_bytes IS NOT NULL",
+            params![now, entry_id, revision_id],
+        )?,
+        None => conn.execute(
+            "UPDATE legacy_import_sources SET source_bytes=NULL,purged_at=?1 WHERE entry_id=?2 AND source_bytes IS NOT NULL",
+            params![now, entry_id],
+        )?,
+    };
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,16 +127,16 @@ pub(crate) fn preview(conn: &Connection, selected: &Path) -> Result<LegacyImport
         mut parsed,
         mut records,
     } = scan(conn, selected)?;
-    let mut labels: HashMap<String, Vec<String>> = HashMap::new();
+    let mut labels: HashMap<String, HashSet<String>> = HashMap::new();
     for file in &parsed {
         labels
             .entry(file_stem(&file.relative_path))
             .or_default()
-            .push(file.entry_id.clone());
+            .insert(file.entry_id.clone());
         labels
             .entry(file.title.clone())
             .or_default()
-            .push(file.entry_id.clone());
+            .insert(file.entry_id.clone());
     }
     let mut unresolved_links = 0;
     for file in &mut parsed {
@@ -164,16 +192,16 @@ pub(crate) fn import(
         preview_id == expected_preview_id,
         "Legacy source changed since preview; preview it again"
     );
-    let mut labels: HashMap<String, Vec<String>> = HashMap::new();
+    let mut labels: HashMap<String, HashSet<String>> = HashMap::new();
     for file in &parsed {
         labels
             .entry(file_stem(&file.relative_path))
             .or_default()
-            .push(file.entry_id.clone());
+            .insert(file.entry_id.clone());
         labels
             .entry(file.title.clone())
             .or_default()
-            .push(file.entry_id.clone());
+            .insert(file.entry_id.clone());
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(LEGACY_IMPORT_SCHEMA)?;
@@ -191,7 +219,7 @@ pub(crate) fn import(
             .iter()
             .filter_map(|label| labels.get(label))
             .filter(|ids| ids.len() == 1)
-            .map(|ids| ids[0].clone())
+            .filter_map(|ids| ids.iter().next().cloned())
             .collect();
         let content = EntryContent {
             title: file.title.clone(),
@@ -212,6 +240,15 @@ pub(crate) fn import(
                 |row| row.get(0),
             )
             .optional()?;
+        let was_purged: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM purged_entries WHERE entry_id=?1)",
+            [&file.entry_id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            !was_purged,
+            "A previously deleted imported entry cannot be restored by import"
+        );
         let revision_id = stable_id(&format!(
             "revision:{}:{}:{}",
             source_set_id, file.relative_path, file.hash
@@ -221,7 +258,7 @@ pub(crate) fn import(
                 tx.execute("INSERT INTO entries(id,created_at,updated_at,working_revision_id,published_revision_id) VALUES(?1,?2,?2,?3,?3)", params![file.entry_id,now,revision_id])?;
                 imported += 1;
             }
-            tx.execute("INSERT INTO revisions(id,entry_id,parent_id,created_at,content) VALUES(?1,?2,?3,?4,?5)", params![revision_id,file.entry_id,current,now,serde_json::to_string(&content)?])?;
+            tx.execute("INSERT INTO revisions(id,entry_id,parent_id,parent_ref_id,created_at,content) VALUES(?1,?2,?3,?3,?4,?5)", params![revision_id,file.entry_id,current,now,serde_json::to_string(&content)?])?;
             tx.execute("UPDATE entries SET working_revision_id=?1,published_revision_id=?1,updated_at=?2 WHERE id=?3", params![revision_id,now,file.entry_id])?;
             record_change(
                 &tx,
@@ -251,11 +288,21 @@ pub(crate) fn import(
 }
 
 fn scan(conn: &Connection, selected: &Path) -> Result<Scan> {
+    ensure!(
+        !fs::symlink_metadata(selected)?.file_type().is_symlink(),
+        "Legacy source cannot be a symbolic link"
+    );
     let selected = selected
         .canonicalize()
         .context("Legacy source directory is unavailable")?;
     ensure!(selected.is_dir(), "Legacy source must be a directory");
     let journal = selected.join("journal");
+    if let Ok(metadata) = fs::symlink_metadata(&journal) {
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "Legacy journal folder cannot be a symbolic link"
+        );
+    }
     let root = if journal.is_dir() {
         journal
     } else {
@@ -264,7 +311,7 @@ fn scan(conn: &Connection, selected: &Path) -> Result<Scan> {
     let source_root = selected.to_string_lossy().into_owned();
     let source_set_id = stable_id(&format!("legacy-source:{source_root}"));
     let mut paths = Vec::new();
-    collect_markdown(&root, &root, &mut paths)?;
+    collect_markdown(&root, &root, 0, &mut paths)?;
     ensure!(
         paths.len() <= MAX_FILES,
         "Legacy source contains too many files"
@@ -463,8 +510,13 @@ fn parse_scalar(value: &str) -> Result<String> {
 fn collect_markdown(
     root: &Path,
     directory: &Path,
+    depth: usize,
     output: &mut Vec<(String, PathBuf)>,
 ) -> Result<()> {
+    ensure!(
+        depth <= MAX_DIRECTORY_DEPTH,
+        "Legacy source folders are nested too deeply"
+    );
     for item in fs::read_dir(directory)? {
         let item = item?;
         let kind = item.file_type()?;
@@ -472,7 +524,7 @@ fn collect_markdown(
             continue;
         }
         if kind.is_dir() {
-            collect_markdown(root, &item.path(), output)?;
+            collect_markdown(root, &item.path(), depth + 1, output)?;
         } else if kind.is_file()
             && item
                 .path()
@@ -480,6 +532,10 @@ fn collect_markdown(
                 .and_then(|v| v.to_str())
                 .is_some_and(|v| v.eq_ignore_ascii_case("md"))
         {
+            ensure!(
+                output.len() < MAX_FILES,
+                "Legacy source contains too many files"
+            );
             ensure!(
                 item.metadata()?.len() <= MAX_FILE_BYTES,
                 "Legacy file exceeds size limit"

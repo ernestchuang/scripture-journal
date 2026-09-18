@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LegacyImportPanel } from './LegacyImportPanel';
 import type { LegacyImportApi, LegacyImportPreview } from '../platform/legacyImport';
+import { StrictMode } from 'react';
 
 const initial: LegacyImportPreview = {
   sourceSetId: 'source', previewId: 'snapshot-one', sourceRoot: '/old', recognized: 1,
@@ -22,7 +23,8 @@ describe('LegacyImportPanel', () => {
       preview: vi.fn().mockResolvedValueOnce(initial).mockResolvedValueOnce({ ...initial, recognized: 0, changed: 0, unchanged: 4 }),
       confirm: vi.fn().mockResolvedValue({ imported: 1, revisionsCreated: 2, unchanged: 2, unsupported: 1 }),
     };
-    render(<LegacyImportPanel api={api} />);
+    const imported = vi.fn();
+    render(<StrictMode><LegacyImportPanel api={api} onImported={imported} /></StrictMode>);
     fireEvent.click(screen.getByRole('button', { name: /import old bible/i }));
     expect(api.chooseDirectory).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: /choose old journal/i }));
@@ -32,6 +34,7 @@ describe('LegacyImportPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: /confirm import of 2 files/i }));
     await screen.findByText(/import complete: 1 new entries, 1 new revisions/i);
     expect(api.confirm).toHaveBeenCalledWith('/old', 'snapshot-one');
+    expect(imported).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.queryByRole('button', { name: /confirm import/i })).toBeNull());
   });
 

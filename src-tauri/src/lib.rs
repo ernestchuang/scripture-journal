@@ -1,9 +1,10 @@
+mod journal_deletion;
 use journal_core::{
-    CalendarAssignmentCompletion, CalendarPlanEnrollment, CalendarScheduleMode,
-    CompleteStreamRequest, DatedPlanAssignment, Entry, ExportReport, JournalStore,
-    LegacyImportPreview, LegacyImportResult, PlanAssignment, PlanCompletion,
-    PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, Revision,
-    SaveRequest, StreamEnrollment,
+    AdoptCalendarPlanRequest, AdoptStreamPlanRequest, CalendarAssignmentCompletion,
+    CalendarPlanEnrollment, CalendarScheduleMode, CompleteStreamRequest, DatedPlanAssignment,
+    Entry, ExportReport, JournalStore, LegacyImportPreview, LegacyImportResult, PlanAdoptionEvent,
+    PlanAssignment, PlanCompletion, PlanCompletionHistoryItem, PlanDefinition,
+    PlanDefinitionVersion, PlanEnrollment, Revision, SaveRequest, StreamEnrollment,
 };
 use serde::Deserialize;
 use std::{
@@ -13,11 +14,106 @@ use std::{
 };
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
+mod scripture;
+mod scripture_pack;
+use scripture::{ScriptureStore, Verse};
 
 struct AppState {
     journal: Arc<Mutex<JournalStore>>,
+    scripture: Arc<Mutex<ScriptureStore>>,
     export_directories: Mutex<HashSet<PathBuf>>,
     legacy_import_directories: Mutex<HashSet<PathBuf>>,
+}
+
+#[tauri::command]
+async fn scripture_chapter(
+    state: State<'_, AppState>,
+    translation: String,
+    book: u16,
+    chapter: u16,
+) -> Result<Vec<Verse>, String> {
+    let store = state.scripture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .lock()
+            .map_err(|_| "Scripture library is unavailable.".to_string())?
+            .chapter(&translation, book, chapter)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn import_scripture_pack(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let store = state.scripture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(selected) = app
+            .dialog()
+            .file()
+            .add_filter("Scripture JSON pack", &["json"])
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = selected.into_path().map_err(|e| e.to_string())?;
+        let pack = scripture_pack::read_pack(&path)?;
+        store
+            .lock()
+            .map_err(|_| "Scripture library is unavailable.".to_string())?
+            .install_pack(pack)
+            .map(Some)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn scripture_translation_info(
+    state: State<'_, AppState>,
+    translation: String,
+) -> Result<Option<scripture::TranslationInfo>, String> {
+    let store = state.scripture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .lock()
+            .map_err(|_| "Scripture library is unavailable.".to_string())?
+            .translation_info(&translation)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn scripture_kjv_status(state: State<'_, AppState>) -> Result<bool, String> {
+    let store = state.scripture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .lock()
+            .map_err(|_| "Scripture library is unavailable.".to_string())?
+            .has_kjv()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn download_kjv_library(state: State<'_, AppState>) -> Result<(), String> {
+    let store = state.scripture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if !store.lock().map_err(|_| "Scripture library is unavailable.".to_string())?.is_persistent() {
+            return Err("Offline Scripture storage needs repair. Restart the app after checking application-data permissions.".into());
+        }
+        let verses = scripture::download_kjv()?;
+        store
+            .lock()
+            .map_err(|_| "Scripture library is unavailable.".to_string())?
+            .install_kjv(verses)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Deserialize)]
@@ -638,6 +734,66 @@ async fn undo_plan_completion(
     completion_id: String,
 ) -> Result<(), String> {
     undo_plan_completion_for_store(state.journal.clone(), completion_id).await
+}
+
+async fn adopt_chapter_stream_plan_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    request: AdoptStreamPlanRequest,
+) -> Result<PlanAdoptionEvent, String> {
+    run_store(store, move |journal| {
+        journal
+            .adopt_chapter_stream_plan(request)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn adopt_chapter_stream_plan(
+    state: State<'_, AppState>,
+    request: AdoptStreamPlanRequest,
+) -> Result<PlanAdoptionEvent, String> {
+    adopt_chapter_stream_plan_for_store(state.journal.clone(), request).await
+}
+
+async fn adopt_calendar_plan_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    request: AdoptCalendarPlanRequest,
+) -> Result<PlanAdoptionEvent, String> {
+    run_store(store, move |journal| {
+        journal
+            .adopt_calendar_plan(request)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn adopt_calendar_plan(
+    state: State<'_, AppState>,
+    request: AdoptCalendarPlanRequest,
+) -> Result<PlanAdoptionEvent, String> {
+    adopt_calendar_plan_for_store(state.journal.clone(), request).await
+}
+
+async fn plan_adoption_history_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    enrollment_id: String,
+) -> Result<Vec<PlanAdoptionEvent>, String> {
+    run_store(store, move |journal| {
+        journal
+            .plan_adoption_history(&enrollment_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn plan_adoption_history(
+    state: State<'_, AppState>,
+    enrollment_id: String,
+) -> Result<Vec<PlanAdoptionEvent>, String> {
+    plan_adoption_history_for_store(state.journal.clone(), enrollment_id).await
 }
 
 #[tauri::command]
@@ -1718,11 +1874,16 @@ async fn choose_legacy_import_directory(
     let Some(selected) = selected else {
         return Ok(None);
     };
-    let path = selected
-        .into_path()
+    let path = selected.into_path().map_err(|e| e.to_string())?;
+    if path
+        .symlink_metadata()
         .map_err(|e| e.to_string())?
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+        .file_type()
+        .is_symlink()
+    {
+        return Err("Choose the real legacy journal folder, not a symbolic link.".into());
+    }
+    let path = path.canonicalize().map_err(|e| e.to_string())?;
     state
         .legacy_import_directories
         .lock()
@@ -1805,14 +1966,24 @@ pub fn run() {
             let root = app.path().app_data_dir()?;
             std::fs::create_dir_all(&root)?;
             let journal = JournalStore::open(&root.join("journal.sqlite3"))?;
+            // Scripture is a disposable cache. A damaged/unavailable cache must never
+            // prevent the authoritative journal from opening.
+            let scripture = ScriptureStore::open(&root.join("scripture.sqlite3"))
+                .or_else(|_| ScriptureStore::temporary())
+                .map_err(std::io::Error::other)?;
             app.manage(AppState {
                 journal: Arc::new(Mutex::new(journal)),
+                scripture: Arc::new(Mutex::new(scripture)),
                 export_directories: Mutex::new(HashSet::new()),
                 legacy_import_directories: Mutex::new(HashSet::new()),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            journal_deletion::list_trash,
+            journal_deletion::set_entry_trashed,
+            journal_deletion::purge_entry,
+            journal_deletion::purge_revision,
             list_entries,
             save_entry,
             register_four_stream_plan,
@@ -1835,6 +2006,9 @@ pub fn run() {
             plan_completion_history,
             complete_plan_stream,
             undo_plan_completion,
+            adopt_chapter_stream_plan,
+            adopt_calendar_plan,
+            plan_adoption_history,
             get_history,
             restore_revision,
             choose_export_directory,
@@ -1844,7 +2018,12 @@ pub fn run() {
             confirm_legacy_import,
             apply_appearance,
             read_omarchy_theme,
-            startup_appearance
+            startup_appearance,
+            scripture_chapter,
+            import_scripture_pack,
+            scripture_translation_info,
+            scripture_kjv_status,
+            download_kjv_library
         ])
         .run(tauri::generate_context!())
         .expect("Could not start Scripture Journal");

@@ -60,6 +60,7 @@ fn preview_is_read_only_and_import_is_repeatable_with_exact_provenance() {
     assert_eq!(alpha_entry.content.links, vec![beta_entry.id.clone()]);
     assert_eq!(beta_entry.content.links, vec![alpha_entry.id.clone()]);
     let alpha_id = alpha_entry.id.clone();
+    let alpha_revision = alpha_entry.working_revision_id.clone();
 
     let again = store
         .import_legacy_journal(source.path(), &preview.preview_id)
@@ -89,6 +90,106 @@ fn preview_is_read_only_and_import_is_repeatable_with_exact_provenance() {
         .unwrap();
     assert!(metadata.contains("legacy-color: blue"));
     assert!(metadata.contains("2026-01-02"));
+    drop(conn);
+
+    let mut store = JournalStore::open(db.path()).unwrap();
+    store
+        .set_entry_trashed(&alpha_id, &alpha_revision, true)
+        .unwrap();
+    store.purge_entry(&alpha_id, &alpha_revision).unwrap();
+    drop(store);
+    let conn = Connection::open(db.path()).unwrap();
+    let retained_after_purge: (Option<Vec<u8>>, Option<String>, String) = conn.query_row(
+        "SELECT source_bytes,purged_at,relative_path FROM legacy_import_sources WHERE entry_id=?1",
+        [&alpha_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert!(retained_after_purge.0.is_none());
+    assert!(retained_after_purge.1.is_some());
+    assert_eq!(retained_after_purge.2, "alpha.md");
+}
+
+#[test]
+fn schema_fourteen_migrates_to_the_import_ledger_atomically() {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    drop(JournalStore::open(db.path()).unwrap());
+    let conn = Connection::open(db.path()).unwrap();
+    conn.execute_batch("DROP TABLE legacy_import_sources; PRAGMA user_version=14;")
+        .unwrap();
+    drop(conn);
+    drop(JournalStore::open(db.path()).unwrap());
+    let conn = Connection::open(db.path()).unwrap();
+    let version: u32 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    let ledger: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_import_sources')",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(version, 15);
+    assert!(ledger);
+}
+
+#[test]
+fn identical_stem_and_title_resolve_as_one_link_target() {
+    let source = tempfile::tempdir().unwrap();
+    entry(
+        &source,
+        "foo.md",
+        b"---\ndate: 2026-01-02\nbook: John\nchapter: 3\n---\n# foo\nTarget.\n",
+    );
+    entry(
+        &source,
+        "source.md",
+        b"---\ndate: 2026-01-02\nbook: John\nchapter: 4\n---\n# Source\nSee [[foo]].\n",
+    );
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let mut store = JournalStore::open(db.path()).unwrap();
+    let preview = store.preview_legacy_import(source.path()).unwrap();
+    assert_eq!(preview.unresolved_links, 0);
+    store
+        .import_legacy_journal(source.path(), &preview.preview_id)
+        .unwrap();
+    let entries = store.list_entries().unwrap();
+    let target = entries
+        .iter()
+        .find(|entry| entry.content.title == "foo")
+        .unwrap();
+    let source = entries
+        .iter()
+        .find(|entry| entry.content.title == "Source")
+        .unwrap();
+    assert_eq!(source.content.links, vec![target.id.clone()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_source_and_journal_are_rejected_without_reads() {
+    use std::os::unix::fs::symlink;
+    let actual = tempfile::tempdir().unwrap();
+    entry(
+        &actual,
+        "safe.md",
+        b"---\ndate: 2026-01-02\nbook: John\nchapter: 3\n---\nsafe\n",
+    );
+    let holder = tempfile::tempdir().unwrap();
+    let source_link = holder.path().join("source-link");
+    symlink(actual.path(), &source_link).unwrap();
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let store = JournalStore::open(db.path()).unwrap();
+    assert!(store
+        .preview_legacy_import(&source_link)
+        .unwrap_err()
+        .to_string()
+        .contains("symbolic link"));
+
+    let nested = tempfile::tempdir().unwrap();
+    symlink(actual.path().join("journal"), nested.path().join("journal")).unwrap();
+    assert!(store
+        .preview_legacy_import(nested.path())
+        .unwrap_err()
+        .to_string()
+        .contains("symbolic link"));
 }
 
 #[test]
@@ -139,6 +240,26 @@ fn changed_source_creates_a_revision_and_stale_confirmation_writes_nothing() {
         .unwrap_err();
     assert!(error.to_string().contains("preview it again"));
     assert_eq!(store.get_history(&id).unwrap().len(), 2);
+
+    let history = store.get_history(&id).unwrap();
+    let current_revision = history[0].id.clone();
+    let old_revision = history[1].id.clone();
+    store
+        .purge_revision(&id, &old_revision, &current_revision)
+        .unwrap();
+    drop(store);
+    let conn = Connection::open(db.path()).unwrap();
+    let purged: (Option<Vec<u8>>, Option<String>, String) = conn.query_row(
+        "SELECT source_bytes,purged_at,content_hash FROM legacy_import_sources WHERE revision_id=?1",
+        [&old_revision],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert!(purged.0.is_none());
+    assert!(purged.1.is_some());
+    assert!(
+        !purged.2.is_empty(),
+        "logical provenance remains after explicit purge"
+    );
 }
 
 #[test]

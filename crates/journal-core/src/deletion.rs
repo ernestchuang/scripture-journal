@@ -136,6 +136,7 @@ impl JournalStore {
             params![revision_id, entry_id],
         )?;
         ensure!(removed == 1, "Revision not found for this entry");
+        legacy_import::purge_provenance(&tx, entry_id, Some(revision_id))?;
         record_change(&tx, entry_id, "purge_revision", revision_id)?;
         tx.commit()?;
         Ok(())
@@ -158,6 +159,7 @@ impl JournalStore {
         );
         tx.execute("INSERT INTO purged_entries(entry_id,deleted_at,last_published_revision_id) VALUES(?1,?2,?3)",params![id,Utc::now().to_rfc3339(),current.published_revision_id])?;
         record_change(&tx, id, "purge_entry", expected_revision)?;
+        legacy_import::purge_provenance(&tx, id, None)?;
         tx.execute("DELETE FROM revisions WHERE entry_id=?1", [id])?;
         tx.execute("DELETE FROM entries WHERE id=?1", [id])?;
         tx.commit()?;

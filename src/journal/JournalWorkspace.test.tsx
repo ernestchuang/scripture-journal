@@ -17,6 +17,22 @@ const fakeApi = (): JournalApi => ({
 });
 
 describe('journal workspace', () => {
+  it('shows imported entries after refresh without replacing open writing', async () => {
+    const api = fakeApi();
+    const imported: Entry = {
+      id: 'imported', createdAt: '2026-09-17T00:00:00Z', updatedAt: '2026-09-17T00:00:00Z',
+      workingRevisionId: 'r1', publishedRevisionId: 'r1',
+      content: { ...blankContent([{ book: 43, chapter: 3 }]), title: 'Imported reflection' },
+    };
+    vi.mocked(api.listEntries).mockResolvedValueOnce([]).mockResolvedValueOnce([imported]);
+    const { rerender } = render(<JournalWorkspace api={api} passage={{ book: 43, chapter: 3 }} reflectRequest={1} refreshRequest={0} />);
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    fireEvent.change(editor, { target: { value: 'Unsaved current writing' } });
+    rerender(<JournalWorkspace api={api} passage={{ book: 43, chapter: 3 }} reflectRequest={1} refreshRequest={1} />);
+    await screen.findByRole('button', { name: /Imported reflection/ });
+    expect((editor as HTMLTextAreaElement).value).toBe('Unsaved current writing');
+  });
+
   it('combines revisit filters without changing open writing', async () => {
     const api = fakeApi();
     const make = (id: string, finished: boolean, chapter: number, tags: string[]): Entry => ({
