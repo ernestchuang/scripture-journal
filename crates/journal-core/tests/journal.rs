@@ -253,7 +253,8 @@ fn schema_one_journal_data_survives_plan_migration() {
 
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "DROP TABLE reading_completion_undos;
+        "DROP TABLE plan_stream_progress_epochs;
+         DROP TABLE reading_completion_undos;
          DROP TABLE reading_completions;
          DROP TABLE plan_assignments;
          DROP TABLE plan_enrollment_streams;
@@ -293,7 +294,7 @@ fn schema_one_journal_data_survives_plan_migration() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        3
+        4
     );
 }
 
@@ -347,6 +348,7 @@ fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
             enrollment_id: enrollment.id.clone(),
             stream_id: old.stream_id.clone(),
             expected_assignment_id: old.id.clone(),
+            expected_progress_id: old.progress_id.clone(),
         })
         .unwrap();
     drop(store);
@@ -398,6 +400,7 @@ fn stop_loop_stale_completion_and_ordered_undo_preserve_history() {
             enrollment_id: stopped.id.clone(),
             stream_id: first.stream_id.clone(),
             expected_assignment_id: first.id.clone(),
+            expected_progress_id: first.progress_id.clone(),
         })
         .unwrap();
     assert!(store
@@ -405,6 +408,7 @@ fn stop_loop_stale_completion_and_ordered_undo_preserve_history() {
             enrollment_id: stopped.id.clone(),
             stream_id: first.stream_id.clone(),
             expected_assignment_id: first.id,
+            expected_progress_id: first.progress_id,
         })
         .unwrap_err()
         .to_string()
@@ -420,6 +424,7 @@ fn stop_loop_stale_completion_and_ordered_undo_preserve_history() {
             enrollment_id: stopped.id.clone(),
             stream_id: second.stream_id.clone(),
             expected_assignment_id: second.id,
+            expected_progress_id: second.progress_id,
         })
         .unwrap();
     assert!(store.undo_plan_completion(&first_completion.id).is_err());
@@ -452,6 +457,7 @@ fn stop_loop_stale_completion_and_ordered_undo_preserve_history() {
                 enrollment_id: looped.id.clone(),
                 stream_id: assignment.stream_id,
                 expected_assignment_id: assignment.id,
+                expected_progress_id: assignment.progress_id,
             })
             .unwrap();
     }
@@ -495,6 +501,7 @@ fn schema_two_plan_rows_survive_progress_migration() {
     drop(store);
     let conn = rusqlite::Connection::open(&path).unwrap();
     for table in [
+        "plan_stream_progress_epochs",
         "reading_completion_undos",
         "reading_completions",
         "plan_assignments",
@@ -513,6 +520,152 @@ fn schema_two_plan_rows_survive_progress_migration() {
             .unwrap(),
         plan
     );
+}
+
+#[test]
+fn schema_three_progress_migration_preserves_history_and_adds_command_epoch() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Schema three"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let first = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.stream_id == "old-testament")
+        .unwrap();
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: first.stream_id,
+            expected_assignment_id: first.id,
+            expected_progress_id: first.progress_id,
+        })
+        .unwrap();
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("DROP TABLE plan_stream_progress_epochs", [])
+        .unwrap();
+    conn.pragma_update(None, "user_version", 3).unwrap();
+    drop(conn);
+
+    let store = JournalStore::open(&path).unwrap();
+    let active = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.stream_id == "old-testament")
+        .unwrap();
+    assert_eq!(active.ordinal, 2);
+    assert!(Uuid::parse_str(&active.progress_id).is_ok());
+    drop(store);
+    let conn = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM reading_completions", [], |row| row
+            .get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        4
+    );
+}
+
+#[test]
+fn stale_completion_epoch_is_rejected_after_undo_reopen_and_recompletion() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut first_store = JournalStore::open(&path).unwrap();
+    let version = first_store
+        .create_plan_definition(stream_definition("Epochs"))
+        .unwrap();
+    let enrollment = first_store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let assignment = first_store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.stream_id == "old-testament")
+        .unwrap();
+    let stale = CompleteStreamRequest {
+        enrollment_id: enrollment.id.clone(),
+        stream_id: assignment.stream_id.clone(),
+        expected_assignment_id: assignment.id.clone(),
+        expected_progress_id: assignment.progress_id.clone(),
+    };
+    let completion = first_store.complete_plan_stream(stale.clone()).unwrap();
+    first_store.undo_plan_completion(&completion.id).unwrap();
+    drop(first_store);
+
+    let mut reopened = JournalStore::open(&path).unwrap();
+    let fresh_assignment = reopened
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.stream_id == "old-testament")
+        .unwrap();
+    assert_eq!(fresh_assignment.id, assignment.id);
+    assert_ne!(fresh_assignment.progress_id, assignment.progress_id);
+    assert!(reopened.complete_plan_stream(stale).is_err());
+    let counts_after_rejection = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT (SELECT count(*) FROM reading_completions),(SELECT count(*) FROM reading_completion_undos),(SELECT count(*) FROM plan_stream_progress_epochs)",
+            [],
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, u32>(2)?)),
+        )
+        .unwrap();
+    assert_eq!(counts_after_rejection, (1, 1, 4));
+
+    let fresh = CompleteStreamRequest {
+        enrollment_id: enrollment.id.clone(),
+        stream_id: fresh_assignment.stream_id,
+        expected_assignment_id: fresh_assignment.id,
+        expected_progress_id: fresh_assignment.progress_id,
+    };
+    let recompletion = reopened.complete_plan_stream(fresh.clone()).unwrap();
+    reopened.undo_plan_completion(&recompletion.id).unwrap();
+    let before_second_rejection = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT (SELECT count(*) FROM reading_completions),(SELECT count(*) FROM reading_completion_undos),(SELECT count(*) FROM plan_stream_progress_epochs)",
+            [],
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, u32>(2)?)),
+        )
+        .unwrap();
+    assert!(reopened.complete_plan_stream(fresh).is_err());
+    let after_second_rejection = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT (SELECT count(*) FROM reading_completions),(SELECT count(*) FROM reading_completion_undos),(SELECT count(*) FROM plan_stream_progress_epochs)",
+            [],
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?, row.get::<_, u32>(2)?)),
+        )
+        .unwrap();
+    assert_eq!(after_second_rejection, before_second_rejection);
+    let intentional = reopened
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.stream_id == "old-testament")
+        .unwrap();
+    reopened
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id,
+            stream_id: intentional.stream_id,
+            expected_assignment_id: intentional.id,
+            expected_progress_id: intentional.progress_id,
+        })
+        .unwrap();
 }
 
 fn export_fixture(dir: &TempDir, name: &str) -> std::path::PathBuf {

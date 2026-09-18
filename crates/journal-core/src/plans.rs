@@ -82,6 +82,7 @@ pub struct PlanAssignment {
     pub ordinal: u32,
     pub cycle: u32,
     pub passage: Passage,
+    pub progress_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +91,7 @@ pub struct CompleteStreamRequest {
     pub enrollment_id: String,
     pub stream_id: String,
     pub expected_assignment_id: String,
+    pub expected_progress_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,7 +149,8 @@ pub(crate) fn enroll(
             .position(|chapter| chapter == &selection.starting_chapter)
             .unwrap() as u32;
         tx.execute("INSERT INTO plan_enrollment_streams(enrollment_id,stream_id,loop_after_end) VALUES(?1,?2,?3)", params![id, selection.stream_id, selection.loop_after_end])?;
-        insert_assignment(&tx, &id, stream, 1, 1, position)?;
+        let assignment_id = insert_assignment(&tx, &id, stream, 1, 1, position)?;
+        insert_progress_epoch(&tx, &id, &stream.id, &assignment_id)?;
     }
     let result = PlanEnrollment {
         id,
@@ -163,15 +166,14 @@ pub(crate) fn active_assignments(
     enrollment_id: &str,
 ) -> Result<Vec<PlanAssignment>> {
     let mut statement = conn.prepare(
-        "SELECT a.id,a.enrollment_id,a.stream_id,a.ordinal,a.cycle,a.passage
-         FROM plan_assignments a
-         WHERE a.enrollment_id=?1 AND NOT EXISTS (
+        "SELECT a.id,a.enrollment_id,a.stream_id,a.ordinal,a.cycle,a.passage,e.id
+         FROM plan_stream_progress_epochs e JOIN plan_assignments a ON a.id=e.assignment_id
+         WHERE a.enrollment_id=?1
+         AND e.sequence=(SELECT MAX(e2.sequence) FROM plan_stream_progress_epochs e2 WHERE e2.enrollment_id=e.enrollment_id AND e2.stream_id=e.stream_id)
+         AND NOT EXISTS (
            SELECT 1 FROM reading_completions c WHERE c.assignment_id=a.id
            AND NOT EXISTS (SELECT 1 FROM reading_completion_undos u WHERE u.completion_id=c.id)
          )
-         AND a.ordinal=(SELECT MIN(a2.ordinal) FROM plan_assignments a2 WHERE a2.enrollment_id=a.enrollment_id AND a2.stream_id=a.stream_id AND NOT EXISTS (
-           SELECT 1 FROM reading_completions c2 WHERE c2.assignment_id=a2.id
-           AND NOT EXISTS (SELECT 1 FROM reading_completion_undos u2 WHERE u2.completion_id=c2.id)))
          ORDER BY a.stream_id")?;
     let assignments = statement
         .query_map([enrollment_id], assignment_row)?
@@ -189,7 +191,8 @@ pub(crate) fn complete_stream(
         .find(|assignment| assignment.stream_id == request.stream_id)
         .context("No active assignment for this stream")?;
     ensure!(
-        active.id == request.expected_assignment_id,
+        active.id == request.expected_assignment_id
+            && active.progress_id == request.expected_progress_id,
         "Conflict: assignment changed since it was loaded; reload before completing"
     );
     let completion = PlanCompletion {
@@ -224,7 +227,7 @@ pub(crate) fn complete_stream(
         })
         .context("Assignment snapshot is not in its pinned definition")?;
     if current + 1 < stream.chapters.len() {
-        insert_assignment(
+        let next_id = insert_assignment(
             &tx,
             &request.enrollment_id,
             &stream,
@@ -232,8 +235,9 @@ pub(crate) fn complete_stream(
             active.cycle,
             (current + 1) as u32,
         )?;
+        insert_progress_epoch(&tx, &request.enrollment_id, &stream.id, &next_id)?;
     } else if loop_after_end {
-        insert_assignment(
+        let next_id = insert_assignment(
             &tx,
             &request.enrollment_id,
             &stream,
@@ -241,6 +245,7 @@ pub(crate) fn complete_stream(
             active.cycle + 1,
             0,
         )?;
+        insert_progress_epoch(&tx, &request.enrollment_id, &stream.id, &next_id)?;
     }
     tx.commit()?;
     Ok(completion)
@@ -263,6 +268,12 @@ pub(crate) fn undo_completion(conn: &mut Connection, completion_id: &str) -> Res
             Utc::now().to_rfc3339()
         ],
     )?;
+    let assignment_id: String = tx.query_row(
+        "SELECT assignment_id FROM reading_completions WHERE id=?1",
+        [completion_id],
+        |row| row.get(0),
+    )?;
+    insert_progress_epoch(&tx, &enrollment_id, &stream_id, &assignment_id)?;
     tx.commit()?;
     Ok(())
 }
@@ -274,7 +285,7 @@ fn insert_assignment(
     ordinal: u32,
     cycle: u32,
     position: u32,
-) -> Result<()> {
+) -> Result<String> {
     let chapter = &stream.chapters[position as usize];
     let passage = Passage {
         book: chapter.book,
@@ -283,22 +294,39 @@ fn insert_assignment(
         end_verse: None,
     };
     let content = serde_json::to_string(&passage)?;
-    let existing: Option<(u32, String)> = conn
+    let existing: Option<(String, u32, String)> = conn
         .query_row(
-            "SELECT cycle,passage FROM plan_assignments WHERE enrollment_id=?1 AND stream_id=?2 AND ordinal=?3",
+            "SELECT id,cycle,passage FROM plan_assignments WHERE enrollment_id=?1 AND stream_id=?2 AND ordinal=?3",
             params![enrollment_id, stream.id, ordinal],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    if let Some((existing_cycle, existing_content)) = existing {
+    if let Some((id, existing_cycle, existing_content)) = existing {
         ensure!(
             existing_cycle == cycle && existing_content == content,
             "Existing assignment conflicts with pinned plan progress"
         );
+        Ok(id)
     } else {
-        conn.execute("INSERT INTO plan_assignments(id,enrollment_id,stream_id,ordinal,cycle,passage) VALUES(?1,?2,?3,?4,?5,?6)", params![Uuid::new_v4().to_string(), enrollment_id, stream.id, ordinal, cycle, content])?;
+        let id = Uuid::new_v4().to_string();
+        conn.execute("INSERT INTO plan_assignments(id,enrollment_id,stream_id,ordinal,cycle,passage) VALUES(?1,?2,?3,?4,?5,?6)", params![id, enrollment_id, stream.id, ordinal, cycle, content])?;
+        Ok(id)
     }
-    Ok(())
+}
+
+fn insert_progress_epoch(
+    conn: &Connection,
+    enrollment_id: &str,
+    stream_id: &str,
+    assignment_id: &str,
+) -> Result<String> {
+    let id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO plan_stream_progress_epochs(id,enrollment_id,stream_id,sequence,assignment_id,created_at)
+         VALUES(?1,?2,?3,(SELECT COALESCE(MAX(sequence),0)+1 FROM plan_stream_progress_epochs WHERE enrollment_id=?2 AND stream_id=?3),?4,?5)",
+        params![id, enrollment_id, stream_id, assignment_id, Utc::now().to_rfc3339()],
+    )?;
+    Ok(id)
 }
 
 fn assignment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanAssignment> {
@@ -313,6 +341,7 @@ fn assignment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanAssignment> {
         ordinal: row.get(3)?,
         cycle: row.get(4)?,
         passage,
+        progress_id: row.get(6)?,
     })
 }
 
@@ -509,4 +538,28 @@ CREATE TRIGGER plan_progress_retained_streams BEFORE DELETE ON plan_enrollment_s
 CREATE TRIGGER plan_progress_retained_assignments BEFORE DELETE ON plan_assignments BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
 CREATE TRIGGER plan_progress_retained_completions BEFORE DELETE ON reading_completions BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
 CREATE TRIGGER plan_progress_retained_undos BEFORE DELETE ON reading_completion_undos BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+";
+
+pub(crate) const PLAN_PROGRESS_EPOCH_SCHEMA: &str = "
+CREATE TABLE plan_stream_progress_epochs(
+ id TEXT PRIMARY KEY,
+ enrollment_id TEXT NOT NULL,
+ stream_id TEXT NOT NULL,
+ sequence INTEGER NOT NULL CHECK(sequence>0),
+ assignment_id TEXT NOT NULL REFERENCES plan_assignments(id),
+ created_at TEXT NOT NULL,
+ UNIQUE(enrollment_id,stream_id,sequence),
+ FOREIGN KEY(enrollment_id,stream_id) REFERENCES plan_enrollment_streams(enrollment_id,stream_id)
+);
+INSERT INTO plan_stream_progress_epochs(id,enrollment_id,stream_id,sequence,assignment_id,created_at)
+SELECT lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-4'||substr(lower(hex(randomblob(2))),2)||'-a'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))),
+       s.enrollment_id,s.stream_id,1,a.id,datetime('now')
+FROM plan_enrollment_streams s JOIN plan_assignments a ON a.enrollment_id=s.enrollment_id AND a.stream_id=s.stream_id
+WHERE a.ordinal=(SELECT MIN(a2.ordinal) FROM plan_assignments a2 WHERE a2.enrollment_id=s.enrollment_id AND a2.stream_id=s.stream_id AND NOT EXISTS (
+ SELECT 1 FROM reading_completions c WHERE c.assignment_id=a2.id AND NOT EXISTS (SELECT 1 FROM reading_completion_undos u WHERE u.completion_id=c.id)));
+CREATE TRIGGER plan_stream_progress_epochs_immutable BEFORE UPDATE ON plan_stream_progress_epochs BEGIN SELECT RAISE(ABORT,'Plan progress epochs are immutable'); END;
+CREATE TRIGGER plan_stream_progress_epochs_retained BEFORE DELETE ON plan_stream_progress_epochs BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER plan_stream_progress_epochs_match BEFORE INSERT ON plan_stream_progress_epochs
+WHEN NOT EXISTS(SELECT 1 FROM plan_assignments a WHERE a.id=NEW.assignment_id AND a.enrollment_id=NEW.enrollment_id AND a.stream_id=NEW.stream_id)
+BEGIN SELECT RAISE(ABORT,'Progress epoch assignment must belong to its stream'); END;
 ";
