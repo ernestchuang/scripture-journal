@@ -8,6 +8,7 @@ import {
   type CalendarAssignmentCompletion,
   type CompleteStreamRequest,
   type CompleteCalendarAssignmentRequest,
+  type UndoCalendarCompletionRequest,
   type CalendarEnrollmentRequest,
   type CalendarPlanEnrollment,
   type DatedPlanAssignment,
@@ -88,6 +89,13 @@ const calendarCompletion: CalendarAssignmentCompletion = {
   assignmentId: datedAssignment.id,
   enrollmentId: calendarEnrollment.id,
   completedAt: '2026-09-18T00:00:03Z',
+  undone: false,
+};
+
+const calendarUndoRequest: UndoCalendarCompletionRequest = {
+  enrollmentId: calendarEnrollment.id,
+  assignmentId: datedAssignment.id,
+  completionId: calendarCompletion.id,
 };
 
 const assignment: PlanAssignment = {
@@ -301,18 +309,21 @@ describe('native plan-definition adapter', () => {
   });
 
   it('maps calendar completion and retained history with exact IDs and camelCase fields', async () => {
-    native.invoke.mockResolvedValueOnce(calendarCompletion).mockResolvedValueOnce([calendarCompletion]);
+    native.invoke.mockResolvedValueOnce(calendarCompletion).mockResolvedValueOnce(undefined).mockResolvedValueOnce([calendarCompletion]);
 
     await expect(nativePlans.completeCalendarAssignment(calendarCompletionRequest)).resolves.toEqual(calendarCompletion);
+    await expect(nativePlans.undoCalendarCompletion(calendarUndoRequest)).resolves.toBeUndefined();
     await expect(nativePlans.calendarCompletionHistory(calendarEnrollment.id)).resolves.toEqual([calendarCompletion]);
 
     expect(native.invoke).toHaveBeenNthCalledWith(1, 'complete_calendar_assignment', { request: calendarCompletionRequest });
-    expect(native.invoke).toHaveBeenNthCalledWith(2, 'calendar_completion_history', { enrollmentId: calendarEnrollment.id });
+    expect(native.invoke).toHaveBeenNthCalledWith(2, 'undo_calendar_completion', { request: calendarUndoRequest });
+    expect(native.invoke).toHaveBeenNthCalledWith(3, 'calendar_completion_history', { enrollmentId: calendarEnrollment.id });
     expect(calendarCompletion).toEqual({
       id: 'calendar-completion-1',
       assignmentId: datedAssignment.id,
       enrollmentId: calendarEnrollment.id,
       completedAt: '2026-09-18T00:00:03Z',
+      undone: false,
     });
   });
 
@@ -326,6 +337,22 @@ describe('native plan-definition adapter', () => {
 
     expect(native.invoke).toHaveBeenNthCalledWith(1, 'complete_calendar_assignment', { request: invalid });
     expect(native.invoke).toHaveBeenNthCalledWith(2, 'complete_calendar_assignment', { request: calendarCompletionRequest });
+  });
+
+  it('propagates calendar undo ownership and stale errors with all three exact identities', async () => {
+    const error = new Error('Calendar completion is missing, stale, or owned by another assignment');
+    const invalid: UndoCalendarCompletionRequest = {
+      enrollmentId: 'other-calendar-enrollment',
+      assignmentId: datedAssignment.id,
+      completionId: calendarCompletion.id,
+    };
+    native.invoke.mockRejectedValueOnce(error).mockRejectedValueOnce(error);
+
+    await expect(nativePlans.undoCalendarCompletion(invalid)).rejects.toBe(error);
+    await expect(nativePlans.undoCalendarCompletion(calendarUndoRequest)).rejects.toBe(error);
+
+    expect(native.invoke).toHaveBeenNthCalledWith(1, 'undo_calendar_completion', { request: invalid });
+    expect(native.invoke).toHaveBeenNthCalledWith(2, 'undo_calendar_completion', { request: calendarUndoRequest });
   });
 
   it('maps retained completion history with all camelCase fields intact', async () => {

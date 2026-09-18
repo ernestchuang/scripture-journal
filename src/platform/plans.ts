@@ -79,8 +79,15 @@ export interface DatedPlanAssignment {
 
 /** Both IDs identify the retained calendar assignment that was explicitly completed. */
 export interface CompleteCalendarAssignmentRequest {
+    enrollmentId: string;
+    assignmentId: string;
+}
+
+/** All three retained identities prevent undoing a different calendar completion. */
+export interface UndoCalendarCompletionRequest {
   enrollmentId: string;
   assignmentId: string;
+  completionId: string;
 }
 
 /** A retained, immutable completion of a dated calendar assignment. */
@@ -89,6 +96,7 @@ export interface CalendarAssignmentCompletion {
   assignmentId: string;
   enrollmentId: string;
   completedAt: string;
+  undone: boolean;
 }
 
 export interface PlanAssignment {
@@ -149,6 +157,7 @@ export interface PlanDefinitionApi {
   getCalendarPlanEnrollment(enrollmentId: string): Promise<CalendarPlanEnrollment | null>;
   calendarPlanAssignments(enrollmentId: string): Promise<DatedPlanAssignment[]>;
   completeCalendarAssignment(request: CompleteCalendarAssignmentRequest): Promise<CalendarAssignmentCompletion>;
+  undoCalendarCompletion(request: UndoCalendarCompletionRequest): Promise<void>;
   calendarCompletionHistory(enrollmentId: string): Promise<CalendarAssignmentCompletion[]>;
   activePlanAssignments(enrollmentId: string): Promise<PlanAssignment[]>;
   planCompletionHistory(enrollmentId: string): Promise<PlanCompletionHistoryItem[]>;
@@ -182,6 +191,8 @@ export const nativePlans: PlanDefinitionApi = {
     invoke<DatedPlanAssignment[]>('calendar_plan_assignments', { enrollmentId }),
   completeCalendarAssignment: request =>
     invoke<CalendarAssignmentCompletion>('complete_calendar_assignment', { request }),
+  undoCalendarCompletion: request =>
+    invoke<void>('undo_calendar_completion', { request }),
   calendarCompletionHistory: enrollmentId =>
     invoke<CalendarAssignmentCompletion[]>('calendar_completion_history', { enrollmentId }),
   activePlanAssignments: enrollmentId =>

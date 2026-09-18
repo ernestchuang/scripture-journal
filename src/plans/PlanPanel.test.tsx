@@ -47,7 +47,7 @@ const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanD
   enrollInCalendar: vi.fn(async request => ({ ...calendarEnrollment, definitionVersionId: request.definitionVersionId, startDate: request.startDate, scheduleMode: request.scheduleMode })),
   getCalendarPlanEnrollment: vi.fn(async () => null),
   calendarPlanAssignments: vi.fn(async () => []),
-  completeCalendarAssignment: vi.fn(async request => ({ id: 'calendar-completion', assignmentId: request.assignmentId, enrollmentId: request.enrollmentId, completedAt: '2026-09-18T00:00:07Z' })),
+  completeCalendarAssignment: vi.fn(async request => ({ id: 'calendar-completion', assignmentId: request.assignmentId, enrollmentId: request.enrollmentId, completedAt: '2026-09-18T00:00:07Z', undone: false })),
   calendarCompletionHistory: vi.fn(async () => []),
   completePlanStream: vi.fn(async request => ({ id: 'completion-1', assignmentId: request.expectedAssignmentId, completedAt: '2026-09-18T00:00:03Z' })),
   undoPlanCompletion: vi.fn(async () => undefined),
@@ -470,7 +470,7 @@ describe('retained plan panel', () => {
   it('explicitly completes the exact calendar assignment once and refreshes retained history', async () => {
     const retained = { ...calendarEnrollment, id: 'calendar-completable' };
     const assignment: DatedPlanAssignment = { id: 'dated-completable', enrollmentId: retained.id, definitionVersionId: retained.definitionVersionId, definitionDay: 60, localDate: retained.startDate, passages: [{ book: 43, chapter: 3, startVerse: 16, endVerse: 16 }] };
-    const completion = { id: 'calendar-completion-exact', assignmentId: assignment.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:07Z' };
+    const completion = { id: 'calendar-completion-exact', assignmentId: assignment.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:07Z', undone: false };
     const pending = deferred<typeof completion>();
     const plans = api();
     vi.mocked(plans.listPlanEnrollments).mockResolvedValue([{ id: retained.id, definitionVersionId: retained.definitionVersionId, createdAt: retained.createdAt }]);
@@ -496,8 +496,8 @@ describe('retained plan panel', () => {
     vi.mocked(plans.listPlanEnrollments).mockResolvedValue([{ id: retained.id, definitionVersionId: retained.definitionVersionId, createdAt: retained.createdAt }]);
     vi.mocked(plans.getCalendarPlanEnrollment).mockResolvedValue(retained);
     vi.mocked(plans.calendarPlanAssignments).mockResolvedValue([assignment]);
-    vi.mocked(plans.completeCalendarAssignment).mockRejectedValueOnce(new Error('stale assignment')).mockResolvedValue({ id: 'retry-completion', assignmentId: assignment.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:08Z' });
-    vi.mocked(plans.calendarCompletionHistory).mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'retry-completion', assignmentId: assignment.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:08Z' }]);
+    vi.mocked(plans.completeCalendarAssignment).mockRejectedValueOnce(new Error('stale assignment')).mockResolvedValue({ id: 'retry-completion', assignmentId: assignment.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:08Z', undone: false });
+    vi.mocked(plans.calendarCompletionHistory).mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'retry-completion', assignmentId: assignment.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:08Z', undone: false }]);
     render(<PlanPanel api={plans} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Complete calendar assignment' }));
     expect(await screen.findByText(/Could not complete calendar assignment: Error: stale assignment/)).toBeTruthy();
@@ -515,7 +515,7 @@ describe('retained plan panel', () => {
     const a = { ...calendarEnrollment, id: 'calendar-history-a' };
     const b = { ...calendarEnrollment, id: 'calendar-history-b', startDate: '2026-04-02' };
     const assignment = (item: typeof a): DatedPlanAssignment => ({ id: `dated-${item.id}`, enrollmentId: item.id, definitionVersionId: item.definitionVersionId, definitionDay: 1, localDate: item.startDate, passages: [{ book: 43, chapter: 3, startVerse: 16, endVerse: 16 }] });
-    const currentCompletion = { id: 'completion-current-a', assignmentId: assignment(a).id, enrollmentId: a.id, completedAt: '2026-09-18T00:00:09Z' };
+    const currentCompletion = { id: 'completion-current-a', assignmentId: assignment(a).id, enrollmentId: a.id, completedAt: '2026-09-18T00:00:09Z', undone: false };
     const plans = api();
     vi.mocked(plans.listPlanEnrollments).mockResolvedValue([a, b]);
     vi.mocked(plans.getCalendarPlanEnrollment).mockImplementation(async id => id === a.id ? a : b);
@@ -559,7 +559,7 @@ describe('retained plan panel', () => {
   });
 
   it.each(['success', 'rejection'] as const)('ignores stale calendar completion %s after selection changes', async settlement => {
-    const pending = deferred<{ id: string; assignmentId: string; enrollmentId: string; completedAt: string }>();
+    const pending = deferred<{ id: string; assignmentId: string; enrollmentId: string; completedAt: string; undone: boolean }>();
     const a = { ...calendarEnrollment, id: `calendar-completion-a-${settlement}` };
     const b = { ...calendarEnrollment, id: `calendar-completion-b-${settlement}`, startDate: '2026-04-02' };
     const assignment = (item: typeof a): DatedPlanAssignment => ({ id: `dated-${item.id}`, enrollmentId: item.id, definitionVersionId: item.definitionVersionId, definitionDay: 1, localDate: item.startDate, passages: [{ book: 1, chapter: 1 }] });
@@ -575,7 +575,7 @@ describe('retained plan panel', () => {
     fireEvent.change(screen.getByLabelText('Retained calendar enrollment'), { target: { value: b.id } });
     expect(await screen.findByText(b.startDate)).toBeTruthy();
     await act(async () => settlement === 'success'
-      ? pending.resolve({ id: 'obsolete-completion', assignmentId: assignment(a).id, enrollmentId: a.id, completedAt: '2026-09-18T00:00:10Z' })
+      ? pending.resolve({ id: 'obsolete-completion', assignmentId: assignment(a).id, enrollmentId: a.id, completedAt: '2026-09-18T00:00:10Z', undone: false })
       : pending.reject(new Error('obsolete completion rejection')));
     expect((screen.getByLabelText('Retained calendar enrollment') as HTMLSelectElement).value).toBe(b.id);
     expect(screen.getByText(b.startDate)).toBeTruthy();
@@ -587,7 +587,7 @@ describe('retained plan panel', () => {
     const oldRead = deferred<Awaited<ReturnType<PlanDefinitionApi['calendarCompletionHistory']>>>();
     const enrollment = { ...calendarEnrollment, id: `calendar-old-api-history-${settlement}` };
     const assignment: DatedPlanAssignment = { id: `dated-old-api-history-${settlement}`, enrollmentId: enrollment.id, definitionVersionId: enrollment.definitionVersionId, definitionDay: 1, localDate: enrollment.startDate, passages: [{ book: 43, chapter: 3, startVerse: 16, endVerse: 16 }] };
-    const current = { id: `current-history-${settlement}`, assignmentId: assignment.id, enrollmentId: enrollment.id, completedAt: '2026-09-18T00:00:11Z' };
+    const current = { id: `current-history-${settlement}`, assignmentId: assignment.id, enrollmentId: enrollment.id, completedAt: '2026-09-18T00:00:11Z', undone: false };
     const oldPlans = api();
     const currentPlans = api();
     for (const plans of [oldPlans, currentPlans]) {
@@ -627,7 +627,7 @@ describe('retained plan panel', () => {
     fireEvent.change(screen.getByLabelText('Retained calendar enrollment'), { target: { value: a.id } });
     fireEvent.click(await screen.findByRole('button', { name: 'Complete calendar assignment' }));
     expect(plans.completeCalendarAssignment).toHaveBeenNthCalledWith(2, { enrollmentId: a.id, assignmentId: assignment(a).id });
-    await act(async () => settlement === 'success' ? obsolete.resolve({ id: 'obsolete', assignmentId: assignment(a).id, enrollmentId: a.id, completedAt: '2026-09-18T00:00:12Z' }) : obsolete.reject(new Error('obsolete A completion')));
+    await act(async () => settlement === 'success' ? obsolete.resolve({ id: 'obsolete', assignmentId: assignment(a).id, enrollmentId: a.id, completedAt: '2026-09-18T00:00:12Z', undone: false }) : obsolete.reject(new Error('obsolete A completion')));
     expect(screen.getByRole('button', { name: 'Completing calendar assignment…' })).toBeTruthy();
     expect(screen.queryByText(/obsolete A completion|Completion obsolete/)).toBeNull();
     await act(async () => current.reject(new Error('current A failure')));
@@ -654,12 +654,12 @@ describe('retained plan panel', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Complete calendar assignment' }));
     view.rerender(<PlanPanel api={replacement} />);
     const replacementButton = await screen.findByRole('button', { name: 'Complete calendar assignment' });
-    await act(async () => settlement === 'success' ? oldPending.resolve({ id: 'old-api-completion', assignmentId: assignment.id, enrollmentId: enrollment.id, completedAt: '2026-09-18T00:00:13Z' }) : oldPending.reject(new Error('old API completion')));
+    await act(async () => settlement === 'success' ? oldPending.resolve({ id: 'old-api-completion', assignmentId: assignment.id, enrollmentId: enrollment.id, completedAt: '2026-09-18T00:00:13Z', undone: false }) : oldPending.reject(new Error('old API completion')));
     expect(screen.queryByText(/old-api-completion|old API completion/)).toBeNull();
     fireEvent.click(replacementButton);
     expect(replacement.completeCalendarAssignment).toHaveBeenCalledTimes(1);
     view.unmount();
-    await act(async () => settlement === 'success' ? unmountedPending.resolve({ id: 'unmounted', assignmentId: assignment.id, enrollmentId: enrollment.id, completedAt: '2026-09-18T00:00:14Z' }) : unmountedPending.reject(new Error('unmounted completion')));
+    await act(async () => settlement === 'success' ? unmountedPending.resolve({ id: 'unmounted', assignmentId: assignment.id, enrollmentId: enrollment.id, completedAt: '2026-09-18T00:00:14Z', undone: false }) : unmountedPending.reject(new Error('unmounted completion')));
     expect(view.container.textContent).toBe('');
     expect(oldPlans.completeCalendarAssignment).toHaveBeenCalledTimes(1);
     expect(replacement.completeCalendarAssignment).toHaveBeenCalledTimes(1);
@@ -668,7 +668,7 @@ describe('retained plan panel', () => {
   it('preserves dated assignment metadata while confirmed-completion history refreshes or fails without replaying the write', async () => {
     const retained = { ...calendarEnrollment, id: 'calendar-history-refresh' };
     const assignment: DatedPlanAssignment = { id: 'dated-history-refresh', enrollmentId: retained.id, definitionVersionId: retained.definitionVersionId, definitionDay: 60, localDate: retained.startDate, passages: [{ book: 2, chapter: 12, startVerse: 21, endVerse: 51 }] };
-    const completion = { id: 'completion-history-refresh', assignmentId: assignment.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:09Z' };
+    const completion = { id: 'completion-history-refresh', assignmentId: assignment.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:09Z', undone: false };
     const refresh = deferred<typeof completion[]>();
     const plans = api();
     vi.mocked(plans.listPlanEnrollments).mockResolvedValue([{ id: retained.id, definitionVersionId: retained.definitionVersionId, createdAt: retained.createdAt }]);

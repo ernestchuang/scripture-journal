@@ -486,6 +486,14 @@ struct CompleteCalendarAssignmentRequest {
     assignment_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UndoCalendarCompletionRequest {
+    enrollment_id: String,
+    assignment_id: String,
+    completion_id: String,
+}
+
 async fn complete_calendar_assignment_for_store(
     store: Arc<Mutex<JournalStore>>,
     request: CompleteCalendarAssignmentRequest,
@@ -504,6 +512,30 @@ async fn complete_calendar_assignment(
     request: CompleteCalendarAssignmentRequest,
 ) -> Result<CalendarAssignmentCompletion, String> {
     complete_calendar_assignment_for_store(state.journal.clone(), request).await
+}
+
+async fn undo_calendar_completion_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    request: UndoCalendarCompletionRequest,
+) -> Result<(), String> {
+    run_store(store, move |journal| {
+        journal
+            .undo_calendar_completion(
+                &request.enrollment_id,
+                &request.assignment_id,
+                &request.completion_id,
+            )
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn undo_calendar_completion(
+    state: State<'_, AppState>,
+    request: UndoCalendarCompletionRequest,
+) -> Result<(), String> {
+    undo_calendar_completion_for_store(state.journal.clone(), request).await
 }
 
 async fn calendar_completion_history_for_store(
@@ -951,6 +983,7 @@ mod plan_command_tests {
                     "assignmentId": assignment.id,
                     "enrollmentId": first.id,
                     "completedAt": completion.completed_at,
+                    "undone": false,
                 })
             );
             let retained = calendar_completion_history_for_store(store.clone(), first.id.clone())
@@ -971,6 +1004,149 @@ mod plan_command_tests {
                     .await
                     .unwrap(),
                 retained
+            );
+        });
+    }
+
+    #[test]
+    fn typed_calendar_undo_command_validates_all_identities_without_partial_writes() {
+        tauri::async_runtime::block_on(async {
+            let request: UndoCalendarCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "enrollmentId": "00000000-0000-4000-8000-000000000001",
+                    "assignmentId": "00000000-0000-4000-8000-000000000002",
+                    "completionId": "00000000-0000-4000-8000-000000000003",
+                }))
+                .unwrap();
+            assert_eq!(
+                request.enrollment_id,
+                "00000000-0000-4000-8000-000000000001"
+            );
+            assert_eq!(
+                request.assignment_id,
+                "00000000-0000-4000-8000-000000000002"
+            );
+            assert_eq!(
+                request.completion_id,
+                "00000000-0000-4000-8000-000000000003"
+            );
+            assert!(
+                serde_json::from_value::<UndoCalendarCompletionRequest>(serde_json::json!({
+                    "enrollmentId": "00000000-0000-4000-8000-000000000001",
+                    "assignmentId": "00000000-0000-4000-8000-000000000002",
+                    "completionId": "00000000-0000-4000-8000-000000000003",
+                    "unexpected": true,
+                }),)
+                .is_err()
+            );
+            let (_directory, store) = test_store();
+            let definition = register_mcheyne_plan_for_store(store.clone())
+                .await
+                .unwrap();
+            let first = enroll_in_calendar_for_store(
+                store.clone(),
+                CalendarEnrollmentRequest {
+                    definition_version_id: definition.id.clone(),
+                    start_date: "2026-01-01".into(),
+                    schedule_mode: CalendarScheduleMode::DayOne,
+                },
+            )
+            .await
+            .unwrap();
+            let second = enroll_in_calendar_for_store(
+                store.clone(),
+                CalendarEnrollmentRequest {
+                    definition_version_id: definition.id,
+                    start_date: "2026-02-01".into(),
+                    schedule_mode: CalendarScheduleMode::DayOne,
+                },
+            )
+            .await
+            .unwrap();
+            let assignment = calendar_plan_assignments_for_store(store.clone(), first.id.clone())
+                .await
+                .unwrap()
+                .remove(0);
+            let other_assignment =
+                calendar_plan_assignments_for_store(store.clone(), second.id.clone())
+                    .await
+                    .unwrap()
+                    .remove(0);
+            let completion = complete_calendar_assignment_for_store(
+                store.clone(),
+                CompleteCalendarAssignmentRequest {
+                    enrollment_id: first.id.clone(),
+                    assignment_id: assignment.id.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            let retained = calendar_completion_history_for_store(store.clone(), first.id.clone())
+                .await
+                .unwrap();
+
+            for request in [
+                UndoCalendarCompletionRequest {
+                    enrollment_id: "not-an-id".into(),
+                    assignment_id: assignment.id.clone(),
+                    completion_id: completion.id.clone(),
+                },
+                UndoCalendarCompletionRequest {
+                    enrollment_id: first.id.clone(),
+                    assignment_id: "not-an-id".into(),
+                    completion_id: completion.id.clone(),
+                },
+                UndoCalendarCompletionRequest {
+                    enrollment_id: first.id.clone(),
+                    assignment_id: assignment.id.clone(),
+                    completion_id: "not-an-id".into(),
+                },
+                UndoCalendarCompletionRequest {
+                    enrollment_id: second.id.clone(),
+                    assignment_id: other_assignment.id.clone(),
+                    completion_id: completion.id.clone(),
+                },
+            ] {
+                assert!(undo_calendar_completion_for_store(store.clone(), request)
+                    .await
+                    .is_err());
+                assert_eq!(
+                    calendar_completion_history_for_store(store.clone(), first.id.clone())
+                        .await
+                        .unwrap(),
+                    retained
+                );
+            }
+
+            undo_calendar_completion_for_store(
+                store.clone(),
+                UndoCalendarCompletionRequest {
+                    enrollment_id: first.id.clone(),
+                    assignment_id: assignment.id.clone(),
+                    completion_id: completion.id.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            let undone = calendar_completion_history_for_store(store.clone(), first.id.clone())
+                .await
+                .unwrap();
+            assert!(undone[0].undone);
+            assert!(undo_calendar_completion_for_store(
+                store.clone(),
+                UndoCalendarCompletionRequest {
+                    enrollment_id: first.id.clone(),
+                    assignment_id: assignment.id,
+                    completion_id: completion.id,
+                },
+            )
+            .await
+            .is_err());
+            assert_eq!(
+                calendar_completion_history_for_store(store, first.id)
+                    .await
+                    .unwrap(),
+                undone
             );
         });
     }
@@ -1577,6 +1753,7 @@ pub fn run() {
             get_calendar_plan_enrollment,
             calendar_plan_assignments,
             complete_calendar_assignment,
+            undo_calendar_completion,
             calendar_completion_history,
             active_plan_assignments,
             plan_completion_history,
