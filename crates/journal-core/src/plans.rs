@@ -8,6 +8,33 @@ use uuid::Uuid;
 
 const DEFINITION_SCHEMA_VERSION: u32 = 1;
 const FOUR_STREAM_BUILT_IN_ID: &str = "four-stream";
+/// Maximum UTF-8 input size accepted by the portable plan-definition codec.
+pub const MAX_PLAN_DEFINITION_JSON_BYTES: usize = 1_000_000;
+
+/// Parses one portable plan definition without persisting it.
+///
+/// The input is bounded before JSON parsing and then passes the same domain
+/// validation used before a definition version is stored.
+pub fn parse_plan_definition_json(input: &str) -> Result<PlanDefinition> {
+    ensure!(
+        input.len() <= MAX_PLAN_DEFINITION_JSON_BYTES,
+        "Plan definition JSON exceeds the {MAX_PLAN_DEFINITION_JSON_BYTES}-byte limit"
+    );
+    let definition = serde_json::from_str(input).context("Invalid plan definition JSON")?;
+    validate_definition(&definition)?;
+    Ok(definition)
+}
+
+/// Serializes one validated portable plan definition without persisting it.
+pub fn serialize_plan_definition_json(definition: &PlanDefinition) -> Result<String> {
+    validate_definition(definition)?;
+    let json = serde_json::to_string(definition)?;
+    ensure!(
+        json.len() <= MAX_PLAN_DEFINITION_JSON_BYTES,
+        "Plan definition JSON exceeds the {MAX_PLAN_DEFINITION_JSON_BYTES}-byte limit"
+    );
+    Ok(json)
+}
 
 /// The built-in completion-driven plan: one independently advancing chapter
 /// stream from each canonical category. This is definition data only; callers

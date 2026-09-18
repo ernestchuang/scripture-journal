@@ -1,7 +1,8 @@
 use journal_core::{
-    four_stream_plan_definition, ChapterRef, ChapterStream, CompleteStreamRequest, EntryContent,
-    ExplicitScheduleDay, JournalStore, Passage, PlanDefinition, PlanSchedule, SaveRequest,
-    StreamEnrollment,
+    four_stream_plan_definition, parse_plan_definition_json, serialize_plan_definition_json,
+    ChapterRef, ChapterStream, CompleteStreamRequest, EntryContent, ExplicitScheduleDay,
+    JournalStore, Passage, PlanDefinition, PlanSchedule, SaveRequest, StreamEnrollment,
+    MAX_PLAN_DEFINITION_JSON_BYTES,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -59,6 +60,49 @@ fn stream_definition(name: &str) -> PlanDefinition {
             ],
         },
     }
+}
+
+#[test]
+fn portable_plan_definition_json_codecs_round_trip_and_reject_invalid_input() {
+    let explicit = PlanDefinition {
+        schema_version: 1,
+        name: "Synthetic explicit plan".into(),
+        description: Some("A portable test fixture".into()),
+        schedule: PlanSchedule::ExplicitSchedule {
+            days: vec![ExplicitScheduleDay {
+                day: 1,
+                passages: vec![Passage {
+                    book: 43,
+                    chapter: 3,
+                    start_verse: Some(16),
+                    end_verse: Some(21),
+                }],
+            }],
+        },
+    };
+    for definition in [explicit, stream_definition("Synthetic streams")] {
+        let encoded = serialize_plan_definition_json(&definition).unwrap();
+        assert!(encoded.len() <= MAX_PLAN_DEFINITION_JSON_BYTES);
+        assert_eq!(parse_plan_definition_json(&encoded).unwrap(), definition);
+    }
+
+    for invalid in [
+        "{",
+        "{\"schemaVersion\":1,\"name\":\"x\",\"schedule\":{\"kind\":\"chapterStreams\",\"streams\":[]}} trailing",
+        "{\"schemaVersion\":2,\"name\":\"x\",\"schedule\":{\"kind\":\"chapterStreams\",\"streams\":[]}}",
+        "{\"schemaVersion\":1,\"name\":\"x\",\"unexpected\":true,\"schedule\":{\"kind\":\"chapterStreams\",\"streams\":[]}}",
+        "{\"schemaVersion\":1,\"name\":\"x\",\"schedule\":{\"kind\":\"explicitSchedule\",\"days\":[{\"day\":1,\"passages\":[{\"book\":43,\"chapter\":3,\"startVerse\":999}]}]}}",
+        "{\"schemaVersion\":1,\"name\":\"x\",\"schedule\":{\"kind\":\"explicitSchedule\",\"days\":[{\"day\":2,\"passages\":[{\"book\":43,\"chapter\":3}]}]}}",
+    ] {
+        assert!(parse_plan_definition_json(invalid).is_err(), "{invalid}");
+    }
+    assert!(parse_plan_definition_json(&" ".repeat(MAX_PLAN_DEFINITION_JSON_BYTES + 1)).is_err());
+
+    let invalid_definition = PlanDefinition {
+        schema_version: 2,
+        ..stream_definition("Unsupported")
+    };
+    assert!(serialize_plan_definition_json(&invalid_definition).is_err());
 }
 
 #[test]
