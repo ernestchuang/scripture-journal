@@ -621,15 +621,57 @@ fn stop_loop_stale_completion_and_ordered_undo_preserve_history() {
     );
 }
 
+fn schema_two_retained_fingerprint(path: &std::path::Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    [
+        "SELECT group_concat(id||':'||created_at||':'||updated_at||':'||working_revision_id||':'||COALESCE(published_revision_id,'null'),'|') FROM (SELECT * FROM entries ORDER BY id)",
+        "SELECT group_concat(id||':'||entry_id||':'||COALESCE(parent_id,'null')||':'||COALESCE(restored_from_id,'null')||':'||created_at||':'||content,'|') FROM (SELECT * FROM revisions ORDER BY id)",
+        "SELECT group_concat(sequence||':'||operation_id||':'||entry_id||':'||kind||':'||revision_id,'|') FROM (SELECT * FROM changes ORDER BY sequence)",
+        "SELECT group_concat(id||':'||created_at,'|') FROM (SELECT * FROM plans ORDER BY id)",
+        "SELECT group_concat(id||':'||plan_id||':'||version||':'||created_at||':'||definition,'|') FROM (SELECT * FROM plan_definition_versions ORDER BY plan_id,version)",
+    ]
+    .into_iter()
+    .map(|query| {
+        conn.query_row(query, [], |row| row.get::<_, Option<String>>(0))
+            .unwrap()
+            .unwrap_or_default()
+    })
+    .collect()
+}
+
 #[test]
-fn schema_two_plan_rows_survive_progress_migration() {
+fn populated_schema_two_journal_and_plan_versions_survive_migration_and_reopen() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
     let mut store = JournalStore::open(&path).unwrap();
-    let plan = store
-        .create_plan_definition(stream_definition("Before progress"))
+    let mut target_request = request("Published target", true);
+    let published_target = store.save_entry(target_request.clone()).unwrap();
+    target_request.expected_revision_id = Some(published_target.working_revision_id.clone());
+    target_request.content.body = "Retained unfinished target edit".into();
+    target_request.finish = false;
+    let working_target = store.save_entry(target_request.clone()).unwrap();
+    let mut source_request = request("Linked source", true);
+    source_request.content.links.push(working_target.id.clone());
+    let source = store.save_entry(source_request.clone()).unwrap();
+
+    let first_definition = stream_definition("Schema two version one");
+    let first = store
+        .create_plan_definition(first_definition.clone())
+        .unwrap();
+    let mut second_definition = stream_definition("Schema two version two");
+    let PlanSchedule::ChapterStreams { streams } = &mut second_definition.schedule else {
+        unreachable!()
+    };
+    streams[0].chapters.push(ChapterRef {
+        book: 1,
+        chapter: 3,
+    });
+    let second = store
+        .create_plan_definition_version(&first.plan_id, second_definition.clone())
         .unwrap();
     drop(store);
+
+    let retained_before = schema_two_retained_fingerprint(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     for table in [
         "plan_stream_progress_epochs",
@@ -643,13 +685,80 @@ fn schema_two_plan_rows_survive_progress_migration() {
     }
     conn.pragma_update(None, "user_version", 2).unwrap();
     drop(conn);
+
     let store = JournalStore::open(&path).unwrap();
+    assert_eq!(schema_two_retained_fingerprint(&path), retained_before);
+    let entries = store.list_entries().unwrap();
+    let migrated_target = entries
+        .iter()
+        .find(|entry| entry.id == working_target.id)
+        .unwrap();
+    assert_eq!(
+        migrated_target.working_revision_id,
+        working_target.working_revision_id
+    );
+    assert_eq!(
+        migrated_target.published_revision_id,
+        published_target.published_revision_id
+    );
+    assert_eq!(migrated_target.content, target_request.content);
+    let migrated_source = entries.iter().find(|entry| entry.id == source.id).unwrap();
+    assert_eq!(
+        migrated_source.content.links,
+        vec![working_target.id.clone()]
+    );
+    assert_eq!(store.get_history(&working_target.id).unwrap().len(), 2);
+    assert_eq!(store.get_history(&source.id).unwrap().len(), 1);
+    assert_eq!(
+        store.list_plan_definition_versions(&first.plan_id).unwrap(),
+        vec![first.clone(), second.clone()]
+    );
     assert_eq!(
         store
-            .get_plan_definition_version(&plan.id)
+            .get_plan_definition_version(&first.id)
             .unwrap()
+            .unwrap()
+            .definition,
+        first_definition
+    );
+    assert_eq!(
+        store
+            .get_plan_definition_version(&second.id)
+            .unwrap()
+            .unwrap()
+            .definition,
+        second_definition
+    );
+    drop(store);
+
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(schema_two_retained_fingerprint(&path), retained_before);
+    assert_eq!(reopened.get_history(&working_target.id).unwrap().len(), 2);
+    assert_eq!(
+        reopened
+            .list_plan_definition_versions(&first.plan_id)
             .unwrap(),
-        plan
+        vec![first, second]
+    );
+    drop(reopened);
+
+    let conn = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        6
+    );
+    assert_eq!(
+        conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, u32>(0)
+        })
+        .unwrap(),
+        0
     );
 }
 
