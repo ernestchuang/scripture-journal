@@ -14,6 +14,7 @@ const native = vi.hoisted(() => ({
   activePlanAssignments: vi.fn(),
   registerFourStreamPlan: vi.fn(),
   enrollInChapterStreams: vi.fn(),
+  completePlanStream: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
@@ -38,6 +39,7 @@ vi.mock('./platform/plans', () => ({
     activePlanAssignments: native.activePlanAssignments,
     registerFourStreamPlan: native.registerFourStreamPlan,
     enrollInChapterStreams: native.enrollInChapterStreams,
+    completePlanStream: native.completePlanStream,
   },
 }));
 vi.mock('./scripture/Reader', () => ({ Reader: () => null }));
@@ -77,6 +79,7 @@ beforeEach(() => {
   native.activePlanAssignments.mockReset();
   native.registerFourStreamPlan.mockReset();
   native.enrollInChapterStreams.mockReset();
+  native.completePlanStream.mockReset();
 });
 
 afterEach(() => {
@@ -215,5 +218,28 @@ describe('native application close lifecycle', () => {
     expect(native.saveEntry).toHaveBeenCalledTimes(1);
     expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while enrolling' } });
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this while enrolling');
+  });
+
+  it('preserves and autosaves dirty writing while explicitly completing a stream', async () => {
+    const enrollment = { id: 'enrollment-1', definitionVersionId: 'version-1', createdAt: '2026-09-18T00:00:00Z' };
+    const assignment = { id: 'assignment-1', enrollmentId: enrollment.id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' };
+    native.listPlanEnrollments.mockResolvedValue([enrollment]);
+    native.getPlanDefinitionVersion.mockResolvedValue({ id: 'version-1', planId: 'plan-1', version: 1, createdAt: enrollment.createdAt, definition: { schemaVersion: 1, name: 'Four streams', schedule: { kind: 'chapterStreams', streams: [] } } });
+    native.activePlanAssignments.mockResolvedValueOnce([assignment]).mockResolvedValueOnce([]);
+    native.completePlanStream.mockResolvedValue({ id: 'completion-1', assignmentId: assignment.id, completedAt: '2026-09-18T00:00:01Z' });
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    const complete = await screen.findByRole('button', { name: 'Complete psalms' });
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Keep this while completing' } });
+    fireEvent.click(complete);
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(native.completePlanStream).toHaveBeenCalledWith({ enrollmentId: enrollment.id, streamId: assignment.streamId, expectedAssignmentId: assignment.id, expectedProgressId: assignment.progressId });
+    expect(native.saveEntry).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while completing' } });
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this while completing');
   });
 });

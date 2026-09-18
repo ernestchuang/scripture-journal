@@ -18,12 +18,13 @@ const fourStream = {
   ] } },
 };
 const created: PlanEnrollment = { id: 'enrollment-new', definitionVersionId: fourStream.id, createdAt: '2026-09-18T00:00:02Z' };
-const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'registerFourStreamPlan' | 'enrollInChapterStreams'> => ({
+const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
   activePlanAssignments: vi.fn(async id => id === first.id ? [{ id: 'assignment-1', enrollmentId: id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' }] : []),
   registerFourStreamPlan: vi.fn(async () => fourStream),
   enrollInChapterStreams: vi.fn(async () => created),
+  completePlanStream: vi.fn(async request => ({ id: 'completion-1', assignmentId: request.expectedAssignmentId, completedAt: '2026-09-18T00:00:03Z' })),
 });
 
 describe('retained plan panel', () => {
@@ -385,5 +386,72 @@ describe('retained plan panel', () => {
     expect(await screen.findByText(/enrollment is exhausted/i)).toBeTruthy();
     expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(created.id);
     expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
+  });
+
+  it('completes only the displayed assignment once with exact stale-write preconditions', async () => {
+    let resolveCompletion!: (value: { id: string; assignmentId: string; completedAt: string }) => void;
+    const plans = api();
+    const current = { id: 'assignment-1', enrollmentId: first.id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' };
+    const independent = { id: 'assignment-2', enrollmentId: first.id, streamId: 'old', ordinal: 1, cycle: 1, passage: { book: 1, chapter: 1 }, streamPosition: 0, progressId: 'progress-2' };
+    const advanced = { ...current, id: 'assignment-3', ordinal: 2, passage: { book: 19, chapter: 2 }, streamPosition: 1, progressId: 'progress-3' };
+    vi.mocked(plans.activePlanAssignments).mockResolvedValueOnce([current, independent]).mockResolvedValueOnce([advanced, independent]);
+    vi.mocked(plans.completePlanStream).mockImplementationOnce(() => new Promise(resolve => { resolveCompletion = resolve; }));
+    render(<PlanPanel api={plans} />);
+    const button = await screen.findByRole('button', { name: 'Complete psalms' });
+    fireEvent.click(button); fireEvent.click(button);
+    expect((screen.getByRole('button', { name: 'Completing…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(plans.completePlanStream).toHaveBeenCalledTimes(1);
+    expect(plans.completePlanStream).toHaveBeenCalledWith({ enrollmentId: first.id, streamId: 'psalms', expectedAssignmentId: current.id, expectedProgressId: current.progressId });
+    await act(async () => { resolveCompletion({ id: 'completion-1', assignmentId: current.id, completedAt: '2026-09-18T00:00:03Z' }); });
+    expect(await screen.findByText('Book 19 · Chapter 2')).toBeTruthy();
+    expect(screen.getByText('Book 1 · Chapter 1')).toBeTruthy();
+  });
+
+  it('keeps a rejected completion actionable and does not retry it', async () => {
+    const plans = api();
+    vi.mocked(plans.completePlanStream).mockRejectedValueOnce(new Error('stale assignment'));
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete psalms' }));
+    expect(await screen.findByText(/Could not complete chapter: Error: stale assignment/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete psalms' })).toBeTruthy();
+    expect(plans.completePlanStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes a confirmed stale assignment when its refresh fails', async () => {
+    const plans = api();
+    vi.mocked(plans.activePlanAssignments).mockResolvedValueOnce([{ id: 'assignment-1', enrollmentId: first.id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' }]).mockRejectedValueOnce(new Error('refresh failed'));
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete psalms' }));
+    expect(await screen.findByText(/Chapter was completed, but assignments could not be refreshed: Error: refresh failed/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete psalms' })).toBeNull();
+    expect(plans.completePlanStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show a late completion rejection after selecting another enrollment', async () => {
+    let rejectCompletion!: (reason: unknown) => void;
+    const plans = api();
+    vi.mocked(plans.completePlanStream).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectCompletion = reject; }));
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete psalms' }));
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: second.id } });
+    expect(await screen.findByText('Second plan')).toBeTruthy();
+    await act(async () => { rejectCompletion(new Error('late rejection')); });
+    expect(screen.queryByText(/late rejection/)).toBeNull();
+    expect(screen.getByText('Second plan')).toBeTruthy();
+  });
+
+  it('does not overwrite the new selection when completion confirms after navigation', async () => {
+    let resolveCompletion!: (value: { id: string; assignmentId: string; completedAt: string }) => void;
+    const plans = api();
+    vi.mocked(plans.completePlanStream).mockImplementationOnce(() => new Promise(resolve => { resolveCompletion = resolve; }));
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete psalms' }));
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: second.id } });
+    expect(await screen.findByText('Second plan')).toBeTruthy();
+    await act(async () => { resolveCompletion({ id: 'completion-1', assignmentId: 'assignment-1', completedAt: '2026-09-18T00:00:03Z' }); });
+    expect(screen.getByText('Second plan')).toBeTruthy();
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(second.id);
+    expect(plans.activePlanAssignments).toHaveBeenCalledTimes(2);
+    expect(plans.completePlanStream).toHaveBeenCalledTimes(1);
   });
 });

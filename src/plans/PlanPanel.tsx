@@ -8,7 +8,7 @@ type PlanDetails =
   | { kind: 'error'; message: string }
   | { kind: 'ready'; definition: PlanDefinitionVersion; assignments: PlanAssignment[] };
 
-type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'registerFourStreamPlan' | 'enrollInChapterStreams'>;
+type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'registerFourStreamPlan' | 'enrollInChapterStreams' | 'completePlanStream'>;
 
 export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [enrollments, setEnrollments] = useState<PlanEnrollment[] | null>(null);
@@ -22,14 +22,22 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [offerError, setOfferError] = useState('');
   const [preparing, setPreparing] = useState(false);
   const [enrolling, setEnrolling] = useState(false);
+  const [completingId, setCompletingId] = useState('');
+  const [completionMessage, setCompletionMessage] = useState('');
   const detailEpoch = useRef(0);
   const actionEpoch = useRef(0);
+  const completionEpoch = useRef(0);
   const discoveryEpoch = useRef(0);
   const confirmedEnrollment = useRef<PlanEnrollment | null>(null);
+  const confirmedCompletions = useRef(new Map<string, string>());
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
 
   useEffect(() => () => {
     actionEpoch.current += 1;
+    completionEpoch.current += 1;
     confirmedEnrollment.current = null;
+    confirmedCompletions.current.clear();
   }, [api]);
 
   useEffect(() => {
@@ -54,13 +62,18 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     let active = true;
     const epoch = ++detailEpoch.current;
     setDetails({ kind: 'loading' });
+    setCompletionMessage('');
     Promise.all([
       api.getPlanDefinitionVersion(enrollment.definitionVersionId),
       api.activePlanAssignments(enrollment.id),
     ]).then(([definition, assignments]) => {
       if (!active || epoch !== detailEpoch.current) return;
       if (!definition) { setDetails({ kind: 'error', message: 'The retained plan definition is unavailable.' }); return; }
-      setDetails({ kind: 'ready', definition, assignments });
+      const visible = assignments.filter(assignment => !confirmedCompletions.current.has(assignment.id));
+      for (const [assignmentId, enrollmentId] of confirmedCompletions.current) {
+        if (enrollmentId === enrollment.id && !assignments.some(assignment => assignment.id === assignmentId)) confirmedCompletions.current.delete(assignmentId);
+      }
+      setDetails({ kind: 'ready', definition, assignments: visible });
     }).catch(error => { if (active && epoch === detailEpoch.current) setDetails({ kind: 'error', message: String(error) }); });
     return () => { active = false; };
   }, [api, detailAttempt, enrollments, selectedId]);
@@ -115,6 +128,42 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     }
   }
 
+  async function complete(assignment: PlanAssignment, definition: PlanDefinitionVersion) {
+    if (!api || completingId) return;
+    const epoch = ++completionEpoch.current;
+    setCompletingId(assignment.id); setCompletionMessage('');
+    try {
+      await api.completePlanStream({
+        enrollmentId: assignment.enrollmentId,
+        streamId: assignment.streamId,
+        expectedAssignmentId: assignment.id,
+        expectedProgressId: assignment.progressId,
+      });
+      if (epoch !== completionEpoch.current) return;
+      confirmedCompletions.current.set(assignment.id, assignment.enrollmentId);
+      if (selectedIdRef.current !== assignment.enrollmentId) return;
+      const refreshEpoch = ++detailEpoch.current;
+      setDetails(current => current?.kind === 'ready'
+        ? { ...current, assignments: current.assignments.filter(item => item.id !== assignment.id) }
+        : current);
+      try {
+        const assignments = await api.activePlanAssignments(assignment.enrollmentId);
+        if (epoch !== completionEpoch.current || refreshEpoch !== detailEpoch.current || selectedIdRef.current !== assignment.enrollmentId) return;
+        const visible = assignments.filter(item => !confirmedCompletions.current.has(item.id));
+        if (!assignments.some(item => item.id === assignment.id)) confirmedCompletions.current.delete(assignment.id);
+        setDetails({ kind: 'ready', definition, assignments: visible });
+      } catch (error) {
+        if (epoch === completionEpoch.current && refreshEpoch === detailEpoch.current && selectedIdRef.current === assignment.enrollmentId) {
+          setCompletionMessage(`Chapter was completed, but assignments could not be refreshed: ${String(error)}`);
+        }
+      }
+    } catch (error) {
+      if (epoch === completionEpoch.current && selectedIdRef.current === assignment.enrollmentId) setCompletionMessage(`Could not complete chapter: ${String(error)}`);
+    } finally {
+      if (epoch === completionEpoch.current) setCompletingId('');
+    }
+  }
+
   if (!api) return <aside className="plan-panel" aria-label="Reading plans"><h2>Reading plans</h2><p>Plans are available in the native desktop app.</p></aside>;
   return <aside className="plan-panel" aria-label="Reading plans">
     <header><div><span>READING PLANS</span><h2>Retained plans</h2></div></header>
@@ -145,7 +194,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       {details?.kind === 'error' && <div role="alert" className="plan-error">Could not load this retained plan: {details.message}<button onClick={() => setDetailAttempt(value => value + 1)}>Retry selection</button></div>}
       {details?.kind === 'ready' && <section className="plan-details" aria-label="Current plan assignments">
         <h3>{details.definition.definition.name}</h3>
-        {details.assignments.length === 0 ? <p>This enrollment is exhausted; it has no active assignments.</p> : <ul>{details.assignments.map(assignment => <li key={assignment.id}><strong>{assignment.streamId}</strong><span>Book {assignment.passage.book} · Chapter {assignment.passage.chapter}</span></li>)}</ul>}
+        {details.assignments.length === 0 ? <p>This enrollment is exhausted; it has no active assignments.</p> : <ul>{details.assignments.map(assignment => <li key={assignment.id}><strong>{assignment.streamId}</strong><span>Book {assignment.passage.book} · Chapter {assignment.passage.chapter}</span><button disabled={!!completingId} onClick={() => void complete(assignment, details.definition)}>{completingId === assignment.id ? 'Completing…' : `Complete ${assignment.streamId}`}</button></li>)}</ul>}
+        {completionMessage && <div role="alert" className="plan-error">{completionMessage}</div>}
       </section>}
     </>}
   </aside>;
