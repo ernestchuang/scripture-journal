@@ -13,14 +13,11 @@ use std::{
 
 pub(super) struct ExportDirectory(File);
 
-// Used by the next exporter migration step; keep staging independently reviewable.
-#[allow(dead_code)]
 pub(super) struct StagedFile<'a> {
     directory: &'a ExportDirectory,
     name: CString,
 }
 
-#[allow(dead_code)]
 impl StagedFile<'_> {
     pub(super) fn install_noclobber(self, target: &str) -> Result<()> {
         let target = managed_name(target)?;
@@ -145,7 +142,6 @@ impl ExportDirectory {
         Ok(Some(bytes))
     }
 
-    #[allow(dead_code)] // Wired into manifest writes in the next bounded migration.
     pub(super) fn stage(&self, bytes: &[u8]) -> Result<StagedFile<'_>> {
         let name = CString::new(format!(".scripture-journal-stage-{}", uuid::Uuid::new_v4()))?;
         // SAFETY: self owns the directory; name is a generated single C-string leaf.
@@ -169,6 +165,47 @@ impl ExportDirectory {
         file.write_all(bytes)?;
         file.sync_all()?;
         Ok(staged)
+    }
+
+    pub(super) fn rename(&self, source: &str, target: &str) -> Result<()> {
+        let source = managed_name(source)?;
+        let target = managed_name(target)?;
+        // SAFETY: both single-leaf names are relative to this live directory.
+        let result = unsafe {
+            libc::renameat(
+                self.0.as_raw_fd(),
+                source.as_ptr(),
+                self.0.as_raw_fd(),
+                target.as_ptr(),
+            )
+        };
+        if result < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        self.sync()
+    }
+
+    pub(super) fn link_noclobber(&self, source: &str, target: &str) -> Result<()> {
+        let source = managed_name(source)?;
+        let target = managed_name(target)?;
+        // SAFETY: both single-leaf names are relative to this live directory.
+        let result = unsafe {
+            libc::linkat(
+                self.0.as_raw_fd(),
+                source.as_ptr(),
+                self.0.as_raw_fd(),
+                target.as_ptr(),
+                0,
+            )
+        };
+        if result < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        self.sync()
+    }
+
+    pub(super) fn sync(&self) -> Result<()> {
+        Ok(self.0.sync_all()?)
     }
 
     pub(super) fn open_lock(&self) -> Result<File> {

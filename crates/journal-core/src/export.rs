@@ -9,6 +9,11 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
+#[cfg(unix)]
+use super::export_directory::{ExportDirectory as ManifestDirectory, StagedFile};
+#[cfg(not(unix))]
+type ManifestDirectory = Path;
+
 const MANIFEST: &str = ".scripture-journal-export.json";
 const MANIFEST_RECOVERY: &str = ".scripture-journal-manifest-recovery-";
 
@@ -84,8 +89,12 @@ impl JournalStore {
             }
         };
         ensure!(manifest.version == 1 && manifest.journal_id == self.identity("journal_id")? && manifest.installation_id == self.identity("installation_id")?, "Export belongs to another journal/device or unsupported format; choose a new destination");
+        #[cfg(unix)]
+        let manifest_directory = &directory_handle;
+        #[cfg(not(unix))]
+        let manifest_directory = directory;
         let mut manifest_bytes = initial;
-        write_manifest(directory, &manifest, &mut manifest_bytes)?;
+        write_manifest(manifest_directory, &manifest, &mut manifest_bytes)?;
         // One SELECT pins the published snapshot set, including link eligibility.
         let mut stmt = self.conn.prepare("SELECT r.id,r.entry_id,r.parent_id,r.restored_from_id,r.created_at,r.content FROM entries e JOIN revisions r ON e.published_revision_id=r.id ORDER BY e.id")?;
         let revisions = stmt
@@ -100,6 +109,7 @@ impl JournalStore {
         for revision in &revisions {
             let result = export_one(
                 directory,
+                manifest_directory,
                 revision,
                 &revisions,
                 &mut manifest,
@@ -119,6 +129,7 @@ impl JournalStore {
 
 fn export_one(
     directory: &Path,
+    manifest_directory: &ManifestDirectory,
     revision: &Revision,
     published: &[Revision],
     manifest: &mut Manifest,
@@ -146,7 +157,7 @@ fn export_one(
                 receipt.hash = Some(expected);
                 receipt.pending_hash = None;
                 receipt.revision_id = Some(revision.id.clone());
-                write_manifest(directory, manifest, manifest_bytes)?;
+                write_manifest(manifest_directory, manifest, manifest_bytes)?;
                 return Ok(false);
             }
         }
@@ -157,7 +168,7 @@ fn export_one(
         .entry(revision.entry_id.clone())
         .or_default()
         .pending_hash = Some(expected.clone());
-    write_manifest(directory, manifest, manifest_bytes)?;
+    write_manifest(manifest_directory, manifest, manifest_bytes)?;
     let mut temp = NamedTempFile::new_in(directory)?;
     temp.write_all(output.as_bytes())?;
     temp.as_file().sync_all()?;
@@ -192,7 +203,7 @@ fn export_one(
     receipt.hash = Some(expected);
     receipt.pending_hash = None;
     receipt.revision_id = Some(revision.id.clone());
-    write_manifest(directory, manifest, manifest_bytes)?;
+    write_manifest(manifest_directory, manifest, manifest_bytes)?;
     Ok(true)
 }
 
@@ -276,6 +287,62 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
+#[cfg(unix)]
+fn write_manifest(
+    directory: &ManifestDirectory,
+    manifest: &Manifest,
+    previous: &mut Option<Vec<u8>>,
+) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(manifest)?;
+    if previous.as_ref() == Some(&bytes) {
+        return Ok(());
+    }
+    ensure!(
+        directory.read_optional(MANIFEST)? == *previous,
+        "Export manifest changed externally"
+    );
+    let temp = directory.stage(&bytes)?;
+    ensure!(
+        directory.read_optional(MANIFEST)? == *previous,
+        "Export manifest changed externally"
+    );
+    install_manifest(temp, directory, previous.as_deref())?;
+    *previous = Some(bytes);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn install_manifest(
+    temp: StagedFile<'_>,
+    directory: &ManifestDirectory,
+    previous: Option<&[u8]>,
+) -> Result<()> {
+    let mut recovery = None;
+    if let Some(expected) = previous {
+        let saved = format!("{MANIFEST_RECOVERY}{}.json", Uuid::new_v4());
+        directory.rename(MANIFEST, &saved)?;
+        let displaced = directory.read_optional(&saved);
+        if !matches!(&displaced, Ok(Some(bytes)) if bytes.as_slice() == expected) {
+            let _ = directory.link_noclobber(&saved, MANIFEST);
+            directory.sync()?;
+            bail!(
+                "Export manifest changed during replacement; displaced file preserved as {saved}"
+            );
+        }
+        recovery = Some(saved);
+    }
+    if let Err(error) = temp.install_noclobber(MANIFEST) {
+        if let Some(saved) = &recovery {
+            let _ = directory.link_noclobber(saved, MANIFEST);
+        }
+        directory.sync()?;
+        return Err(error)
+            .context("Export manifest appeared during replacement; recovery files preserved");
+    }
+    directory.sync()
+}
+
+#[cfg(not(unix))]
 fn write_manifest(
     directory: &Path,
     manifest: &Manifest,
@@ -304,6 +371,7 @@ fn write_manifest(
 
 // The caller has just checked the path, but an external writer can still race it.
 // Move (rather than copy) the displaced inode so even a late edit is retained.
+#[cfg(not(unix))]
 fn install_manifest(temp: NamedTempFile, directory: &Path, previous: Option<&[u8]>) -> Result<()> {
     let path = directory.join(MANIFEST);
     let mut recovery = None;
@@ -339,6 +407,7 @@ fn install_manifest(temp: NamedTempFile, directory: &Path, previous: Option<&[u8
 mod manifest_tests {
     use super::*;
 
+    #[cfg(not(unix))]
     fn staged(directory: &Path) -> NamedTempFile {
         let mut temp = NamedTempFile::new_in(directory).unwrap();
         temp.write_all(b"new manifest").unwrap();
@@ -351,10 +420,19 @@ mod manifest_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(MANIFEST);
         fs::write(&path, b"checked manifest").unwrap();
-        let temp = staged(dir.path());
+        #[cfg(unix)]
+        let handle = ManifestDirectory::open(&dir.path().canonicalize().unwrap()).unwrap();
+        #[cfg(unix)]
+        let directory = &handle;
+        #[cfg(not(unix))]
+        let directory = dir.path();
+        #[cfg(unix)]
+        let temp = directory.stage(b"new manifest").unwrap();
+        #[cfg(not(unix))]
+        let temp = staged(directory);
         // Inject an external replacement after the caller's final precheck.
         fs::write(&path, b"external edit").unwrap();
-        let error = install_manifest(temp, dir.path(), Some(b"checked manifest")).unwrap_err();
+        let error = install_manifest(temp, directory, Some(b"checked manifest")).unwrap_err();
         assert!(error.to_string().contains("changed during replacement"));
         assert_eq!(fs::read(&path).unwrap(), b"external edit");
         let saved = fs::read_dir(dir.path())
@@ -373,11 +451,75 @@ mod manifest_tests {
     #[test]
     fn first_manifest_creation_does_not_clobber_a_late_collision() {
         let dir = tempfile::tempdir().unwrap();
-        let temp = staged(dir.path());
+        #[cfg(unix)]
+        let handle = ManifestDirectory::open(&dir.path().canonicalize().unwrap()).unwrap();
+        #[cfg(unix)]
+        let directory = &handle;
+        #[cfg(not(unix))]
+        let directory = dir.path();
+        #[cfg(unix)]
+        let temp = directory.stage(b"new manifest").unwrap();
+        #[cfg(not(unix))]
+        let temp = staged(directory);
         let path = dir.path().join(MANIFEST);
         fs::write(&path, b"external manifest").unwrap();
-        assert!(install_manifest(temp, dir.path(), None).is_err());
+        assert!(install_manifest(temp, directory, None).is_err());
         assert_eq!(fs::read(path).unwrap(), b"external manifest");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_writes_and_recovery_stay_pinned_after_directory_replacement() {
+        for existing in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let base = root.path().canonicalize().unwrap();
+            let selected = base.join("selected");
+            let moved = base.join("moved");
+            let outside = base.join("outside");
+            let handle = ManifestDirectory::open(&selected).unwrap();
+            let mut manifest = Manifest {
+                version: 1,
+                journal_id: "test journal".into(),
+                installation_id: "test installation".into(),
+                receipts: BTreeMap::new(),
+            };
+            let mut previous = None;
+            if existing {
+                write_manifest(&handle, &manifest, &mut previous).unwrap();
+            }
+            let old_bytes = previous.clone();
+            fs::create_dir(&outside).unwrap();
+            fs::write(outside.join(MANIFEST), b"outside manifest").unwrap();
+            fs::rename(&selected, &moved).unwrap();
+            std::os::unix::fs::symlink(&outside, &selected).unwrap();
+            manifest.receipts.insert("entry".into(), Receipt::default());
+            write_manifest(&handle, &manifest, &mut previous).unwrap();
+            assert_eq!(fs::read(moved.join(MANIFEST)).unwrap(), previous.unwrap());
+            assert_eq!(
+                fs::read(outside.join(MANIFEST)).unwrap(),
+                b"outside manifest"
+            );
+            assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+            let retained: Vec<_> = fs::read_dir(&moved)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(MANIFEST_RECOVERY)
+                })
+                .collect();
+            assert_eq!(retained.len(), usize::from(existing));
+            if let Some(old_bytes) = old_bytes {
+                assert_eq!(fs::read(&retained[0]).unwrap(), old_bytes);
+            }
+            // Only the installed manifest and, for replacement, its recovery remain.
+            assert_eq!(
+                fs::read_dir(&moved).unwrap().count(),
+                1 + usize::from(existing)
+            );
+        }
     }
 
     #[test]
