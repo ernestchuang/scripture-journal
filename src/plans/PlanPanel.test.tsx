@@ -78,6 +78,65 @@ function clickRetainedExportOnCommit() {
 }
 
 describe('retained plan panel', () => {
+  it('adopts a later stream version with the exact displayed assignment boundary', async () => {
+    const later = { ...definition('version-later', 'Later plan'), version: 2 };
+    const plans = {
+      ...api(),
+      listPlanEnrollments: vi.fn(async () => [first]),
+      listLatestPlanDefinitionVersions: vi.fn(async () => [later]),
+      planAdoptionHistory: vi.fn(async () => []),
+      adoptChapterStreamPlan: vi.fn(async request => ({ id: 'adoption-1', enrollmentId: request.enrollmentId, previousDefinitionVersionId: request.expectedDefinitionVersionId, targetDefinitionVersionId: request.targetDefinitionVersionId, scheduleKind: 'chapter-streams' as const, createdAt: '2026-09-18T00:00:09Z' })),
+    };
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Adopt version 2 for future assignments' }));
+    await waitFor(() => expect(plans.adoptChapterStreamPlan).toHaveBeenCalledWith({ enrollmentId: first.id, expectedDefinitionVersionId: first.definitionVersionId, targetDefinitionVersionId: later.id, streams: [{ streamId: 'psalms', assignmentId: 'assignment-1', progressId: 'progress-1' }] }));
+    expect(await screen.findByText(/Adopted definition version version-later/)).toBeTruthy();
+  });
+
+  it('retains a confirmed adoption that settles after switching away and back', async () => {
+    const pending = deferred<{ id: string; enrollmentId: string; previousDefinitionVersionId: string; targetDefinitionVersionId: string; scheduleKind: 'chapter-streams'; createdAt: string }>();
+    const later = { ...definition('version-later', 'Later plan'), version: 2 };
+    const plans = {
+      ...api(),
+      listLatestPlanDefinitionVersions: vi.fn(async () => [later]),
+      planAdoptionHistory: vi.fn(async () => []),
+      adoptChapterStreamPlan: vi.fn(() => pending.promise),
+    };
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Adopt version 2 for future assignments' }));
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: second.id } });
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: first.id } });
+    await act(async () => pending.resolve({ id: 'late-adoption', enrollmentId: first.id, previousDefinitionVersionId: first.definitionVersionId, targetDefinitionVersionId: later.id, scheduleKind: 'chapter-streams', createdAt: '2026-09-18T00:00:10Z' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Adopt version 2 for future assignments' })).toBeNull());
+    expect(plans.adoptChapterStreamPlan).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes calendar assignments after a confirmed adoption settles across away and back', async () => {
+    const pending = deferred<{ id: string; enrollmentId: string; previousDefinitionVersionId: string; targetDefinitionVersionId: string; scheduleKind: 'explicit-schedule'; createdAt: string }>();
+    const a = { ...calendarEnrollment, id: 'calendar-a', definitionVersionId: 'calendar-original' };
+    const b = { ...calendarEnrollment, id: 'calendar-b', definitionVersionId: 'calendar-original', startDate: '2026-04-01' };
+    const oldA = { id: 'old-a', enrollmentId: a.id, definitionVersionId: a.definitionVersionId, definitionDay: 60, localDate: '2026-03-01', passages: [{ book: 43, chapter: 3 }] };
+    const newA = { ...oldA, id: 'new-a', definitionVersionId: retainedCalendar.id, passages: [{ book: 43, chapter: 8 }] };
+    let aReads = 0;
+    const plans = {
+      ...api(),
+      listPlanEnrollments: vi.fn(async () => [a, b]),
+      listLatestPlanDefinitionVersions: vi.fn(async () => [retainedCalendar]),
+      getCalendarPlanEnrollment: vi.fn(async id => id === a.id ? a : b),
+      calendarPlanAssignments: vi.fn(async id => id === a.id ? (++aReads === 1 ? [oldA] : [newA]) : []),
+      planAdoptionHistory: vi.fn(async () => []),
+      adoptCalendarPlan: vi.fn(() => pending.promise),
+    };
+    render(<PlanPanel api={plans} />);
+    fireEvent.change(await screen.findByLabelText('Calendar adoption cutover'), { target: { value: oldA.localDate } });
+    fireEvent.click(screen.getByRole('button', { name: 'Adopt selected version from this date' }));
+    fireEvent.change(screen.getByLabelText('Retained calendar enrollment'), { target: { value: b.id } });
+    fireEvent.change(screen.getByLabelText('Retained calendar enrollment'), { target: { value: a.id } });
+    await act(async () => pending.resolve({ id: 'calendar-adoption', enrollmentId: a.id, previousDefinitionVersionId: a.definitionVersionId, targetDefinitionVersionId: retainedCalendar.id, scheduleKind: 'explicit-schedule', createdAt: '2026-09-18T00:00:11Z' }));
+    expect(await screen.findByText('John 8')).toBeTruthy();
+    expect(plans.adoptCalendarPlan).toHaveBeenCalledTimes(1);
+  });
+
   it('makes selection invalidation precede export ownership without a delayed reset', () => {
     const delayedReset = { epoch: 0, selectedDefinitionId: retainedDefinition.id };
     const prematurelyStartedEpoch = startRetainedExport(delayedReset);

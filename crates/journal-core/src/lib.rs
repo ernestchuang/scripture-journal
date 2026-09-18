@@ -16,11 +16,12 @@ mod verse_counts;
 pub use export::ExportReport;
 pub use plans::{
     expand_calendar_assignments, four_stream_plan_definition, mcheyne_plan_definition,
-    parse_plan_definition_json, serialize_plan_definition_json, CalendarAssignment,
-    CalendarAssignmentCompletion, CalendarPlanEnrollment, CalendarScheduleMode, ChapterRef,
-    ChapterStream, CompleteStreamRequest, DatedPlanAssignment, ExplicitScheduleDay, PlanAssignment,
-    PlanCompletion, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion,
-    PlanEnrollment, PlanSchedule, StreamEnrollment, MAX_PLAN_DEFINITION_JSON_BYTES,
+    parse_plan_definition_json, serialize_plan_definition_json, AdoptCalendarPlanRequest,
+    AdoptStreamPlanRequest, CalendarAssignment, CalendarAssignmentCompletion,
+    CalendarPlanEnrollment, CalendarScheduleMode, ChapterRef, ChapterStream, CompleteStreamRequest,
+    DatedPlanAssignment, ExplicitScheduleDay, PlanAdoptionEvent, PlanAssignment, PlanCompletion,
+    PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, PlanSchedule,
+    StreamAdoptionBoundary, StreamEnrollment, MAX_PLAN_DEFINITION_JSON_BYTES,
 };
 
 /// A passage in canonical Protestant 66-book order using KJV versification.
@@ -209,7 +210,14 @@ impl JournalStore {
             tx.commit()?;
         }
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version == 12 || version == 13 {
+        if version == 12 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(plans::PLAN_ADOPTION_SCHEMA)?;
+            tx.pragma_update(None, "user_version", 13)?;
+            tx.commit()?;
+        }
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version == 13 {
             deletion::migrate(&mut conn)?;
         }
         let store = Self { conn };
@@ -537,6 +545,36 @@ impl JournalStore {
     pub fn undo_plan_completion(&mut self, completion_id: &str) -> Result<()> {
         validate_id(completion_id)?;
         plans::undo_completion(&mut self.conn, completion_id)
+    }
+
+    pub fn adopt_chapter_stream_plan(
+        &mut self,
+        request: AdoptStreamPlanRequest,
+    ) -> Result<PlanAdoptionEvent> {
+        validate_id(&request.enrollment_id)?;
+        validate_id(&request.expected_definition_version_id)?;
+        validate_id(&request.target_definition_version_id)?;
+        for boundary in &request.streams {
+            validate_id(&boundary.assignment_id)?;
+            validate_id(&boundary.progress_id)?;
+        }
+        plans::adopt_stream_plan(&mut self.conn, request)
+    }
+
+    pub fn adopt_calendar_plan(
+        &mut self,
+        request: AdoptCalendarPlanRequest,
+    ) -> Result<PlanAdoptionEvent> {
+        validate_id(&request.enrollment_id)?;
+        validate_id(&request.expected_definition_version_id)?;
+        validate_id(&request.target_definition_version_id)?;
+        validate_id(&request.expected_assignment_id)?;
+        plans::adopt_calendar_plan(&mut self.conn, request)
+    }
+
+    pub fn plan_adoption_history(&self, enrollment_id: &str) -> Result<Vec<PlanAdoptionEvent>> {
+        validate_id(enrollment_id)?;
+        plans::adoption_history(&self.conn, enrollment_id)
     }
 
     fn identity(&self, key: &str) -> Result<String> {

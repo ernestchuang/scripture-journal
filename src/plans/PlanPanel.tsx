@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CalendarAssignmentCompletion, CalendarEnrollmentRequest, CalendarPlanEnrollment, CalendarScheduleMode, DatedPlanAssignment, PlanAssignment, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, StreamEnrollment } from '../platform/plans';
+import type { CalendarAssignmentCompletion, CalendarEnrollmentRequest, CalendarPlanEnrollment, CalendarScheduleMode, DatedPlanAssignment, PlanAdoptionEvent, PlanAssignment, PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, StreamEnrollment } from '../platform/plans';
 import type { PlanDefinitionApi } from '../platform/plans';
 import { formatPassage } from '../scripture/books';
 import './plans.css';
@@ -58,7 +58,7 @@ function defaultCalendarScheduleMode(definition: PlanDefinitionVersion): Calenda
 }
 type ChapterStreams = Extract<PlanDefinition['schedule'], { kind: 'chapterStreams' }>['streams'];
 
-type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'enrollInCalendar' | 'getCalendarPlanEnrollment' | 'calendarPlanAssignments' | 'completeCalendarAssignment' | 'undoCalendarCompletion' | 'calendarCompletionHistory' | 'completePlanStream' | 'undoPlanCompletion'>;
+type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'enrollInCalendar' | 'getCalendarPlanEnrollment' | 'calendarPlanAssignments' | 'completeCalendarAssignment' | 'undoCalendarCompletion' | 'calendarCompletionHistory' | 'completePlanStream' | 'undoPlanCompletion'> & Partial<Pick<PlanDefinitionApi, 'adoptChapterStreamPlan' | 'adoptCalendarPlan' | 'planAdoptionHistory'>>;
 
 function localToday() {
   const now = new Date();
@@ -179,6 +179,10 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [versionEditing, setVersionEditing] = useState(false);
   const [versionEditError, setVersionEditError] = useState('');
   const [versionEditResult, setVersionEditResult] = useState<PlanDefinitionVersion | null>(null);
+  const [adoptionHistory, setAdoptionHistory] = useState<Record<string, PlanAdoptionEvent[]>>({});
+  const [adoptingEnrollmentId, setAdoptingEnrollmentId] = useState('');
+  const [adoptionMessage, setAdoptionMessage] = useState('');
+  const [calendarCutoverDate, setCalendarCutoverDate] = useState('');
   const detailEpoch = useRef(0);
   const historyEpoch = useRef(0);
   const actionEpoch = useRef(0);
@@ -198,6 +202,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const calendarUndoEpoch = useRef(0);
   const calendarPendingEpoch = useRef(0);
   const versionEditEpoch = useRef(0);
+  const adoptionEpoch = useRef(0);
   const retainedChoiceDefinitionId = useRef('');
   const discoveryEpoch = useRef(0);
   const definitionDiscoveryEpoch = useRef(0);
@@ -218,6 +223,15 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     ? enrollments.filter(enrollment => !calendarEnrollments.items.some(calendar => calendar.id === enrollment.id))
     : null, [calendarEnrollments, enrollments]);
 
+  useEffect(() => {
+    if (!api?.planAdoptionHistory || !enrollments) return;
+    let active = true;
+    Promise.all(enrollments.map(async enrollment => [enrollment.id, await api.planAdoptionHistory!(enrollment.id)] as const))
+      .then(rows => { if (active) setAdoptionHistory(Object.fromEntries(rows)); })
+      .catch(error => { if (active) setAdoptionMessage(`Could not load adoption history: ${String(error)}`); });
+    return () => { active = false; };
+  }, [api, enrollments, detailAttempt, calendarAssignmentAttempt]);
+
   useEffect(() => () => {
     if (currentApi.current === api) currentApi.current = undefined;
     actionEpoch.current += 1;
@@ -237,6 +251,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     calendarUndoEpoch.current += 1;
     calendarPendingEpoch.current = 0;
     versionEditEpoch.current += 1;
+    adoptionEpoch.current += 1;
     retainedChoiceDefinitionId.current = '';
     definitionDiscoveryEpoch.current += 1;
     confirmedEnrollment.current = null;
@@ -890,7 +905,11 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       -1,
       {},
     )
-    : [];
+      : [];
+  const activeStreamEnrollment = streamEnrollments?.find(item => item.id === selectedId);
+  const streamAdoptionTarget = activeStreamEnrollment && details?.kind === 'ready'
+    ? retainedDefinitions?.find(item => item.planId === details.definition.planId && item.id !== effectiveVersionId(activeStreamEnrollment) && item.version > details.definition.version && item.definition.schedule.kind === 'chapterStreams')
+    : undefined;
   function updateRetainedEnrollmentChoice(index: number, update: Partial<Pick<StreamEnrollment, 'startingPosition' | 'loopAfterEnd'>>) {
     if (!selectedDefinition || selectedDefinition.definition.schedule.kind !== 'chapterStreams') return;
     const streams = selectedDefinition.definition.schedule.streams;
@@ -902,6 +921,47 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       index,
       update,
     ));
+  }
+
+  function effectiveVersionId(enrollment: PlanEnrollment) {
+    const events = adoptionHistory[enrollment.id] ?? [];
+    return events.at(-1)?.targetDefinitionVersionId ?? enrollment.definitionVersionId;
+  }
+
+  async function adoptSelectedStreamEnrollment(enrollment: PlanEnrollment, current: ReadyPlanDetails, target: PlanDefinitionVersion) {
+    if (!api?.adoptChapterStreamPlan || adoptingEnrollmentId) return;
+    const epoch = ++adoptionEpoch.current;
+    setAdoptingEnrollmentId(enrollment.id); setAdoptionMessage('');
+    try {
+      const event = await api.adoptChapterStreamPlan({
+        enrollmentId: enrollment.id,
+        expectedDefinitionVersionId: effectiveVersionId(enrollment),
+        targetDefinitionVersionId: target.id,
+        streams: current.assignments.map(item => ({ streamId: item.streamId, assignmentId: item.id, progressId: item.progressId })),
+      });
+      setAdoptionHistory(value => ({ ...value, [enrollment.id]: [...(value[enrollment.id] ?? []), event] }));
+      if (epoch !== adoptionEpoch.current || selectedIdRef.current !== enrollment.id) return;
+      setAdoptionMessage(`Adopted definition version ${event.targetDefinitionVersionId} for future stream assignments.`);
+      setDetailAttempt(value => value + 1);
+    } catch (error) { if (epoch === adoptionEpoch.current && selectedIdRef.current === enrollment.id) setAdoptionMessage(`Could not adopt plan version: ${String(error)}`); }
+    finally { if (epoch === adoptionEpoch.current) setAdoptingEnrollmentId(''); }
+  }
+
+  async function adoptSelectedCalendarEnrollment() {
+    if (!api?.adoptCalendarPlan || adoptingEnrollmentId || !selectedDefinition || selectedDefinition.definition.schedule.kind !== 'explicitSchedule') return;
+    const enrollment = calendarEnrollments?.kind === 'ready' ? calendarEnrollments.items.find(item => item.id === selectedCalendarEnrollmentId) : undefined;
+    const assignment = calendarAssignments?.kind === 'ready' ? calendarAssignments.items.find(item => item.localDate === calendarCutoverDate) : undefined;
+    if (!enrollment || !assignment) { setAdoptionMessage('Choose an active dated assignment as the adoption cutover.'); return; }
+    const epoch = ++adoptionEpoch.current;
+    setAdoptingEnrollmentId(enrollment.id); setAdoptionMessage('');
+    try {
+      const event = await api.adoptCalendarPlan({ enrollmentId: enrollment.id, expectedDefinitionVersionId: effectiveVersionId(enrollment), targetDefinitionVersionId: selectedDefinition.id, effectiveFromLocalDate: assignment.localDate, expectedAssignmentId: assignment.id });
+      setAdoptionHistory(value => ({ ...value, [enrollment.id]: [...(value[enrollment.id] ?? []), event] }));
+      if (currentApi.current === api) setCalendarAssignmentAttempt(value => value + 1);
+      if (epoch !== adoptionEpoch.current || selectedCalendarEnrollmentIdRef.current !== enrollment.id) return;
+      setAdoptionMessage(`Adopted definition version ${event.targetDefinitionVersionId} from ${assignment.localDate}.`);
+    } catch (error) { if (epoch === adoptionEpoch.current && selectedCalendarEnrollmentIdRef.current === enrollment.id) setAdoptionMessage(`Could not adopt calendar version: ${String(error)}`); }
+    finally { if (epoch === adoptionEpoch.current) setAdoptingEnrollmentId(''); }
   }
   return <aside className="plan-panel" aria-label="Reading plans">
     <header><div><span>READING PLANS</span><h2>Retained plans</h2></div></header>
@@ -966,15 +1026,17 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     {enrollments?.length === 0 && <p>No retained plan enrollments yet.</p>}
     {calendarEnrollments?.kind === 'loading' && <p role="status">Loading retained calendar enrollments…</p>}
     {calendarEnrollments?.kind === 'error' && <div role="alert" className="plan-error">Could not load retained calendar enrollments: {calendarEnrollments.message}<button onClick={() => setCalendarEnrollmentAttempt(value => value + 1)}>Retry calendar enrollments</button></div>}
-    {calendarEnrollments?.kind === 'ready' && calendarEnrollments.items.length > 0 && <CalendarAssignments items={calendarEnrollments.items} selectedId={selectedCalendarEnrollmentId} assignments={calendarAssignments} history={calendarHistory} completingId={completingCalendarId} completionError={calendarCompletionError} undoingId={undoingCalendarId} undoError={calendarUndoError} onSelect={id => { calendarCompletionEpoch.current += 1; calendarUndoEpoch.current += 1; setCompletingCalendarId(''); setCalendarCompletionError(''); setUndoingCalendarId(''); setCalendarUndoError(''); setSelectedCalendarEnrollmentId(id); }} onRetry={() => setCalendarAssignmentAttempt(value => value + 1)} onRetryHistory={() => setCalendarHistoryAttempt(value => value + 1)} onComplete={assignment => void completeCalendar(assignment)} onUndo={completion => void undoCalendar(completion)} />}
+    {calendarEnrollments?.kind === 'ready' && calendarEnrollments.items.length > 0 && <CalendarAssignments items={calendarEnrollments.items} selectedId={selectedCalendarEnrollmentId} assignments={calendarAssignments} history={calendarHistory} completingId={completingCalendarId} completionError={calendarCompletionError} undoingId={undoingCalendarId} undoError={calendarUndoError} onSelect={id => { calendarCompletionEpoch.current += 1; calendarUndoEpoch.current += 1; adoptionEpoch.current += 1; setAdoptingEnrollmentId(''); setAdoptionMessage(''); setCompletingCalendarId(''); setCalendarCompletionError(''); setUndoingCalendarId(''); setCalendarUndoError(''); setSelectedCalendarEnrollmentId(id); }} onRetry={() => setCalendarAssignmentAttempt(value => value + 1)} onRetryHistory={() => setCalendarHistoryAttempt(value => value + 1)} onComplete={assignment => void completeCalendar(assignment)} onUndo={completion => void undoCalendar(completion)} />}
+    {api?.adoptCalendarPlan && selectedCalendarEnrollmentId && selectedDefinition?.definition.schedule.kind === 'explicitSchedule' && calendarAssignments?.kind === 'ready' && <section className="plan-enrollment" aria-label="Adopt calendar plan version"><h3>Adopt selected version for future dates</h3><p>Choose the first date to replace. Completed or previously completed dates cannot be replaced; earlier assignments and all history stay retained.</p><label>Calendar adoption cutover<select value={calendarCutoverDate} onChange={event => setCalendarCutoverDate(event.target.value)}><option value="">Choose a date</option>{calendarAssignments.items.map(item => <option key={item.id} value={item.localDate}>{item.localDate} · day {item.definitionDay}</option>)}</select></label><button disabled={!calendarCutoverDate || !!adoptingEnrollmentId} onClick={() => void adoptSelectedCalendarEnrollment()}>{adoptingEnrollmentId === selectedCalendarEnrollmentId ? 'Adopting calendar version…' : 'Adopt selected version from this date'}</button></section>}
     {streamEnrollments && streamEnrollments.length > 0 && <>
-      <label>Retained enrollment<select value={selectedId} onChange={event => setSelectedId(event.target.value)}>
+      <label>Retained enrollment<select value={selectedId} onChange={event => { adoptionEpoch.current += 1; setAdoptingEnrollmentId(''); setAdoptionMessage(''); setSelectedId(event.target.value); }}>
         {streamEnrollments.map(enrollment => <option key={enrollment.id} value={enrollment.id}>{enrollment.id}</option>)}
       </select></label>
       {details?.kind === 'loading' && <p role="status">Loading current assignments…</p>}
       {details?.kind === 'error' && <div role="alert" className="plan-error">Could not load this retained plan: {details.message}<button onClick={() => setDetailAttempt(value => value + 1)}>Retry selection</button></div>}
       {details?.kind === 'ready' && <section className="plan-details" aria-label="Current plan assignments">
         <h3>{details.definition.definition.name}</h3>
+        {activeStreamEnrollment && streamAdoptionTarget && api?.adoptChapterStreamPlan && <section className="plan-enrollment" aria-label="Adopt chapter-stream plan version"><p>Version {streamAdoptionTarget.version} is available. Adoption keeps the displayed assignments and retained history, then uses the newer definition only for assignments first created after this frontier.</p><button disabled={!!adoptingEnrollmentId || details.assignments.length === 0} onClick={() => void adoptSelectedStreamEnrollment(activeStreamEnrollment, details, streamAdoptionTarget)}>{adoptingEnrollmentId === activeStreamEnrollment.id ? 'Adopting plan version…' : `Adopt version ${streamAdoptionTarget.version} for future assignments`}</button></section>}
         <section className="plan-export" aria-label="Export selected plan JSON">
           <p>Export this selected immutable definition version as portable JSON. This does not change plans or enrollments.</p>
           <button disabled={!!exportingVersionId} onClick={() => void exportDefinition(details.definition, selectedId)}>{exportingVersionId === details.definition.id ? 'Exporting selected version JSON…' : exportError?.versionId === details.definition.id ? 'Retry selected version JSON' : 'Export selected version JSON'}</button>
@@ -994,5 +1056,6 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
         {undoMessage && <div role="alert" className="plan-error">{undoMessage}{undoRefreshFailed && <button onClick={() => setHistoryAttempt(value => value + 1)}>Retry completion history</button>}</div>}
       </section>}
     </>}
+    {adoptionMessage && <div role="alert" className="plan-error">{adoptionMessage}</div>}
   </aside>;
 }
