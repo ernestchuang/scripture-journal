@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Passage } from '../domain';
 import { adjacentChapter, BOOKS, chapterKey, formatPassage, validPassage } from './books';
-import { downloadKjv, invalidateKjvCache, kjvOfflineStatus, loadChapter, type Translation, type Verse } from './provider';
+import { downloadKjv, importScripturePack, invalidateTranslationCache, invalidateKjvCache, kjvOfflineStatus, loadChapter, translationInfo, type TranslationInfo, type Translation, type Verse } from './provider';
 import { isDesktop } from '../platform/journal';
 import './reader.css';
 
@@ -67,7 +67,10 @@ export function Reader({ selection, onSelectionChange, onReflect }: ReaderProps)
   const [offline, setOffline] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState('');
+  const [importNotice, setImportNotice] = useState('');
   const [libraryGeneration, setLibraryGeneration] = useState(0);
+  const [installedInfo, setInstalledInfo] = useState<TranslationInfo | null>(null);
+  useEffect(() => { let active = true; setInstalledInfo(null); void translationInfo(translation).then(info => { if (active) setInstalledInfo(info); }).catch(() => {}); return () => { active = false; }; }, [translation, libraryGeneration]);
   const restoringTranslation = useRef(false);
   const viewport = useRef<HTMLDivElement>(null);
   const reported = useRef(chapterKey(safeSelection));
@@ -92,6 +95,19 @@ export function Reader({ selection, onSelectionChange, onReflect }: ReaderProps)
     setDownloading(true); setDownloadError('');
     try { await downloadKjv(); invalidateKjvCache(); setOffline(true); setLibraryGeneration(value => value + 1); }
     catch (error) { setDownloadError(error instanceof Error ? error.message : String(error)); }
+    finally { setDownloading(false); }
+  }
+  async function importPack() {
+    setDownloading(true); setDownloadError(''); setImportNotice('');
+    try {
+      const imported = await importScripturePack();
+      if (!imported) return;
+      invalidateTranslationCache(imported);
+      if (imported === 'KJV') setOffline(true);
+      changeTranslation(imported);
+      setLibraryGeneration(value => value + 1);
+      setImportNotice(`${imported} pack installed for offline reading.`);
+    } catch (error) { setDownloadError(error instanceof Error ? error.message : String(error)); }
     finally { setDownloading(false); }
   }
   useEffect(() => {
@@ -186,13 +202,13 @@ export function Reader({ selection, onSelectionChange, onReflect }: ReaderProps)
         <label>Translation<select value={translation} aria-describedby="translation-availability" onChange={e => changeTranslation(e.target.value as Translation)}><option value="KJV">KJV</option><option value="LSB">LSB</option><option value="NASB1995">NASB1995</option><option value="ESV">ESV</option></select></label>
       </div>
       <button className="scripture-reflect" onClick={() => onReflect(safeSelection)}>Reflect on {formatPassage(safeSelection)}</button>
-      <details id="translation-availability"><summary>About translations &amp; availability</summary><p>KJV is public domain and can be stored offline from eBible.org. LSB, NASB1995, and ESV require an authorized scripture pack; selecting one keeps your place and explains when its text is unavailable.</p>{isDesktop && <button disabled={downloading} onClick={() => void installKjv()}>{downloading ? 'Downloading KJV…' : offline ? 'Refresh offline KJV' : 'Download KJV for offline reading'}</button>}{downloadError && <p role="alert">{downloadError}</p>}</details>
+      <details id="translation-availability"><summary>About translations &amp; availability</summary><p>Download KJV from eBible.org, or import a local JSON pack for LSB, NASB1995, ESV, or KJV. Use text you are authorized to store. Import replaces only that translation’s installed text; your journal stays independent.</p>{isDesktop && <><button disabled={downloading} onClick={() => void installKjv()}>{downloading ? 'Updating library…' : offline ? 'Refresh offline KJV' : 'Download KJV for offline reading'}</button><button disabled={downloading} onClick={() => void importPack()}>Import authorized Scripture pack</button></>}{downloadError && <p role="alert">{downloadError}</p>}{importNotice && <p role="status">{importNotice}</p>}</details>
     </header>
     <div ref={viewport} className="scripture-scroll" tabIndex={0} aria-label="Continuous scripture reading" onScroll={handleScroll} onWheel={event => { if (event.deltaY < 0 && (viewport.current?.scrollTop ?? 1) < 10) extend(-1); }}>
       {previous && <button className="scripture-boundary" onClick={() => extend(-1)}>Read preceding chapter · {formatPassage(previous)}</button>}
       {chapters.map(p => <Chapter key={`${translation}:${chapterKey(p)}`} passage={p} selected={safeSelection} translation={translation} generation={libraryGeneration} onAnchorRestored={() => { restoringTranslation.current = false; }} />)}
       {next ? <button className="scripture-boundary" onClick={() => extend(1)}>Continue reading · {formatPassage(next)}</button> : <p>End of Revelation</p>}
-      <p className="scripture-attribution">{translation === 'KJV' ? <>King James Version · Public-domain offline package from <a href="https://ebible.org/details.php?id=eng-kjv2006" target="_blank" rel="noreferrer">eBible.org</a>; online fallback by bible-api.com.</> : `${translation} · authorized pack required`}</p>
+      <p className="scripture-attribution">{installedInfo ? `${installedInfo.name} · Offline pack · ${installedInfo.source}` : translation === 'KJV' ? <>King James Version · Online fallback by bible-api.com. Offline download source: <a href="https://ebible.org/details.php?id=eng-kjv2006" target="_blank" rel="noreferrer">eBible.org</a>.</> : `${translation} · authorized pack required`}</p>
     </div>
   </article>;
 }
