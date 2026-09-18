@@ -14,21 +14,25 @@ type PlanHistory =
   | { kind: 'error'; message: string }
   | { kind: 'ready'; items: PlanCompletionHistoryItem[] };
 type ReadyPlanHistory = Extract<PlanHistory, { kind: 'ready' }>;
-type CalendarRead<T> = { kind: 'loading' } | { kind: 'error'; message: string } | { kind: 'ready'; items: T[] };
+type CalendarRead<T> = { kind: 'loading' } | { kind: 'error'; message: string; items?: T[] } | { kind: 'ready'; items: T[] };
 
-function CalendarAssignments({ items, selectedId, assignments, history, completingId, completionError, onSelect, onRetry, onRetryHistory, onComplete }: {
+function CalendarAssignments({ items, selectedId, assignments, history, completingId, completionError, undoingId, undoError, onSelect, onRetry, onRetryHistory, onComplete, onUndo }: {
   items: CalendarPlanEnrollment[];
   selectedId: string;
   assignments: CalendarRead<DatedPlanAssignment> | null;
   history: CalendarRead<CalendarAssignmentCompletion> | null;
   completingId: string;
   completionError: string;
+  undoingId: string;
+  undoError: string;
   onSelect: (id: string) => void;
   onRetry: () => void;
   onRetryHistory: () => void;
   onComplete: (assignment: DatedPlanAssignment) => void;
+  onUndo: (completion: CalendarAssignmentCompletion) => void;
 }) {
   const selected = items.find(item => item.id === selectedId);
+  const historyItems = history?.kind === 'ready' ? history.items : history?.kind === 'error' ? history.items : undefined;
   return <section className="plan-history" aria-label="Retained calendar assignments">
     <h3>Retained calendar enrollments</h3>
     <label>Retained calendar enrollment<select value={selectedId} onChange={event => onSelect(event.target.value)}>{items.map(enrollment => <option key={enrollment.id} value={enrollment.id}>{enrollment.id} · {enrollment.scheduleMode} · {enrollment.startDate}</option>)}</select></label>
@@ -38,7 +42,9 @@ function CalendarAssignments({ items, selectedId, assignments, history, completi
     {history?.kind === 'loading' && <p role="status">Loading calendar completion history…</p>}
     {history?.kind === 'error' && <div role="alert" className="plan-error">Could not load calendar completion history: {history.message}<button onClick={onRetryHistory}>Retry calendar completion history</button></div>}
     {completionError && <div role="alert" className="plan-error">Could not complete calendar assignment: {completionError}</div>}
-    {assignments?.kind === 'ready' && (assignments.items.length === 0 ? <p>No retained calendar assignments.</p> : <ol>{assignments.items.map(assignment => { const completion = history?.kind === 'ready' ? history.items.find(item => item.assignmentId === assignment.id) : undefined; return <li key={assignment.id}><strong>{assignment.localDate}</strong><span>Definition day {assignment.definitionDay}</span><span>{assignment.passages.map(formatPassage).join('; ')}</span><small>Assignment {assignment.id} · Definition version {assignment.definitionVersionId}</small>{history?.kind === 'ready' ? (completion ? <span>Completed {completion.completedAt} · Completion {completion.id}</span> : <button disabled={!!completingId} onClick={() => onComplete(assignment)}>{completingId === assignment.id ? 'Completing calendar assignment…' : 'Complete calendar assignment'}</button>) : <span>{history?.kind === 'loading' ? 'Completion status is loading.' : 'Completion status is unavailable.'}</span>}</li>; })}</ol>)}
+    {undoError && <div role="alert" className="plan-error">Could not undo calendar completion: {undoError}</div>}
+    {assignments?.kind === 'ready' && (assignments.items.length === 0 ? <p>No retained calendar assignments.</p> : <ol>{assignments.items.map(assignment => { const completion = historyItems?.find(item => item.assignmentId === assignment.id && !item.undone); return <li key={assignment.id}><strong>{assignment.localDate}</strong><span>Definition day {assignment.definitionDay}</span><span>{assignment.passages.map(formatPassage).join('; ')}</span><small>Assignment {assignment.id} · Definition version {assignment.definitionVersionId}</small>{historyItems ? (completion ? <><span>Completed {completion.completedAt} · Completion {completion.id}</span><button disabled={!!completingId || !!undoingId} onClick={() => onUndo(completion)}>{undoingId === completion.id ? 'Undoing calendar completion…' : `Undo calendar completion ${completion.id}`}</button></> : history?.kind === 'error' ? <span>Completion status is unavailable.</span> : <button disabled={!!completingId || !!undoingId} onClick={() => onComplete(assignment)}>{completingId === assignment.id ? 'Completing calendar assignment…' : 'Complete calendar assignment'}</button>) : <span>{history?.kind === 'loading' ? 'Completion status is loading.' : 'Completion status is unavailable.'}</span>}</li>; })}</ol>)}
+    {historyItems && historyItems.length > 0 && <div><h4>Calendar completion history</h4><ol>{historyItems.map(item => <li key={item.id}><span>Retained record {item.id} · Assignment {item.assignmentId} · Enrollment {item.enrollmentId}</span><span>Completed {item.completedAt}</span><em>{item.undone ? 'Undone' : 'Current completion'}</em></li>)}</ol></div>}
   </section>;
 }
 
@@ -52,7 +58,7 @@ function defaultCalendarScheduleMode(definition: PlanDefinitionVersion): Calenda
 }
 type ChapterStreams = Extract<PlanDefinition['schedule'], { kind: 'chapterStreams' }>['streams'];
 
-type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'enrollInCalendar' | 'getCalendarPlanEnrollment' | 'calendarPlanAssignments' | 'completeCalendarAssignment' | 'calendarCompletionHistory' | 'completePlanStream' | 'undoPlanCompletion'>;
+type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'enrollInCalendar' | 'getCalendarPlanEnrollment' | 'calendarPlanAssignments' | 'completeCalendarAssignment' | 'undoCalendarCompletion' | 'calendarCompletionHistory' | 'completePlanStream' | 'undoPlanCompletion'>;
 
 function localToday() {
   const now = new Date();
@@ -109,6 +115,8 @@ export function ownsRetainedExport(lifecycle: RetainedExportLifecycle, epoch: nu
 }
 
 export function PlanPanel({ api }: { api?: PlanPanelApi }) {
+  const currentApi = useRef(api);
+  currentApi.current = api;
   const [enrollments, setEnrollments] = useState<PlanEnrollment[] | null>(null);
   const [selectedId, setSelectedId] = useState('');
   const [retainedDefinitions, setRetainedDefinitions] = useState<PlanDefinitionVersion[] | null>(null);
@@ -164,6 +172,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [calendarHistoryAttempt, setCalendarHistoryAttempt] = useState(0);
   const [completingCalendarId, setCompletingCalendarId] = useState('');
   const [calendarCompletionError, setCalendarCompletionError] = useState('');
+  const [undoingCalendarId, setUndoingCalendarId] = useState('');
+  const [calendarUndoError, setCalendarUndoError] = useState('');
   const [versionEditTarget, setVersionEditTarget] = useState<PlanDefinitionVersion | null>(null);
   const [versionEditJson, setVersionEditJson] = useState('');
   const [versionEditing, setVersionEditing] = useState(false);
@@ -185,6 +195,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const calendarAssignmentEpoch = useRef(0);
   const calendarHistoryEpoch = useRef(0);
   const calendarCompletionEpoch = useRef(0);
+  const calendarUndoEpoch = useRef(0);
   const calendarPendingEpoch = useRef(0);
   const versionEditEpoch = useRef(0);
   const retainedChoiceDefinitionId = useRef('');
@@ -195,6 +206,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const readyDefinitions = useRef<PlanDefinitionVersion[] | null>(null);
   const confirmedCompletions = useRef(new Map<string, string>());
   const confirmedUndos = useRef(new Map<string, string>());
+  const confirmedCalendarUndos = useRef(new Map<string, string>());
+  const readyCalendarHistory = useRef(new Map<string, CalendarAssignmentCompletion[]>());
   const readyDetails = useRef(new Map<string, ReadyPlanDetails>());
   const readyHistory = useRef(new Map<string, ReadyPlanHistory>());
   const selectedIdRef = useRef(selectedId);
@@ -204,6 +217,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     : null, [calendarEnrollments, enrollments]);
 
   useEffect(() => () => {
+    if (currentApi.current === api) currentApi.current = undefined;
     actionEpoch.current += 1;
     mcheyneEpoch.current += 1;
     completionEpoch.current += 1;
@@ -218,6 +232,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     calendarAssignmentEpoch.current += 1;
     calendarHistoryEpoch.current += 1;
     calendarCompletionEpoch.current += 1;
+    calendarUndoEpoch.current += 1;
     calendarPendingEpoch.current = 0;
     versionEditEpoch.current += 1;
     retainedChoiceDefinitionId.current = '';
@@ -227,6 +242,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     readyDefinitions.current = null;
     confirmedCompletions.current.clear();
     confirmedUndos.current.clear();
+    confirmedCalendarUndos.current.clear();
+    readyCalendarHistory.current.clear();
     readyDetails.current.clear();
     readyHistory.current.clear();
   }, [api]);
@@ -242,6 +259,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     setCalendarHistory(null);
     setCompletingCalendarId('');
     setCalendarCompletionError('');
+    setUndoingCalendarId('');
+    setCalendarUndoError('');
     setVersionEditTarget(null);
     setVersionEditJson('');
     setVersionEditing(false);
@@ -293,15 +312,19 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     const epoch = ++calendarHistoryEpoch.current;
     setCalendarHistory({ kind: 'loading' });
     api.calendarCompletionHistory(enrollmentId).then(items => {
-      if (active && epoch === calendarHistoryEpoch.current && selectedCalendarEnrollmentId === enrollmentId) setCalendarHistory({ kind: 'ready', items });
+      if (!active || epoch !== calendarHistoryEpoch.current || selectedCalendarEnrollmentId !== enrollmentId) return;
+      const visible = items.map(item => confirmedCalendarUndos.current.get(item.id) === enrollmentId ? { ...item, undone: true } : item);
+      for (const item of items) if (item.undone && confirmedCalendarUndos.current.get(item.id) === enrollmentId) confirmedCalendarUndos.current.delete(item.id);
+      readyCalendarHistory.current.set(enrollmentId, visible);
+      setCalendarHistory({ kind: 'ready', items: visible });
     }).catch(error => {
-      if (active && epoch === calendarHistoryEpoch.current && selectedCalendarEnrollmentId === enrollmentId) setCalendarHistory({ kind: 'error', message: String(error) });
+      if (active && epoch === calendarHistoryEpoch.current && selectedCalendarEnrollmentId === enrollmentId) setCalendarHistory({ kind: 'error', message: String(error), items: readyCalendarHistory.current.get(enrollmentId) });
     });
     return () => { active = false; };
   }, [api, selectedCalendarEnrollmentId, calendarHistoryAttempt]);
 
   async function completeCalendar(assignment: DatedPlanAssignment) {
-    if (!api || completingCalendarId) return;
+    if (!api || completingCalendarId || undoingCalendarId) return;
     const enrollmentId = selectedCalendarEnrollmentId;
     const epoch = ++calendarCompletionEpoch.current;
     setCompletingCalendarId(assignment.id);
@@ -315,6 +338,29 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       if (epoch === calendarCompletionEpoch.current && selectedCalendarEnrollmentId === enrollmentId) {
         setCompletingCalendarId('');
         setCalendarCompletionError(String(error));
+      }
+    }
+  }
+
+  async function undoCalendar(completion: CalendarAssignmentCompletion) {
+    if (!api || completingCalendarId || undoingCalendarId || completion.undone) return;
+    const enrollmentId = selectedCalendarEnrollmentId;
+    const epoch = ++calendarUndoEpoch.current;
+    setUndoingCalendarId(completion.id);
+    setCalendarUndoError('');
+    try {
+      await api.undoCalendarCompletion({ enrollmentId, assignmentId: completion.assignmentId, completionId: completion.id });
+      if (currentApi.current !== api) return;
+      confirmedCalendarUndos.current.set(completion.id, enrollmentId);
+      if (epoch !== calendarUndoEpoch.current || selectedCalendarEnrollmentId !== enrollmentId) return;
+      setUndoingCalendarId('');
+      setCalendarHistory(current => current?.kind === 'ready' ? { kind: 'ready', items: current.items.map(item => item.id === completion.id ? { ...item, undone: true } : item) } : current);
+      readyCalendarHistory.current.set(enrollmentId, (readyCalendarHistory.current.get(enrollmentId) ?? []).map(item => item.id === completion.id ? { ...item, undone: true } : item));
+      setCalendarHistoryAttempt(value => value + 1);
+    } catch (error) {
+      if (epoch === calendarUndoEpoch.current && selectedCalendarEnrollmentId === enrollmentId) {
+        setUndoingCalendarId('');
+        setCalendarUndoError(String(error));
       }
     }
   }
@@ -911,7 +957,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     {enrollments?.length === 0 && <p>No retained plan enrollments yet.</p>}
     {calendarEnrollments?.kind === 'loading' && <p role="status">Loading retained calendar enrollments…</p>}
     {calendarEnrollments?.kind === 'error' && <div role="alert" className="plan-error">Could not load retained calendar enrollments: {calendarEnrollments.message}<button onClick={() => setCalendarEnrollmentAttempt(value => value + 1)}>Retry calendar enrollments</button></div>}
-    {calendarEnrollments?.kind === 'ready' && calendarEnrollments.items.length > 0 && <CalendarAssignments items={calendarEnrollments.items} selectedId={selectedCalendarEnrollmentId} assignments={calendarAssignments} history={calendarHistory} completingId={completingCalendarId} completionError={calendarCompletionError} onSelect={id => { calendarCompletionEpoch.current += 1; setCompletingCalendarId(''); setCalendarCompletionError(''); setSelectedCalendarEnrollmentId(id); }} onRetry={() => setCalendarAssignmentAttempt(value => value + 1)} onRetryHistory={() => setCalendarHistoryAttempt(value => value + 1)} onComplete={assignment => void completeCalendar(assignment)} />}
+    {calendarEnrollments?.kind === 'ready' && calendarEnrollments.items.length > 0 && <CalendarAssignments items={calendarEnrollments.items} selectedId={selectedCalendarEnrollmentId} assignments={calendarAssignments} history={calendarHistory} completingId={completingCalendarId} completionError={calendarCompletionError} undoingId={undoingCalendarId} undoError={calendarUndoError} onSelect={id => { calendarCompletionEpoch.current += 1; calendarUndoEpoch.current += 1; setCompletingCalendarId(''); setCalendarCompletionError(''); setUndoingCalendarId(''); setCalendarUndoError(''); setSelectedCalendarEnrollmentId(id); }} onRetry={() => setCalendarAssignmentAttempt(value => value + 1)} onRetryHistory={() => setCalendarHistoryAttempt(value => value + 1)} onComplete={assignment => void completeCalendar(assignment)} onUndo={completion => void undoCalendar(completion)} />}
     {streamEnrollments && streamEnrollments.length > 0 && <>
       <label>Retained enrollment<select value={selectedId} onChange={event => setSelectedId(event.target.value)}>
         {streamEnrollments.map(enrollment => <option key={enrollment.id} value={enrollment.id}>{enrollment.id}</option>)}

@@ -32,7 +32,7 @@ const customEnrollment: PlanEnrollment = { id: 'custom-enrollment', definitionVe
 const retainedStreams = { ...importedStreams, id: retainedDefinition.id, planId: retainedDefinition.planId, definition: { ...importedStreams.definition, name: 'Duplicate name' } };
 const retainedEnrollment: PlanEnrollment = { id: 'retained-enrollment', definitionVersionId: retainedStreams.id, createdAt: '2026-09-18T00:00:05Z' };
 const calendarEnrollment = { id: 'calendar-enrollment', definitionVersionId: retainedCalendar.id, createdAt: '2026-09-18T00:00:06Z', startDate: '2026-03-01', scheduleMode: 'calendarAligned' as const };
-const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'enrollInCalendar' | 'getCalendarPlanEnrollment' | 'calendarPlanAssignments' | 'completeCalendarAssignment' | 'calendarCompletionHistory' | 'completePlanStream' | 'undoPlanCompletion'> => ({
+const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'registerMcheynePlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'enrollInCalendar' | 'getCalendarPlanEnrollment' | 'calendarPlanAssignments' | 'completeCalendarAssignment' | 'undoCalendarCompletion' | 'calendarCompletionHistory' | 'completePlanStream' | 'undoPlanCompletion'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   listLatestPlanDefinitionVersions: vi.fn(async () => []),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
@@ -48,6 +48,7 @@ const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanD
   getCalendarPlanEnrollment: vi.fn(async () => null),
   calendarPlanAssignments: vi.fn(async () => []),
   completeCalendarAssignment: vi.fn(async request => ({ id: 'calendar-completion', assignmentId: request.assignmentId, enrollmentId: request.enrollmentId, completedAt: '2026-09-18T00:00:07Z', undone: false })),
+  undoCalendarCompletion: vi.fn(async () => undefined),
   calendarCompletionHistory: vi.fn(async () => []),
   completePlanStream: vi.fn(async request => ({ id: 'completion-1', assignmentId: request.expectedAssignmentId, completedAt: '2026-09-18T00:00:03Z' })),
   undoPlanCompletion: vi.fn(async () => undefined),
@@ -487,6 +488,109 @@ describe('retained plan panel', () => {
     await act(async () => { pending.resolve(completion); });
     expect(await screen.findByText(`Completed ${completion.completedAt} · Completion ${completion.id}`)).toBeTruthy();
     expect(screen.getByText('John 3:16')).toBeTruthy();
+  });
+
+  it('undoes the exact calendar completion once, retains history, and permits recompletion', async () => {
+    const retained = { ...calendarEnrollment, id: 'calendar-undo-exact' };
+    const dated: DatedPlanAssignment = { id: 'dated-undo-exact', enrollmentId: retained.id, definitionVersionId: retained.definitionVersionId, definitionDay: 12, localDate: retained.startDate, passages: [{ book: 43, chapter: 3, startVerse: 16, endVerse: 16 }] };
+    const oldCompletion = { id: 'calendar-completion-old', assignmentId: dated.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:07Z', undone: false };
+    const newCompletion = { ...oldCompletion, id: 'calendar-completion-new', completedAt: '2026-09-18T00:00:08Z' };
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValue([retained]);
+    vi.mocked(plans.getCalendarPlanEnrollment).mockResolvedValue(retained);
+    vi.mocked(plans.calendarPlanAssignments).mockResolvedValue([dated]);
+    vi.mocked(plans.calendarCompletionHistory)
+      .mockResolvedValueOnce([oldCompletion])
+      .mockResolvedValueOnce([{ ...oldCompletion, undone: true }])
+      .mockResolvedValueOnce([{ ...oldCompletion, undone: true }, newCompletion]);
+    vi.mocked(plans.completeCalendarAssignment).mockResolvedValue(newCompletion);
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: `Undo calendar completion ${oldCompletion.id}` }));
+    expect(plans.undoCalendarCompletion).toHaveBeenCalledTimes(1);
+    expect(plans.undoCalendarCompletion).toHaveBeenCalledWith({ enrollmentId: retained.id, assignmentId: dated.id, completionId: oldCompletion.id });
+    expect(await screen.findByText('Undone')).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete calendar assignment' }));
+    expect(plans.completeCalendarAssignment).toHaveBeenCalledWith({ enrollmentId: retained.id, assignmentId: dated.id });
+    expect(await screen.findByText(`Retained record ${newCompletion.id} · Assignment ${dated.id} · Enrollment ${retained.id}`)).toBeTruthy();
+    expect(screen.getByText(`Retained record ${oldCompletion.id} · Assignment ${dated.id} · Enrollment ${retained.id}`)).toBeTruthy();
+  });
+
+  it('keeps confirmed calendar undo and dated metadata when history refresh fails, then retries only the read', async () => {
+    const retained = { ...calendarEnrollment, id: 'calendar-undo-refresh' };
+    const dated: DatedPlanAssignment = { id: 'dated-undo-refresh', enrollmentId: retained.id, definitionVersionId: retained.definitionVersionId, definitionDay: 60, localDate: retained.startDate, passages: [{ book: 2, chapter: 12, startVerse: 21, endVerse: 51 }] };
+    const completion = { id: 'calendar-completion-refresh', assignmentId: dated.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:07Z', undone: false };
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValue([retained]);
+    vi.mocked(plans.getCalendarPlanEnrollment).mockResolvedValue(retained);
+    vi.mocked(plans.calendarPlanAssignments).mockResolvedValue([dated]);
+    vi.mocked(plans.calendarCompletionHistory).mockResolvedValueOnce([completion]).mockRejectedValueOnce(new Error('history offline')).mockResolvedValueOnce([{ ...completion, undone: true }]);
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: `Undo calendar completion ${completion.id}` }));
+    expect(await screen.findByText(/Could not load calendar completion history: Error: history offline/)).toBeTruthy();
+    expect(screen.getByText('Exodus 12:21–51')).toBeTruthy();
+    expect(screen.getByText(`Assignment ${dated.id} · Definition version ${dated.definitionVersionId}`)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: `Undo calendar completion ${completion.id}` })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry calendar completion history' }));
+    expect(await screen.findByText('Undone')).toBeTruthy();
+    expect(plans.undoCalendarCompletion).toHaveBeenCalledTimes(1);
+    expect(plans.calendarCompletionHistory).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['success', 'rejection'] as const)('ignores obsolete calendar undo %s across A-B-A while the current undo remains pending', async settlement => {
+    const obsolete = deferred<void>();
+    const current = deferred<void>();
+    const a = { ...calendarEnrollment, id: `calendar-undo-aba-a-${settlement}` };
+    const b = { ...calendarEnrollment, id: `calendar-undo-aba-b-${settlement}`, startDate: '2026-04-02' };
+    const dated = (item: typeof a): DatedPlanAssignment => ({ id: `dated-${item.id}`, enrollmentId: item.id, definitionVersionId: item.definitionVersionId, definitionDay: 1, localDate: item.startDate, passages: [{ book: 1, chapter: 1 }] });
+    const completion = (item: typeof a) => ({ id: `completion-${item.id}`, assignmentId: dated(item).id, enrollmentId: item.id, completedAt: '2026-09-18T00:00:07Z', undone: false });
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValue([a, b]);
+    vi.mocked(plans.getCalendarPlanEnrollment).mockImplementation(async id => id === a.id ? a : b);
+    vi.mocked(plans.calendarPlanAssignments).mockImplementation(async id => [dated(id === a.id ? a : b)]);
+    vi.mocked(plans.calendarCompletionHistory).mockImplementation(async id => [completion(id === a.id ? a : b)]);
+    vi.mocked(plans.undoCalendarCompletion).mockReturnValueOnce(obsolete.promise).mockReturnValueOnce(current.promise);
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: `Undo calendar completion ${completion(a).id}` }));
+    fireEvent.change(screen.getByLabelText('Retained calendar enrollment'), { target: { value: b.id } });
+    await screen.findByText(b.startDate);
+    fireEvent.change(screen.getByLabelText('Retained calendar enrollment'), { target: { value: a.id } });
+    fireEvent.click(await screen.findByRole('button', { name: `Undo calendar completion ${completion(a).id}` }));
+    await act(async () => settlement === 'success' ? obsolete.resolve() : obsolete.reject(new Error('obsolete undo')));
+    expect(screen.getByRole('button', { name: 'Undoing calendar completion…' })).toBeTruthy();
+    expect(screen.queryByText(/obsolete undo/)).toBeNull();
+    await act(async () => current.reject(new Error('current undo failed')));
+    expect(await screen.findByText(/current undo failed/)).toBeTruthy();
+    expect(plans.undoCalendarCompletion).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['success', 'rejection'] as const)('ignores pending calendar undo %s after API replacement and unmount', async settlement => {
+    const oldPending = deferred<void>();
+    const unmountedPending = deferred<void>();
+    const retained = { ...calendarEnrollment, id: `calendar-undo-api-${settlement}` };
+    const dated: DatedPlanAssignment = { id: `dated-undo-api-${settlement}`, enrollmentId: retained.id, definitionVersionId: retained.definitionVersionId, definitionDay: 1, localDate: retained.startDate, passages: [{ book: 1, chapter: 1 }] };
+    const completion = { id: `completion-undo-api-${settlement}`, assignmentId: dated.id, enrollmentId: retained.id, completedAt: '2026-09-18T00:00:07Z', undone: false };
+    const oldPlans = api();
+    const replacement = api();
+    for (const plans of [oldPlans, replacement]) {
+      vi.mocked(plans.listPlanEnrollments).mockResolvedValue([retained]);
+      vi.mocked(plans.getCalendarPlanEnrollment).mockResolvedValue(retained);
+      vi.mocked(plans.calendarPlanAssignments).mockResolvedValue([dated]);
+      vi.mocked(plans.calendarCompletionHistory).mockResolvedValue([completion]);
+    }
+    vi.mocked(oldPlans.undoCalendarCompletion).mockReturnValue(oldPending.promise);
+    vi.mocked(replacement.undoCalendarCompletion).mockReturnValue(unmountedPending.promise);
+    const view = render(<PlanPanel api={oldPlans} />);
+    fireEvent.click(await screen.findByRole('button', { name: `Undo calendar completion ${completion.id}` }));
+    view.rerender(<PlanPanel api={replacement} />);
+    const replacementUndo = await screen.findByRole('button', { name: `Undo calendar completion ${completion.id}` });
+    await act(async () => settlement === 'success' ? oldPending.resolve() : oldPending.reject(new Error('old API undo')));
+    expect(screen.queryByText(/old API undo/)).toBeNull();
+    fireEvent.click(replacementUndo);
+    view.unmount();
+    await act(async () => settlement === 'success' ? unmountedPending.resolve() : unmountedPending.reject(new Error('unmounted undo')));
+    expect(view.container.textContent).toBe('');
+    expect(oldPlans.undoCalendarCompletion).toHaveBeenCalledTimes(1);
+    expect(replacement.undoCalendarCompletion).toHaveBeenCalledTimes(1);
   });
 
   it('keeps calendar assignments visible and offers retry after completion rejection', async () => {
