@@ -280,4 +280,55 @@ describe('retained plan panel', () => {
     expect(select.value).toBe(created.id);
     expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps a confirmed enrollment finalized when a newer retry supersedes its pending refresh', async () => {
+    let resolveRefresh!: (value: PlanEnrollment[]) => void;
+    let resolveRetry!: (value: PlanEnrollment[]) => void;
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments)
+      .mockRejectedValueOnce(new Error('initial offline'))
+      .mockImplementationOnce(() => new Promise(resolve => { resolveRefresh = resolve; }))
+      .mockImplementationOnce(() => new Promise(resolve => { resolveRetry = resolve; }));
+    render(<PlanPanel api={plans} />);
+    await screen.findByText(/Could not load retained plans/);
+    fireEvent.click(screen.getByRole('button', { name: 'Set up four-stream plan' }));
+    await screen.findByText('Four streams');
+    fireEvent.click(screen.getByRole('button', { name: 'Create enrollment' }));
+    await waitFor(() => expect(plans.listPlanEnrollments).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('button', { name: 'Create enrollment' })).toBeNull();
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(created.id);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry plans' }));
+    await act(async () => { resolveRetry([first, created]); });
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(created.id);
+    expect(screen.queryByRole('button', { name: 'Create enrollment' })).toBeNull();
+    await act(async () => { resolveRefresh([first, created]); });
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(created.id);
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a confirmed enrollment finalized when retry and stale refresh both reject', async () => {
+    let rejectRefresh!: (reason: unknown) => void;
+    let rejectRetry!: (reason: unknown) => void;
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments)
+      .mockRejectedValueOnce(new Error('initial offline'))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRefresh = reject; }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRetry = reject; }));
+    render(<PlanPanel api={plans} />);
+    await screen.findByText(/Could not load retained plans/);
+    fireEvent.click(screen.getByRole('button', { name: 'Set up four-stream plan' }));
+    await screen.findByText('Four streams');
+    fireEvent.click(screen.getByRole('button', { name: 'Create enrollment' }));
+    await waitFor(() => expect(plans.listPlanEnrollments).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry plans' }));
+    await act(async () => { rejectRetry(new Error('retry offline')); });
+    expect(await screen.findByText(/Could not load retained plans: Error: retry offline/)).toBeTruthy();
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(created.id);
+    expect(screen.queryByRole('button', { name: 'Create enrollment' })).toBeNull();
+    await act(async () => { rejectRefresh(new Error('stale refresh failure')); });
+    expect(screen.queryByText(/stale refresh failure/)).toBeNull();
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(created.id);
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
+  });
 });
