@@ -642,6 +642,57 @@ describe('retained plan panel', () => {
     }
   });
 
+  it.each(['success', 'rejection'] as const)('ignores deferred old-API assignment %s after replacement results are visible', async settlement => {
+    const oldRead = deferred<DatedPlanAssignment[]>();
+    const oldEnrollment = { ...calendarEnrollment, id: `calendar-old-${settlement}`, startDate: '2026-02-01' };
+    const currentEnrollment = { ...calendarEnrollment, id: `calendar-current-${settlement}`, startDate: '2026-05-04', scheduleMode: 'dayOne' as const };
+    const currentAssignment: DatedPlanAssignment = {
+      id: `dated-current-${settlement}`,
+      enrollmentId: currentEnrollment.id,
+      definitionVersionId: currentEnrollment.definitionVersionId,
+      definitionDay: 64,
+      localDate: currentEnrollment.startDate,
+      passages: [{ book: 43, chapter: 3, startVerse: 16, endVerse: 16 }],
+    };
+    const oldPlans = api();
+    const currentPlans = api();
+    vi.mocked(oldPlans.listPlanEnrollments).mockResolvedValue([{ id: oldEnrollment.id, definitionVersionId: oldEnrollment.definitionVersionId, createdAt: oldEnrollment.createdAt }]);
+    vi.mocked(oldPlans.getCalendarPlanEnrollment).mockResolvedValue(oldEnrollment);
+    vi.mocked(oldPlans.calendarPlanAssignments).mockReturnValue(oldRead.promise);
+    vi.mocked(currentPlans.listPlanEnrollments).mockResolvedValue([{ id: currentEnrollment.id, definitionVersionId: currentEnrollment.definitionVersionId, createdAt: currentEnrollment.createdAt }]);
+    vi.mocked(currentPlans.getCalendarPlanEnrollment).mockResolvedValue(currentEnrollment);
+    vi.mocked(currentPlans.calendarPlanAssignments).mockResolvedValue([currentAssignment]);
+
+    const view = render(<PlanPanel api={oldPlans} />);
+    await waitFor(() => expect(oldPlans.calendarPlanAssignments).toHaveBeenCalledWith(oldEnrollment.id));
+    view.rerender(<PlanPanel api={currentPlans} />);
+    expect(await screen.findByText(`Assignment ${currentAssignment.id} · Definition version ${currentAssignment.definitionVersionId}`)).toBeTruthy();
+    expect((screen.getByLabelText('Retained calendar enrollment') as HTMLSelectElement).value).toBe(currentEnrollment.id);
+    expect(screen.getByText(currentEnrollment.startDate)).toBeTruthy();
+    expect(screen.getByText('John 3:16')).toBeTruthy();
+    expect(currentPlans.calendarPlanAssignments).toHaveBeenCalledWith(currentEnrollment.id);
+
+    await act(async () => {
+      if (settlement === 'success') {
+        oldRead.resolve([{ id: 'dated-obsolete', enrollmentId: oldEnrollment.id, definitionVersionId: oldEnrollment.definitionVersionId, definitionDay: 1, localDate: oldEnrollment.startDate, passages: [{ book: 1, chapter: 1 }] }]);
+      } else {
+        oldRead.reject(new Error('obsolete old API rejection'));
+      }
+    });
+
+    expect((screen.getByLabelText('Retained calendar enrollment') as HTMLSelectElement).value).toBe(currentEnrollment.id);
+    expect(screen.getByText(`Assignment ${currentAssignment.id} · Definition version ${currentAssignment.definitionVersionId}`)).toBeTruthy();
+    expect(screen.getByText(currentEnrollment.startDate)).toBeTruthy();
+    expect(screen.getByText('John 3:16')).toBeTruthy();
+    expect(screen.queryByText(oldEnrollment.startDate)).toBeNull();
+    expect(screen.queryByText(/dated-obsolete|obsolete old API rejection/)).toBeNull();
+    for (const plans of [oldPlans, currentPlans]) {
+      expect(plans.enrollInCalendar).not.toHaveBeenCalled();
+      expect(plans.completePlanStream).not.toHaveBeenCalled();
+      expect(plans.undoPlanCompletion).not.toHaveBeenCalled();
+    }
+  });
+
   it('discards stale dated-assignment responses after calendar selection and unmount', async () => {
     let resolveFirst!: (items: DatedPlanAssignment[]) => void;
     const one = { ...calendarEnrollment, id: 'calendar-one' };
