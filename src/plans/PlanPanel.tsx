@@ -14,7 +14,7 @@ type PlanHistory =
   | { kind: 'ready'; items: PlanCompletionHistoryItem[] };
 type ReadyPlanHistory = Extract<PlanHistory, { kind: 'ready' }>;
 
-type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'>;
+type PlanPanelApi = Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'>;
 
 export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [enrollments, setEnrollments] = useState<PlanEnrollment[] | null>(null);
@@ -39,12 +39,16 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState('');
   const [imported, setImported] = useState<PlanDefinitionVersion | null>(null);
+  const [exportingVersionId, setExportingVersionId] = useState('');
+  const [exportError, setExportError] = useState<{ versionId: string; message: string } | null>(null);
+  const [exportedJson, setExportedJson] = useState<{ versionId: string; json: string } | null>(null);
   const detailEpoch = useRef(0);
   const historyEpoch = useRef(0);
   const actionEpoch = useRef(0);
   const completionEpoch = useRef(0);
   const undoEpoch = useRef(0);
   const importEpoch = useRef(0);
+  const exportEpoch = useRef(0);
   const discoveryEpoch = useRef(0);
   const confirmedEnrollment = useRef<PlanEnrollment | null>(null);
   const confirmedCompletions = useRef(new Map<string, string>());
@@ -59,12 +63,20 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     completionEpoch.current += 1;
     undoEpoch.current += 1;
     importEpoch.current += 1;
+    exportEpoch.current += 1;
     confirmedEnrollment.current = null;
     confirmedCompletions.current.clear();
     confirmedUndos.current.clear();
     readyDetails.current.clear();
     readyHistory.current.clear();
   }, [api]);
+
+  useEffect(() => {
+    exportEpoch.current += 1;
+    setExportingVersionId('');
+    setExportError(null);
+    setExportedJson(null);
+  }, [selectedId]);
 
   useEffect(() => {
     if (!api) return;
@@ -204,6 +216,21 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     }
   }
 
+  async function exportDefinition(definition: PlanDefinitionVersion, enrollmentId?: string) {
+    if (!api || exportingVersionId) return;
+    const epoch = ++exportEpoch.current;
+    setExportingVersionId(definition.id); setExportError(null);
+    try {
+      const json = await api.exportPlanDefinitionJson(definition.id);
+      if (epoch !== exportEpoch.current || (enrollmentId && selectedIdRef.current !== enrollmentId)) return;
+      setExportedJson({ versionId: definition.id, json });
+    } catch (error) {
+      if (epoch === exportEpoch.current && (!enrollmentId || selectedIdRef.current === enrollmentId)) setExportError({ versionId: definition.id, message: `Could not export selected plan JSON: ${String(error)}` });
+    } finally {
+      if (epoch === exportEpoch.current && (!enrollmentId || selectedIdRef.current === enrollmentId)) setExportingVersionId('');
+    }
+  }
+
   async function complete(assignment: PlanAssignment, definition: PlanDefinitionVersion) {
     if (!api || completingId || undoingId) return;
     const epoch = ++completionEpoch.current;
@@ -311,7 +338,7 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       <label>Custom plan JSON<textarea value={customPlanJson} onChange={event => setCustomPlanJson(event.target.value)} placeholder='{"schemaVersion":1,...}' spellCheck={false} /></label>
       <button disabled={importing || !customPlanJson.trim()} onClick={() => void importCustomPlan()}>{importing ? 'Importing plan…' : 'Import custom plan'}</button>
       {importError && <div role="alert" className="plan-error">{importError}</div>}
-      {imported && <div role="status" className="plan-imported">Imported custom plan <strong>{imported.definition.name}</strong> as a new plan identity. Retained enrollments were not changed.<small>Definition version {imported.id}</small></div>}
+      {imported && <div role="status" className="plan-imported">Imported custom plan <strong>{imported.definition.name}</strong> as a new plan identity. Retained enrollments were not changed.<small>Definition version {imported.id}</small><button disabled={!!exportingVersionId} onClick={() => void exportDefinition(imported)}>{exportingVersionId === imported.id ? 'Exporting imported version JSON…' : exportError?.versionId === imported.id ? 'Retry imported version JSON' : 'Export imported version JSON'}</button>{exportError?.versionId === imported.id && <div role="alert" className="plan-error">{exportError.message}</div>}{exportedJson?.versionId === imported.id && <label>Exported imported plan JSON<textarea readOnly value={exportedJson.json} spellCheck={false} /></label>}</div>}
     </section>
     {enrollments?.length === 0 && <p>No retained plan enrollments yet.</p>}
     {enrollments && enrollments.length > 0 && <>
@@ -322,6 +349,12 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       {details?.kind === 'error' && <div role="alert" className="plan-error">Could not load this retained plan: {details.message}<button onClick={() => setDetailAttempt(value => value + 1)}>Retry selection</button></div>}
       {details?.kind === 'ready' && <section className="plan-details" aria-label="Current plan assignments">
         <h3>{details.definition.definition.name}</h3>
+        <section className="plan-export" aria-label="Export selected plan JSON">
+          <p>Export this selected immutable definition version as portable JSON. This does not change plans or enrollments.</p>
+          <button disabled={!!exportingVersionId} onClick={() => void exportDefinition(details.definition, selectedId)}>{exportingVersionId === details.definition.id ? 'Exporting selected version JSON…' : exportError?.versionId === details.definition.id ? 'Retry selected version JSON' : 'Export selected version JSON'}</button>
+          {exportError?.versionId === details.definition.id && <div role="alert" className="plan-error">{exportError.message}</div>}
+          {exportedJson?.versionId === details.definition.id && <label>Exported plan JSON<textarea readOnly value={exportedJson.json} spellCheck={false} /></label>}
+        </section>
         {details.assignments.length === 0 ? <p>This enrollment is exhausted; it has no active assignments.</p> : <ul>{details.assignments.map(assignment => <li key={assignment.id}><strong>{assignment.streamId}</strong><span>Book {assignment.passage.book} · Chapter {assignment.passage.chapter}</span><button disabled={!!completingId || !!undoingId} onClick={() => void complete(assignment, details.definition)}>{completingId === assignment.id ? 'Completing…' : `Complete ${assignment.streamId}`}</button></li>)}</ul>}
         {completionMessage && <div role="alert" className="plan-error">{completionMessage}<button onClick={() => setDetailAttempt(value => value + 1)}>Retry assignments</button></div>}
       </section>}

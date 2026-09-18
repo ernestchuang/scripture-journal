@@ -20,13 +20,14 @@ const fourStream = {
 const created: PlanEnrollment = { id: 'enrollment-new', definitionVersionId: fourStream.id, createdAt: '2026-09-18T00:00:02Z' };
 const history = (id: string, enrollmentId = first.id, undone = false) => ({ id, assignmentId: 'assignment-1', enrollmentId, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, completedAt: '2026-09-18T00:00:03Z', undone });
 const importedPlan = { id: 'custom-version', planId: 'custom-plan', version: 1, createdAt: first.createdAt, definition: { schemaVersion: 1, name: 'Imported streams', schedule: { kind: 'chapterStreams' as const, streams: [] } } };
-const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
+const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
   activePlanAssignments: vi.fn(async id => id === first.id ? [{ id: 'assignment-1', enrollmentId: id, streamId: 'psalms', ordinal: 1, cycle: 1, passage: { book: 19, chapter: 1 }, streamPosition: 0, progressId: 'progress-1' }] : []),
   planCompletionHistory: vi.fn(async () => []),
   registerFourStreamPlan: vi.fn(async () => fourStream),
   importPlanDefinitionJson: vi.fn(async () => importedPlan),
+  exportPlanDefinitionJson: vi.fn(async id => `{"versionId":"${id}"}`),
   enrollInChapterStreams: vi.fn(async () => created),
   completePlanStream: vi.fn(async request => ({ id: 'completion-1', assignmentId: request.expectedAssignmentId, completedAt: '2026-09-18T00:00:03Z' })),
   undoPlanCompletion: vi.fn(async () => undefined),
@@ -48,6 +49,58 @@ describe('retained plan panel', () => {
     expect(await screen.findByText('No retained plan enrollments yet.')).toBeTruthy();
   });
 
+  it('exports only the explicitly selected retained definition and preserves native JSON exactly', async () => {
+    const plans = api(); render(<PlanPanel api={plans} />);
+    await screen.findByText('First plan');
+    expect(plans.exportPlanDefinitionJson).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Export selected version JSON' }));
+    const output = await screen.findByLabelText('Exported plan JSON') as HTMLTextAreaElement;
+    expect(plans.exportPlanDefinitionJson).toHaveBeenCalledWith(first.definitionVersionId);
+    expect(output.value).toBe('{"versionId":"version-1"}');
+  });
+
+  it('suppresses duplicate exports, retains output through a failure, and retries', async () => {
+    let resolveExport!: (value: string) => void;
+    const plans = api();
+    vi.mocked(plans.exportPlanDefinitionJson)
+      .mockImplementationOnce(() => new Promise(resolve => { resolveExport = resolve; }))
+      .mockRejectedValueOnce(new Error('native export offline'))
+      .mockResolvedValueOnce('{"fresh":true}');
+    render(<PlanPanel api={plans} />);
+    await screen.findByText('First plan');
+    const button = screen.getByRole('button', { name: 'Export selected version JSON' });
+    fireEvent.click(button); fireEvent.click(button);
+    expect(plans.exportPlanDefinitionJson).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Exporting selected version JSON…' })).toBeTruthy();
+    await act(async () => { resolveExport('{"retained":true}'); });
+    expect((await screen.findByLabelText('Exported plan JSON') as HTMLTextAreaElement).value).toBe('{"retained":true}');
+    fireEvent.click(screen.getByRole('button', { name: 'Export selected version JSON' }));
+    expect(await screen.findByText(/Could not export selected plan JSON: Error: native export offline/)).toBeTruthy();
+    expect((screen.getByLabelText('Exported plan JSON') as HTMLTextAreaElement).value).toBe('{"retained":true}');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry selected version JSON' }));
+    expect((await screen.findByLabelText('Exported plan JSON') as HTMLTextAreaElement).value).toBe('{"fresh":true}');
+  });
+
+  it('discards an export that resolves after selecting another enrollment or unmounting', async () => {
+    let resolveFirst!: (value: string) => void;
+    let resolveSecond!: (value: string) => void;
+    const plans = api();
+    vi.mocked(plans.exportPlanDefinitionJson)
+      .mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise(resolve => { resolveSecond = resolve; }));
+    const view = render(<PlanPanel api={plans} />);
+    const select = await screen.findByLabelText('Retained enrollment');
+    fireEvent.click(screen.getByRole('button', { name: 'Export selected version JSON' }));
+    fireEvent.change(select, { target: { value: second.id } });
+    expect(await screen.findByText('Second plan')).toBeTruthy();
+    await act(async () => { resolveFirst('{"wrong":"version-1"}'); });
+    expect(screen.queryByLabelText('Exported plan JSON')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Export selected version JSON' }));
+    view.unmount();
+    await act(async () => { resolveSecond('{"late":"version-2"}'); });
+    expect(view.container.textContent).toBe('');
+  });
+
   it('imports exact custom JSON only through an explicit action and retains the confirmation', async () => {
     const plans = api();
     vi.mocked(plans.listPlanEnrollments).mockRejectedValueOnce(new Error('discovery offline'));
@@ -62,6 +115,9 @@ describe('retained plan panel', () => {
     expect((input as HTMLTextAreaElement).value).toBe('');
     expect(await screen.findByText(/Could not load retained plans: Error: discovery offline/)).toBeTruthy();
     expect(screen.getByText('Imported streams')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Export imported version JSON' }));
+    expect((await screen.findByLabelText('Exported imported plan JSON') as HTMLTextAreaElement).value).toBe('{"versionId":"custom-version"}');
+    expect(plans.exportPlanDefinitionJson).toHaveBeenCalledWith(importedPlan.id);
   });
 
   it('retains custom JSON after a native validation failure and permits a corrected retry', async () => {

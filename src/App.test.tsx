@@ -15,6 +15,7 @@ const native = vi.hoisted(() => ({
   planCompletionHistory: vi.fn(),
   registerFourStreamPlan: vi.fn(),
   importPlanDefinitionJson: vi.fn(),
+  exportPlanDefinitionJson: vi.fn(),
   enrollInChapterStreams: vi.fn(),
   completePlanStream: vi.fn(),
   undoPlanCompletion: vi.fn(),
@@ -43,6 +44,7 @@ vi.mock('./platform/plans', () => ({
     planCompletionHistory: native.planCompletionHistory,
     registerFourStreamPlan: native.registerFourStreamPlan,
     importPlanDefinitionJson: native.importPlanDefinitionJson,
+    exportPlanDefinitionJson: native.exportPlanDefinitionJson,
     enrollInChapterStreams: native.enrollInChapterStreams,
     completePlanStream: native.completePlanStream,
     undoPlanCompletion: native.undoPlanCompletion,
@@ -86,6 +88,7 @@ beforeEach(() => {
   native.planCompletionHistory.mockReset().mockResolvedValue([]);
   native.registerFourStreamPlan.mockReset();
   native.importPlanDefinitionJson.mockReset();
+  native.exportPlanDefinitionJson.mockReset();
   native.enrollInChapterStreams.mockReset();
   native.completePlanStream.mockReset();
   native.undoPlanCompletion.mockReset();
@@ -247,6 +250,28 @@ describe('native application close lifecycle', () => {
     expect(native.saveEntry).toHaveBeenCalledTimes(1);
     expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while importing' } });
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this while importing');
+  });
+
+  it('preserves and autosaves dirty writing while explicitly exporting a selected plan version', async () => {
+    const enrollment = { id: 'enrollment-1', definitionVersionId: 'version-1', createdAt: '2026-09-18T00:00:00Z' };
+    native.listPlanEnrollments.mockResolvedValue([enrollment]);
+    native.getPlanDefinitionVersion.mockResolvedValue({ id: 'version-1', planId: 'plan-1', version: 1, createdAt: enrollment.createdAt, definition: { schemaVersion: 1, name: 'Four streams', schedule: { kind: 'chapterStreams', streams: [] } } });
+    native.activePlanAssignments.mockResolvedValue([]);
+    native.exportPlanDefinitionJson.mockResolvedValue('{"schemaVersion":1}');
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    const exportButton = await screen.findByRole('button', { name: 'Export selected version JSON' });
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Keep this while exporting' } });
+    fireEvent.click(exportButton);
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(native.exportPlanDefinitionJson).toHaveBeenCalledWith('version-1');
+    expect(native.saveEntry).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while exporting' } });
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this while exporting');
   });
 
   it('preserves and autosaves dirty writing while explicitly completing a stream', async () => {
