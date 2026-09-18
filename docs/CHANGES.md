@@ -5,6 +5,20 @@ holds implementation status and remaining acceptance work.
 
 ## 2026-09-18
 
+- Download a validated KJV library for offline desktop reading. Scripture lives
+  separately from journals; a damaged Scripture cache does not block writing.
+  Reading location is retained, and successful downloads refresh the reader.
+- M’Cheyne and the four chapter streams now support enrollment, progress, and
+  undo. Custom JSON plans support editing, versioning, import, and export.
+  Explicit version adoption retains previous assignments and completion records.
+- Revisit reflections with combined text, tag, book, chapter, and status filters.
+  A versioned writing-template interface and one blank starter seed independent
+  entries without coupling their later content to a template.
+- Trash supports recovery with all remaining versions. Permanent entry/version
+  deletion requires confirmation; current and finished versions are protected.
+  Surviving history and entry connections keep their identities. Existing exports
+  receive body-free placeholders; fresh exports do not disclose deleted entries.
+
 - Light, Dark, and System appearance apply before the desktop window appears.
   System uses a compatible active desktop palette when its bounded source file is
   available, otherwise follows OS light/dark changes. The palette is memory-only:
@@ -28,8 +42,7 @@ holds implementation status and remaining acceptance work.
   implementation choices, not a claim that the whole release is already built.
 - The reading-plan storage foundation now preserves immutable versions and
   validates chapter and verse references. Its database upgrade preserves existing
-  linked journal entries and revision history. Plan enrollment, progress, and the
-  plan editor are still being built; this foundation does not yet add a plan UI.
+  linked journal entries and revision history.
 
 Astra reviewed the appearance source and the draft-protection additions. Native
 visual startup and actual Apple Silicon runtime validation remain separate

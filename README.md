@@ -5,7 +5,7 @@ Read freely, reflect with confidence, and revisit connected writing over time.
 
 **Status: early desktop prototype, not a complete release.** A Tauri/React shell
 connects continuous KJV reading, Markdown writing, retained SQLite revisions,
-entry connections, history restoration, and manual Markdown export. Product
+entry connections, history restoration, reading plans, and manual Markdown export. Product
 contracts describe the broader release. Linux builds locally; macOS runtime
 validation remains outstanding. iPad/iPhone compatibility informs the architecture
 but is not a first release deliverable. Synchronization, accounts, sharing, and
@@ -36,10 +36,24 @@ run headlessly with a dark default, and the isolated native debug smoke requests
 dark mode. Native smoke automation still temporarily focuses its test window;
 run it deliberately when it will not interrupt your work.
 
-KJV loads online on demand and remains in memory for the session. Persistent
-offline scripture, the other translations, reading plans, full backup/restore,
-legacy import, deletion, and automatic incremental export are not implemented in
-this slice. See the [translation source investigation](docs/TRANSLATION-SOURCES.md).
+Use **Download KJV** in the desktop reader to install a validated offline Bible
+in a separate Scripture database. Without a download, KJV loads online on demand.
+The reader remembers its location and continues beyond plan passage boundaries.
+LSB, NASB1995, and ESV appear in the translation selector but require authorized
+sources that are not yet supplied. See the
+[translation source investigation](docs/TRANSLATION-SOURCES.md).
+
+Reading plans include M’Cheyne and four independent chapter streams. Custom JSON
+plans can be edited, imported, exported, and enrolled. Explicit version adoption
+preserves earlier assignments and completion history. Journals start from a blank
+writing template, with filters for tags, passages, and status. Trash keeps every
+version until explicit permanent deletion; working and finished heads cannot be
+deleted individually. Previously exported deleted entries become body-free
+placeholders on the next export. Backups and export recovery files may retain
+earlier copies.
+
+Full backup/restore, legacy import, and automatic incremental export remain under
+development.
 Manual export scans finished entries and preserves conflicting external files;
 it is not a complete backup of drafts and history. Export retains displaced
 manifests as `.scripture-journal-manifest-recovery-*.json` files in the destination;
@@ -102,9 +116,10 @@ Beads issue across quota resets without invoking a model while waiting.
 - [Development workflow](docs/DEVELOPMENT.md): worktrees, Beads, and resumption.
 
 The local journal database owns entries, revisions, passage associations, and
-entry links. Obsidian receives an incrementally updated Markdown view for review
+entry links. Obsidian receives a Markdown view for review
 and deep study. All persisted writing versions are retained unless explicitly
-deleted; the precise autosave cadence is a proposed policy in the data model.
+deleted. Drafts save after 600 ms idle and at least every five seconds during
+continuous typing while storage is responding normally.
 
 The first two plans are M'Cheyne and one chapter per day from each of four streams:
 Old Testament excluding Psalms and Proverbs, New Testament, Psalms, and Proverbs.
