@@ -27,6 +27,8 @@ const importedStreams = { ...importedPlan, definition: { ...importedPlan.definit
   { id: 'short', name: 'Short stream', chapters: [{ book: 40, chapter: 1 }] },
 ] } } };
 const customEnrollment: PlanEnrollment = { id: 'custom-enrollment', definitionVersionId: importedStreams.id, createdAt: '2026-09-18T00:00:04Z' };
+const retainedStreams = { ...importedStreams, id: retainedDefinition.id, planId: retainedDefinition.planId, definition: { ...importedStreams.definition, name: 'Duplicate name' } };
+const retainedEnrollment: PlanEnrollment = { id: 'retained-enrollment', definitionVersionId: retainedStreams.id, createdAt: '2026-09-18T00:00:05Z' };
 const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   listLatestPlanDefinitionVersions: vi.fn(async () => []),
@@ -189,6 +191,109 @@ describe('retained plan panel', () => {
     view.unmount();
     await act(async () => { resolveThird('{"late":"replacement"}'); });
     expect(view.container.textContent).toBe('');
+  });
+
+  it('enrolls the exact selected retained version once with explicit occurrence and loop choices', async () => {
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedStreams, retainedExplicit]);
+    vi.mocked(plans.enrollInChapterStreams).mockResolvedValueOnce(retainedEnrollment);
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValueOnce([first, second]).mockResolvedValueOnce([first, second, retainedEnrollment]);
+    render(<PlanPanel api={plans} />);
+    const starts = await screen.findAllByLabelText('Retained starting chapter') as HTMLSelectElement[];
+    const loops = screen.getAllByLabelText('Retained stream loops') as HTMLInputElement[];
+    expect(Array.from(starts[0].options, option => option.text)).toEqual(['Book 19 · Chapter 1', 'Book 19 · Chapter 1']);
+    fireEvent.change(starts[0], { target: { value: '1' } });
+    fireEvent.click(loops[1]);
+    const submit = screen.getByRole('button', { name: 'Create retained enrollment' });
+    fireEvent.click(submit); fireEvent.click(submit);
+
+    await waitFor(() => expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1));
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledWith(retainedStreams.id, [
+      { streamId: 'repeat', startingPosition: 1, loopAfterEnd: true },
+      { streamId: 'short', startingPosition: 0, loopAfterEnd: false },
+    ]);
+    expect(await screen.findByText(/Retained-plan enrollment retained-enrollment was created for definition version retained-version-1/)).toBeTruthy();
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(retainedEnrollment.id);
+  });
+
+  it('retains selected-version choices after rejection and permits one explicit retry', async () => {
+    let rejectEnrollment!: (reason: unknown) => void;
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedStreams]);
+    vi.mocked(plans.enrollInChapterStreams)
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectEnrollment = reject; }))
+      .mockResolvedValueOnce(retainedEnrollment);
+    render(<PlanPanel api={plans} />);
+    const starts = await screen.findAllByLabelText('Retained starting chapter') as HTMLSelectElement[];
+    fireEvent.change(starts[0], { target: { value: '1' } });
+    const submit = screen.getByRole('button', { name: 'Create retained enrollment' });
+    fireEvent.click(submit); fireEvent.click(submit);
+    expect((screen.getByRole('button', { name: 'Creating retained enrollment…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
+    await act(async () => { rejectEnrollment(new Error('retained enrollment rejected')); });
+    expect(await screen.findByText(/Could not create retained-plan enrollment: Error: retained enrollment rejected/)).toBeTruthy();
+    expect((screen.getAllByLabelText('Retained starting chapter')[0] as HTMLSelectElement).value).toBe('1');
+    fireEvent.click(screen.getByRole('button', { name: 'Create retained enrollment' }));
+    await waitFor(() => expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(2));
+  });
+
+  it('retains confirmed enrollment across selection change and failed post-commit discovery', async () => {
+    let resolveEnrollment!: (value: PlanEnrollment) => void;
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedStreams, retainedExplicit]);
+    vi.mocked(plans.enrollInChapterStreams).mockImplementationOnce(() => new Promise(resolve => { resolveEnrollment = resolve; }));
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValueOnce([first, second]).mockRejectedValueOnce(new Error('retained refresh offline'));
+    render(<PlanPanel api={plans} />);
+    await screen.findByRole('button', { name: 'Create retained enrollment' });
+    fireEvent.click(screen.getByRole('button', { name: 'Create retained enrollment' }));
+    const definitionSelect = screen.getByLabelText('Retained plan definition') as HTMLSelectElement;
+    fireEvent.change(definitionSelect, { target: { value: retainedExplicit.id } });
+    expect(screen.getByText('This retained calendar plan cannot be enrolled as chapter streams.')).toBeTruthy();
+    await act(async () => { resolveEnrollment(retainedEnrollment); });
+
+    expect(definitionSelect.value).toBe(retainedExplicit.id);
+    expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(retainedEnrollment.id);
+    expect(screen.queryByText(/retained refresh offline/)).toBeNull();
+    fireEvent.change(definitionSelect, { target: { value: retainedStreams.id } });
+    expect(await screen.findByText(/Retained-plan enrollment was created, but retained plans could not be refreshed: Error: retained refresh offline/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Create retained enrollment' })).toBeNull();
+    expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses stale retained-enrollment rejection after selection and settlement after API replacement or unmount', async () => {
+    let rejectSelection!: (reason: unknown) => void;
+    let resolveReplacement!: (value: PlanEnrollment) => void;
+    let rejectUnmount!: (reason: unknown) => void;
+    const oldApi = api();
+    const currentApi = api();
+    vi.mocked(oldApi.listLatestPlanDefinitionVersions).mockResolvedValue([retainedStreams, retainedExplicit]);
+    vi.mocked(oldApi.enrollInChapterStreams)
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectSelection = reject; }))
+      .mockImplementationOnce(() => new Promise(resolve => { resolveReplacement = resolve; }));
+    vi.mocked(currentApi.listLatestPlanDefinitionVersions).mockResolvedValue([retainedStreams]);
+    const view = render(<PlanPanel api={oldApi} />);
+    await screen.findByRole('button', { name: 'Create retained enrollment' });
+    fireEvent.click(screen.getByRole('button', { name: 'Create retained enrollment' }));
+    fireEvent.change(screen.getByLabelText('Retained plan definition'), { target: { value: retainedExplicit.id } });
+    await act(async () => { rejectSelection(new Error('stale retained rejection')); });
+    expect(screen.queryByText(/stale retained rejection/)).toBeNull();
+    fireEvent.change(screen.getByLabelText('Retained plan definition'), { target: { value: retainedStreams.id } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create retained enrollment' }));
+    view.rerender(<PlanPanel api={currentApi} />);
+    await act(async () => { resolveReplacement(retainedEnrollment); });
+    expect(screen.queryByText(/Retained-plan enrollment retained-enrollment/)).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Create retained enrollment' })).toBeTruthy();
+    view.unmount();
+
+    const lateApi = api();
+    vi.mocked(lateApi.listLatestPlanDefinitionVersions).mockResolvedValue([retainedStreams]);
+    vi.mocked(lateApi.enrollInChapterStreams).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectUnmount = reject; }));
+    const lateView = render(<PlanPanel api={lateApi} />);
+    await screen.findByRole('button', { name: 'Create retained enrollment' });
+    fireEvent.click(screen.getByRole('button', { name: 'Create retained enrollment' }));
+    lateView.unmount();
+    await act(async () => { rejectUnmount(new Error('late unmount rejection')); });
+    expect(lateView.container.textContent).toBe('');
   });
 
   it('shows core-ordered enrollments and read-only current assignments', async () => {

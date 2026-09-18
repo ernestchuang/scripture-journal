@@ -223,6 +223,30 @@ describe('native application close lifecycle', () => {
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this while browsing definitions');
   });
 
+  it('preserves and autosaves dirty writing while enrolling in a selected retained definition', async () => {
+    const definition = { id: 'retained-version', planId: 'retained-plan', version: 2, createdAt: '2026-09-18T00:00:00Z', definition: { schemaVersion: 1, name: 'Retained streams', schedule: { kind: 'chapterStreams', streams: [{ id: 'retained', name: 'Retained stream', chapters: [{ book: 43, chapter: 1 }] }] } } };
+    const enrollment = { id: 'retained-enrollment', definitionVersionId: definition.id, createdAt: '2026-09-18T00:00:01Z' };
+    native.listLatestPlanDefinitionVersions.mockResolvedValue([definition]);
+    native.listPlanEnrollments.mockResolvedValueOnce([]).mockResolvedValueOnce([enrollment]);
+    native.enrollInChapterStreams.mockResolvedValue(enrollment);
+    native.getPlanDefinitionVersion.mockResolvedValue(definition);
+    native.activePlanAssignments.mockResolvedValue([]);
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    const enroll = await screen.findByRole('button', { name: 'Create retained enrollment' });
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Keep this while retained enrolling' } });
+    fireEvent.click(enroll);
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(native.enrollInChapterStreams).toHaveBeenCalledWith(definition.id, [{ streamId: 'retained', startingPosition: 0, loopAfterEnd: true }]);
+    expect(native.saveEntry).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while retained enrolling' } });
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this while retained enrolling');
+  });
+
   it('preserves and autosaves dirty writing while exporting a selected retained definition', async () => {
     native.listLatestPlanDefinitionVersions.mockResolvedValue([
       { id: 'definition-1', planId: 'plan-1', version: 1, createdAt: '2026-09-18T00:00:00Z', definition: { schemaVersion: 1, name: 'Retained export', schedule: { kind: 'explicitSchedule', days: [{ day: 1, passages: [{ book: 43, chapter: 3 }] }] } } },
