@@ -455,8 +455,21 @@ fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
     let mut store = JournalStore::open(&path).unwrap();
+    let mut original_definition = stream_definition("Original");
+    let PlanSchedule::ChapterStreams { streams } = &mut original_definition.schedule else {
+        unreachable!();
+    };
+    streams
+        .iter_mut()
+        .find(|stream| stream.id == "old-testament")
+        .unwrap()
+        .chapters
+        .push(ChapterRef {
+            book: 1,
+            chapter: 3,
+        });
     let version = store
-        .create_plan_definition(stream_definition("Original"))
+        .create_plan_definition(original_definition.clone())
         .unwrap();
     let mut invalid = stream_selections(false);
     invalid[0].starting_position = 50;
@@ -467,7 +480,6 @@ fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
         .enroll_in_chapter_streams(&version.id, stream_selections(false))
         .unwrap();
     assert_eq!(enrollment.definition_version_id, version.id);
-    let original_definition = version.definition.clone();
     let mut edited_definition = stream_definition("Edited and reordered");
     let PlanSchedule::ChapterStreams { streams } = &mut edited_definition.schedule else {
         unreachable!();
@@ -485,6 +497,10 @@ fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
         ChapterRef {
             book: 1,
             chapter: 3,
+        },
+        ChapterRef {
+            book: 1,
+            chapter: 4,
         },
     ];
     let edited_version = store
@@ -519,7 +535,7 @@ fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
     let retained_progress = progress_fingerprint(&path);
     drop(store);
 
-    let store = JournalStore::open(&path).unwrap();
+    let mut store = JournalStore::open(&path).unwrap();
     let after = store.active_plan_assignments(&enrollment.id).unwrap();
     assert_eq!(after, advanced_before_reopen);
     assert_eq!(after.len(), 2);
@@ -545,6 +561,46 @@ fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
     );
     assert_eq!(progress_fingerprint(&path), retained_progress);
     assert!(retained_progress[3].contains(&completion.id));
+    let next_completion = store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: old.stream_id.clone(),
+            expected_assignment_id: old.id.clone(),
+            expected_progress_id: old.progress_id.clone(),
+        })
+        .unwrap();
+    let advanced_after_reopen = store.active_plan_assignments(&enrollment.id).unwrap();
+    let next_old = advanced_after_reopen
+        .iter()
+        .find(|assignment| assignment.stream_id == "old-testament")
+        .unwrap();
+    assert_eq!(
+        (
+            next_old.passage.book,
+            next_old.passage.chapter,
+            next_old.ordinal
+        ),
+        (1, 3, 3)
+    );
+    assert_eq!(
+        advanced_after_reopen
+            .iter()
+            .find(|assignment| assignment.stream_id == "new-testament")
+            .unwrap()
+            .id,
+        new.id
+    );
+    let retained_after_completion = progress_fingerprint(&path);
+    assert!(retained_after_completion[3].contains(&completion.id));
+    assert!(retained_after_completion[3].contains(&next_completion.id));
+    drop(store);
+
+    let store = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        store.active_plan_assignments(&enrollment.id).unwrap(),
+        advanced_after_reopen
+    );
+    assert_eq!(progress_fingerprint(&path), retained_after_completion);
     assert_eq!(
         store
             .get_plan_definition_version(&version.id)
