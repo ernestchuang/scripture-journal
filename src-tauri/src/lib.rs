@@ -765,6 +765,10 @@ mod plan_command_tests {
                 "+10000-01-01",
                 "-0001-01-01",
                 "2024-01-01Z",
+                " 2024-01-01",
+                "2024-01-01 ",
+                "2023-02-29",
+                "2024-02-30",
                 "２０２４-01-01",
             ] {
                 assert_eq!(
@@ -788,6 +792,36 @@ mod plan_command_tests {
                     retained_enrollments
                 );
             }
+            let aligned = enroll_in_calendar_for_store(
+                store.clone(),
+                CalendarEnrollmentRequest {
+                    definition_version_id: definition.id,
+                    start_date: "2024-02-28".into(),
+                    schedule_mode: CalendarScheduleMode::CalendarAligned,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(aligned.start_date.to_string(), "2024-02-28");
+            assert_eq!(aligned.schedule_mode, CalendarScheduleMode::CalendarAligned);
+            assert_eq!(
+                get_calendar_plan_enrollment_for_store(store.clone(), aligned.id.clone())
+                    .await
+                    .unwrap(),
+                Some(aligned.clone())
+            );
+            let aligned_assignments = calendar_plan_assignments_for_store(store, aligned.id)
+                .await
+                .unwrap();
+            assert_eq!(aligned_assignments.len(), 307);
+            assert_eq!(aligned_assignments[0].local_date.to_string(), "2024-02-28");
+            assert_eq!(aligned_assignments[0].definition_day, 59);
+            assert_eq!(aligned_assignments[1].local_date.to_string(), "2024-03-01");
+            assert_eq!(aligned_assignments[1].definition_day, 60);
+            assert_eq!(
+                aligned_assignments.last().unwrap().local_date.to_string(),
+                "2024-12-31"
+            );
         });
     }
 
