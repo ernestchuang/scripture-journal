@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 
 test.beforeEach(async ({ page }) => {
   await page.route('https://bible-api.com/**', route => route.abort());
@@ -42,6 +43,49 @@ test('system dark bootstrap also works without a saved preference', async ({ pag
   await page.route('**/src/main.tsx', route => route.abort());
   await page.goto('/');
   await expect(page.locator('html')).toHaveCSS('background-color', 'rgb(29, 36, 32)');
+});
+
+test('corrupt optional palettes cannot override a saved dark startup', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.addInitScript(() => {
+    localStorage.setItem('scripture-journal.appearance', 'dark');
+    localStorage.setItem('scripture-journal.custom-themes', '{bad');
+    localStorage.setItem('scripture-journal.omarchy-theme', '{also bad');
+  });
+  await page.route('**/src/main.tsx', route => route.abort());
+  await page.goto('/');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('html')).toHaveCSS('background-color', 'rgb(29, 36, 32)');
+});
+
+test('failed theme replacement leaves the active palette unchanged', async ({ page }) => {
+  const source = readFileSync('docs/themes/forest-night.toml', 'utf8');
+  await page.goto('/');
+  await page.getByLabel('Import theme').setInputFiles({ name: 'forest.toml', mimeType: 'text/plain', buffer: Buffer.from(source) });
+  await expect(page.getByRole('combobox', { name: 'Appearance' })).toHaveValue('theme:forest-night');
+  const prior = await page.locator('html').evaluate(element => getComputedStyle(element).backgroundColor);
+  await page.evaluate(() => { Storage.prototype.setItem = () => { throw new Error('Full storage'); }; });
+  await page.getByLabel('Import theme').setInputFiles({ name: 'replacement.toml', mimeType: 'text/plain',
+    buffer: Buffer.from(source.replace(/app-background = "#[0-9a-f]+"/i, 'app-background = "#ffffff"')) });
+  await expect(page.getByText(/Theme import failed/)).toBeVisible();
+  // Force reapplication: a failed import must not silently replace the in-memory palette.
+  await page.getByRole('combobox', { name: 'Appearance' }).selectOption('dark');
+  await page.getByRole('combobox', { name: 'Appearance' }).selectOption('theme:forest-night');
+  await expect(page.locator('html')).toHaveCSS('background-color', prior);
+});
+
+test('import reports when the palette saves but its selected preference cannot persist', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key === 'scripture-journal.appearance') throw new Error('Preference write unavailable');
+      return original.call(this, key, value);
+    };
+  });
+  await page.getByLabel('Import theme').setInputFiles('docs/themes/forest-night.toml');
+  await expect(page.getByRole('combobox', { name: 'Appearance' })).toHaveValue('theme:forest-night');
+  await expect(page.getByText('Appearance changed, but this device could not save your preference.')).toBeVisible();
 });
 
 test('invalid stored preference falls back to System', async ({ page }) => {

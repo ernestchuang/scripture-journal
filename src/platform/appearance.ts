@@ -76,7 +76,7 @@ export function useAppearance() {
         if (!window.scriptureAppearance.saveTheme(theme)) throw new Error('The theme could not be saved on this device.');
         setThemes(window.scriptureAppearance.getThemes());
         setImportError('');
-        window.scriptureAppearance.setPreference(`theme:${theme.id}`);
+        setStorageError(window.scriptureAppearance.setPreference(`theme:${theme.id}`) ? '' : 'Appearance changed, but this device could not save your preference.');
       } catch (error) {
         setImportError(`Theme import failed: ${error instanceof Error ? error.message : String(error)}`);
       }

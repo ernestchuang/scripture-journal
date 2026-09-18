@@ -101,9 +101,19 @@ const omarchyFallbacks: Record<ColorToken, string[]> = {
 
 export function parseOmarchyTheme(source: string): PortableTheme {
   const values = new Map<string, string>();
+  const colorKeys = new Set([...Object.values(omarchyFallbacks).flat(), 'bg', 'fg', 'lighter_bg', 'dark_fg']);
   for (const rawLine of source.split(/\r?\n/)) {
-    const match = rawLine.match(/^\s*([A-Za-z0-9_-]+)\s*=\s*["'](#[0-9a-fA-F]{6})["']/);
-    if (match) values.set(match[1], match[2].toLowerCase());
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const match = line.match(/^([A-Za-z0-9_-]+)\s*=\s*(?:"([^"\\]*)"|'([^']*)')\s*(?:#.*)?$/);
+    if (!match || values.has(match[1])) throw new Error('The active Omarchy palette contains invalid or duplicate fields.');
+    const value = match[2] ?? match[3];
+    if (match[1] === 'mode' || match[1] === 'theme_type') {
+      if (value !== 'light' && value !== 'dark') throw new Error('The active Omarchy palette has an invalid mode.');
+    } else if (colorKeys.has(match[1]) && !hexColor.test(value)) {
+      throw new Error(`Invalid Omarchy color “${match[1]}”.`);
+    }
+    values.set(match[1], value.toLowerCase());
   }
   const background = values.get('background') ?? values.get('bg');
   const foreground = values.get('foreground') ?? values.get('fg');
@@ -111,7 +121,7 @@ export function parseOmarchyTheme(source: string): PortableTheme {
   for (const [canonical, legacy] of [['background', 'bg'], ['foreground', 'fg'], ['lighter_background', 'lighter_bg'], ['dark_foreground', 'dark_fg']] as const) {
     if (!values.has(canonical) && values.has(legacy)) values.set(canonical, values.get(legacy)!);
   }
-  const modeValue = source.match(/^\s*(?:mode|theme_type)\s*=\s*["'](light|dark)["']/m)?.[1];
+  const modeValue = values.get('mode') ?? values.get('theme_type');
   const luminance = Number.parseInt(background.slice(1, 3), 16) + Number.parseInt(background.slice(3, 5), 16) + Number.parseInt(background.slice(5, 7), 16);
   const mode: ThemeMode = modeValue === 'light' || modeValue === 'dark' ? modeValue : luminance > 382 ? 'light' : 'dark';
   const colors = {} as Record<ColorToken, string>;

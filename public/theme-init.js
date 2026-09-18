@@ -19,8 +19,12 @@
   try {
     const savedThemes = JSON.parse(localStorage.getItem(themesKey) || '[]');
     if (Array.isArray(savedThemes)) themes = savedThemes.filter(validTheme);
+  } catch { /* A damaged optional palette must not hide a saved dark preference. */ }
+  try {
     const savedOmarchy = JSON.parse(localStorage.getItem(omarchyKey) || 'null');
     if (validTheme(savedOmarchy)) omarchyTheme = savedOmarchy;
+  } catch { /* Fall back to built-in colors when the optional cache is damaged. */ }
+  try {
     const savedPreference = localStorage.getItem(preferenceKey);
     if (validPreference(savedPreference)) preference = savedPreference;
   } catch { /* Restricted or damaged storage must not prevent startup. */ }
@@ -57,8 +61,9 @@
     },
     saveTheme(theme) {
       if (!validTheme(theme)) return false;
-      themes = [...themes.filter(item => item.id !== theme.id), theme];
-      try { localStorage.setItem(themesKey, JSON.stringify(themes)); } catch { return false; }
+      const candidate = [...themes.filter(item => item.id !== theme.id), theme];
+      try { localStorage.setItem(themesKey, JSON.stringify(candidate)); } catch { return false; }
+      themes = candidate;
       return true;
     },
     setOmarchyTheme(theme) {
