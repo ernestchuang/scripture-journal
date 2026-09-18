@@ -51,6 +51,16 @@ const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanD
   undoPlanCompletion: vi.fn(async () => undefined),
 });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function clickRetainedExportOnCommit() {
   return new Promise<void>(resolve => {
     const observer = new MutationObserver(() => {
@@ -538,6 +548,98 @@ describe('retained plan panel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry calendar assignments' }));
     expect(await screen.findByText('No retained calendar assignments.')).toBeTruthy();
     expect(plans.enrollInCalendar).not.toHaveBeenCalled();
+  });
+
+  it('guards deferred calendar discovery across API replacement, retry, and unmount without replaying writes', async () => {
+    const oldRead = deferred<typeof calendarEnrollment | null>();
+    const currentRead = deferred<typeof calendarEnrollment | null>();
+    const unmountedRead = deferred<typeof calendarEnrollment | null>();
+    const oldEnrollment = { ...calendarEnrollment, id: 'calendar-old' };
+    const currentEnrollment = { ...calendarEnrollment, id: 'calendar-current' };
+    const oldPlans = api();
+    const currentPlans = api();
+    const unmountedPlans = api();
+    vi.mocked(oldPlans.listPlanEnrollments).mockResolvedValue([{ id: oldEnrollment.id, definitionVersionId: oldEnrollment.definitionVersionId, createdAt: oldEnrollment.createdAt }]);
+    vi.mocked(oldPlans.getCalendarPlanEnrollment).mockReturnValue(oldRead.promise);
+    vi.mocked(currentPlans.listPlanEnrollments).mockResolvedValue([{ id: currentEnrollment.id, definitionVersionId: currentEnrollment.definitionVersionId, createdAt: currentEnrollment.createdAt }]);
+    vi.mocked(currentPlans.getCalendarPlanEnrollment).mockReturnValue(currentRead.promise);
+    vi.mocked(unmountedPlans.listPlanEnrollments).mockResolvedValue([{ id: currentEnrollment.id, definitionVersionId: currentEnrollment.definitionVersionId, createdAt: currentEnrollment.createdAt }]);
+    vi.mocked(unmountedPlans.getCalendarPlanEnrollment).mockReturnValue(unmountedRead.promise);
+
+    const view = render(<PlanPanel api={oldPlans} />);
+    expect(await screen.findByText('Loading retained calendar enrollments…')).toBeTruthy();
+    await waitFor(() => expect(oldPlans.getCalendarPlanEnrollment).toHaveBeenCalledWith(oldEnrollment.id));
+    view.rerender(<PlanPanel api={currentPlans} />);
+    await waitFor(() => expect(currentPlans.getCalendarPlanEnrollment).toHaveBeenCalledWith(currentEnrollment.id));
+    await act(async () => { currentRead.resolve(currentEnrollment); });
+    expect((await screen.findByLabelText('Retained calendar enrollment') as HTMLSelectElement).value).toBe(currentEnrollment.id);
+    await act(async () => { oldRead.reject(new Error('stale replacement metadata')); });
+    expect(screen.queryByText(/stale replacement metadata/)).toBeNull();
+    expect(screen.queryByText(oldEnrollment.id)).toBeNull();
+    view.rerender(<PlanPanel api={unmountedPlans} />);
+    await waitFor(() => expect(unmountedPlans.getCalendarPlanEnrollment).toHaveBeenCalledWith(currentEnrollment.id));
+    view.unmount();
+    await act(async () => { unmountedRead.resolve(currentEnrollment); });
+    expect(view.container.textContent).toBe('');
+
+    for (const plans of [oldPlans, currentPlans, unmountedPlans]) {
+      expect(plans.enrollInCalendar).not.toHaveBeenCalled();
+      expect(plans.completePlanStream).not.toHaveBeenCalled();
+      expect(plans.undoPlanCompletion).not.toHaveBeenCalled();
+    }
+  });
+
+  it('guards deferred dated assignments across selection, retry, API replacement, and unmount', async () => {
+    const firstRead = deferred<DatedPlanAssignment[]>();
+    const failedRead = deferred<DatedPlanAssignment[]>();
+    const staleReplacementRead = deferred<DatedPlanAssignment[]>();
+    const replacementRead = deferred<DatedPlanAssignment[]>();
+    const unmountedRead = deferred<DatedPlanAssignment[]>();
+    const one = { ...calendarEnrollment, id: 'calendar-deferred-one' };
+    const two = { ...calendarEnrollment, id: 'calendar-deferred-two', startDate: '2026-04-02' };
+    const enrollmentRows = [one, two].map(item => ({ id: item.id, definitionVersionId: item.definitionVersionId, createdAt: item.createdAt }));
+    const oldPlans = api();
+    const replacementPlans = api();
+    for (const plans of [oldPlans, replacementPlans]) {
+      vi.mocked(plans.listPlanEnrollments).mockResolvedValue(enrollmentRows);
+      vi.mocked(plans.getCalendarPlanEnrollment).mockImplementation(async id => id === one.id ? one : two);
+    }
+    vi.mocked(oldPlans.calendarPlanAssignments).mockImplementation(id => id === one.id ? firstRead.promise : failedRead.promise);
+    let replacementCurrentReads = 0;
+    vi.mocked(replacementPlans.calendarPlanAssignments).mockImplementation(id => {
+      if (id === two.id) return staleReplacementRead.promise;
+      replacementCurrentReads += 1;
+      return replacementCurrentReads === 1 ? replacementRead.promise : unmountedRead.promise;
+    });
+
+    const view = render(<PlanPanel api={oldPlans} />);
+    const select = await screen.findByLabelText('Retained calendar enrollment');
+    expect(await screen.findByText('Loading dated calendar assignments…')).toBeTruthy();
+    expect(oldPlans.calendarPlanAssignments).toHaveBeenCalledWith(one.id);
+    fireEvent.change(select, { target: { value: two.id } });
+    await waitFor(() => expect(oldPlans.calendarPlanAssignments).toHaveBeenCalledWith(two.id));
+    await act(async () => { firstRead.reject(new Error('stale first rejection')); });
+    expect(screen.queryByText(/stale first rejection/)).toBeNull();
+    await act(async () => { failedRead.reject(new Error('selected assignments offline')); });
+    expect(await screen.findByText(/selected assignments offline/)).toBeTruthy();
+
+    view.rerender(<PlanPanel api={replacementPlans} />);
+    await waitFor(() => expect(replacementPlans.calendarPlanAssignments).toHaveBeenCalledWith(one.id));
+    await act(async () => { staleReplacementRead.reject(new Error('stale replacement rejection')); });
+    expect(screen.queryByText(/stale replacement rejection/)).toBeNull();
+    await act(async () => { replacementRead.reject(new Error('replacement assignments offline')); });
+    expect(await screen.findByText(/replacement assignments offline/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry calendar assignments' }));
+    await waitFor(() => expect(replacementCurrentReads).toBe(2));
+    view.unmount();
+    await act(async () => { unmountedRead.reject(new Error('unmounted rejection')); });
+    expect(view.container.textContent).toBe('');
+
+    for (const plans of [oldPlans, replacementPlans]) {
+      expect(plans.enrollInCalendar).not.toHaveBeenCalled();
+      expect(plans.completePlanStream).not.toHaveBeenCalled();
+      expect(plans.undoPlanCompletion).not.toHaveBeenCalled();
+    }
   });
 
   it('discards stale dated-assignment responses after calendar selection and unmount', async () => {
