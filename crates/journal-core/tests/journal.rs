@@ -313,6 +313,143 @@ fn stream_selections(loop_after_end: bool) -> Vec<StreamEnrollment> {
     ]
 }
 
+fn progress_fingerprint(path: &std::path::Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    [
+        "SELECT group_concat(id||':'||definition_version_id||':'||created_at,'|') FROM (SELECT * FROM plan_enrollments ORDER BY id)",
+        "SELECT group_concat(enrollment_id||':'||stream_id||':'||loop_after_end,'|') FROM (SELECT * FROM plan_enrollment_streams ORDER BY enrollment_id,stream_id)",
+        "SELECT group_concat(id||':'||enrollment_id||':'||stream_id||':'||ordinal||':'||cycle||':'||passage||':'||COALESCE(stream_position,'null'),'|') FROM (SELECT * FROM plan_assignments ORDER BY id)",
+        "SELECT group_concat(id||':'||assignment_id||':'||completed_at,'|') FROM (SELECT * FROM reading_completions ORDER BY id)",
+        "SELECT group_concat(id||':'||completion_id||':'||undone_at,'|') FROM (SELECT * FROM reading_completion_undos ORDER BY id)",
+        "SELECT group_concat(id||':'||enrollment_id||':'||stream_id||':'||sequence||':'||assignment_id||':'||created_at,'|') FROM (SELECT * FROM plan_stream_progress_epochs ORDER BY id)",
+    ]
+    .into_iter()
+    .map(|query| {
+        conn.query_row(query, [], |row| row.get::<_, Option<String>>(0))
+            .unwrap()
+            .unwrap_or_default()
+    })
+    .collect()
+}
+
+#[test]
+fn enrollment_failure_after_partial_stream_writes_rolls_back_exactly() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Injected enrollment failure"))
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER inject_enrollment_failure BEFORE INSERT ON plan_assignments
+         WHEN NEW.stream_id='new-testament'
+         BEGIN SELECT RAISE(ABORT,'injected enrollment failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+    let before = progress_fingerprint(&path);
+
+    let mut store = JournalStore::open(&path).unwrap();
+    assert!(store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap_err()
+        .to_string()
+        .contains("injected enrollment failure"));
+    drop(store);
+    assert_eq!(progress_fingerprint(&path), before);
+}
+
+#[test]
+fn completion_failure_after_history_and_assignment_writes_rolls_back_exactly() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Injected completion failure"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let assignment = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|value| value.stream_id == "old-testament")
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER inject_completion_failure BEFORE INSERT ON plan_stream_progress_epochs
+         WHEN NEW.stream_id='old-testament' AND NEW.sequence=2
+         BEGIN SELECT RAISE(ABORT,'injected completion failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+    let before = progress_fingerprint(&path);
+
+    let mut store = JournalStore::open(&path).unwrap();
+    assert!(store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id,
+            stream_id: assignment.stream_id,
+            expected_assignment_id: assignment.id,
+            expected_progress_id: assignment.progress_id,
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("injected completion failure"));
+    drop(store);
+    assert_eq!(progress_fingerprint(&path), before);
+}
+
+#[test]
+fn undo_failure_after_undo_history_write_rolls_back_exactly() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Injected undo failure"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let assignment = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|value| value.stream_id == "old-testament")
+        .unwrap();
+    let completion = store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id,
+            stream_id: assignment.stream_id,
+            expected_assignment_id: assignment.id,
+            expected_progress_id: assignment.progress_id,
+        })
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER inject_undo_failure BEFORE INSERT ON plan_stream_progress_epochs
+         WHEN NEW.stream_id='old-testament' AND NEW.sequence=3
+         BEGIN SELECT RAISE(ABORT,'injected undo failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+    let before = progress_fingerprint(&path);
+
+    let mut store = JournalStore::open(&path).unwrap();
+    assert!(store
+        .undo_plan_completion(&completion.id)
+        .unwrap_err()
+        .to_string()
+        .contains("injected undo failure"));
+    drop(store);
+    assert_eq!(progress_fingerprint(&path), before);
+}
+
 #[test]
 fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
     let dir = TempDir::new().unwrap();
