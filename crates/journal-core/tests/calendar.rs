@@ -194,6 +194,124 @@ fn calendar_adoption_replaces_only_future_generation_and_rejects_stale_rows() {
         after
     );
 }
+
+#[test]
+fn stream_adoption_rejects_an_exhausted_enrolled_stream_without_writes() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("adopt-exhausted.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let original = PlanDefinition {
+        schema_version: 1,
+        name: "Two streams".into(),
+        description: None,
+        schedule: PlanSchedule::ChapterStreams {
+            streams: vec![
+                ChapterStream {
+                    id: "a".into(),
+                    name: "A".into(),
+                    chapters: vec![
+                        ChapterRef {
+                            book: 43,
+                            chapter: 1,
+                        },
+                        ChapterRef {
+                            book: 43,
+                            chapter: 2,
+                        },
+                    ],
+                },
+                ChapterStream {
+                    id: "b".into(),
+                    name: "B".into(),
+                    chapters: vec![ChapterRef {
+                        book: 19,
+                        chapter: 1,
+                    }],
+                },
+            ],
+        },
+    };
+    let first = store.create_plan_definition(original).unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(
+            &first.id,
+            vec![
+                StreamEnrollment {
+                    stream_id: "a".into(),
+                    starting_position: 0,
+                    loop_after_end: false,
+                },
+                StreamEnrollment {
+                    stream_id: "b".into(),
+                    starting_position: 0,
+                    loop_after_end: false,
+                },
+            ],
+        )
+        .unwrap();
+    let assignments = store.active_plan_assignments(&enrollment.id).unwrap();
+    let b = assignments
+        .iter()
+        .find(|item| item.stream_id == "b")
+        .unwrap();
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: "b".into(),
+            expected_assignment_id: b.id.clone(),
+            expected_progress_id: b.progress_id.clone(),
+        })
+        .unwrap();
+    let a = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    let target = PlanDefinition {
+        schema_version: 1,
+        name: "Missing B".into(),
+        description: None,
+        schedule: PlanSchedule::ChapterStreams {
+            streams: vec![ChapterStream {
+                id: "a".into(),
+                name: "A".into(),
+                chapters: vec![
+                    ChapterRef {
+                        book: 43,
+                        chapter: 1,
+                    },
+                    ChapterRef {
+                        book: 43,
+                        chapter: 3,
+                    },
+                ],
+            }],
+        },
+    };
+    let target = store
+        .create_plan_definition_version(&first.plan_id, target)
+        .unwrap();
+    let error = store
+        .adopt_chapter_stream_plan(AdoptStreamPlanRequest {
+            enrollment_id: enrollment.id.clone(),
+            expected_definition_version_id: first.id,
+            target_definition_version_id: target.id,
+            streams: vec![StreamAdoptionBoundary {
+                stream_id: "a".into(),
+                assignment_id: a.id,
+                progress_id: a.progress_id,
+            }],
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("stream set") || error.to_string().contains("exhausted"));
+    assert!(store
+        .plan_adoption_history(&enrollment.id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.active_plan_assignments(&enrollment.id).unwrap().len(),
+        1
+    );
+}
 use tempfile::TempDir;
 
 #[test]

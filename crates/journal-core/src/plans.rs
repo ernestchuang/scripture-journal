@@ -845,12 +845,35 @@ pub(crate) fn adopt_stream_plan(
         anyhow::bail!("Target schedule kind is incompatible")
     };
     let active = active_assignments(&tx, &request.enrollment_id)?;
+    let enrolled_stream_ids = {
+        let mut statement = tx.prepare(
+            "SELECT stream_id FROM plan_enrollment_streams WHERE enrollment_id=?1 ORDER BY stream_id",
+        )?;
+        let ids = statement
+            .query_map([&request.enrollment_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids
+    };
     ensure!(
-        !active.is_empty(),
-        "Enrollment has no active stream frontier"
+        !enrolled_stream_ids.is_empty(),
+        "Enrollment has no enrolled streams"
     );
     ensure!(
-        request.streams.len() == active.len() && target_streams.len() == active.len(),
+        request.streams.len() == enrolled_stream_ids.len()
+            && target_streams.len() == enrolled_stream_ids.len(),
+        "Target stream set is incompatible"
+    );
+    ensure!(
+        active.len() == enrolled_stream_ids.len(),
+        "A stopped stream is exhausted; start a new enrollment to adopt this version"
+    );
+    let enrolled_set: HashSet<&str> = enrolled_stream_ids.iter().map(String::as_str).collect();
+    let target_set: HashSet<&str> = target_streams
+        .iter()
+        .map(|stream| stream.id.as_str())
+        .collect();
+    ensure!(
+        target_set == enrolled_set,
         "Target stream set is incompatible"
     );
     let mut requested_ids = HashSet::new();

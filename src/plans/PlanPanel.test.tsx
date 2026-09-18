@@ -93,6 +93,24 @@ describe('retained plan panel', () => {
     expect(await screen.findByText(/Adopted definition version version-later/)).toBeTruthy();
   });
 
+  it('retains a confirmed adoption that settles after switching away and back', async () => {
+    const pending = deferred<{ id: string; enrollmentId: string; previousDefinitionVersionId: string; targetDefinitionVersionId: string; scheduleKind: 'chapter-streams'; createdAt: string }>();
+    const later = { ...definition('version-later', 'Later plan'), version: 2 };
+    const plans = {
+      ...api(),
+      listLatestPlanDefinitionVersions: vi.fn(async () => [later]),
+      planAdoptionHistory: vi.fn(async () => []),
+      adoptChapterStreamPlan: vi.fn(() => pending.promise),
+    };
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Adopt version 2 for future assignments' }));
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: second.id } });
+    fireEvent.change(screen.getByLabelText('Retained enrollment'), { target: { value: first.id } });
+    await act(async () => pending.resolve({ id: 'late-adoption', enrollmentId: first.id, previousDefinitionVersionId: first.definitionVersionId, targetDefinitionVersionId: later.id, scheduleKind: 'chapter-streams', createdAt: '2026-09-18T00:00:10Z' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Adopt version 2 for future assignments' })).toBeNull());
+    expect(plans.adoptChapterStreamPlan).toHaveBeenCalledTimes(1);
+  });
+
   it('makes selection invalidation precede export ownership without a delayed reset', () => {
     const delayedReset = { epoch: 0, selectedDefinitionId: retainedDefinition.id };
     const prematurelyStartedEpoch = startRetainedExport(delayedReset);

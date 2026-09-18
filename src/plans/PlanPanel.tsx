@@ -939,8 +939,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
         targetDefinitionVersionId: target.id,
         streams: current.assignments.map(item => ({ streamId: item.streamId, assignmentId: item.id, progressId: item.progressId })),
       });
-      if (epoch !== adoptionEpoch.current || selectedIdRef.current !== enrollment.id) return;
       setAdoptionHistory(value => ({ ...value, [enrollment.id]: [...(value[enrollment.id] ?? []), event] }));
+      if (epoch !== adoptionEpoch.current || selectedIdRef.current !== enrollment.id) return;
       setAdoptionMessage(`Adopted definition version ${event.targetDefinitionVersionId} for future stream assignments.`);
       setDetailAttempt(value => value + 1);
     } catch (error) { if (epoch === adoptionEpoch.current && selectedIdRef.current === enrollment.id) setAdoptionMessage(`Could not adopt plan version: ${String(error)}`); }
@@ -956,8 +956,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
     setAdoptingEnrollmentId(enrollment.id); setAdoptionMessage('');
     try {
       const event = await api.adoptCalendarPlan({ enrollmentId: enrollment.id, expectedDefinitionVersionId: effectiveVersionId(enrollment), targetDefinitionVersionId: selectedDefinition.id, effectiveFromLocalDate: assignment.localDate, expectedAssignmentId: assignment.id });
-      if (epoch !== adoptionEpoch.current || selectedCalendarEnrollmentIdRef.current !== enrollment.id) return;
       setAdoptionHistory(value => ({ ...value, [enrollment.id]: [...(value[enrollment.id] ?? []), event] }));
+      if (epoch !== adoptionEpoch.current || selectedCalendarEnrollmentIdRef.current !== enrollment.id) return;
       setAdoptionMessage(`Adopted definition version ${event.targetDefinitionVersionId} from ${assignment.localDate}.`);
       setCalendarAssignmentAttempt(value => value + 1);
     } catch (error) { if (epoch === adoptionEpoch.current && selectedCalendarEnrollmentIdRef.current === enrollment.id) setAdoptionMessage(`Could not adopt calendar version: ${String(error)}`); }
