@@ -7,6 +7,7 @@ import {
   nativePlans,
   type CompleteStreamRequest,
   type PlanAssignment,
+  type PlanDefinition,
   type PlanDefinitionVersion,
   type PlanEnrollment,
   type PlanCompletionHistoryItem,
@@ -84,9 +85,11 @@ describe('native plan-definition adapter', () => {
   beforeEach(() => native.invoke.mockReset());
 
   it('maps each typed operation to its exact native command and camelCase arguments', async () => {
+    const edited: PlanDefinition = { ...version.definition, name: 'Edited plan' };
     native.invoke
       .mockResolvedValueOnce(version)
       .mockResolvedValueOnce(streamVersion)
+      .mockResolvedValueOnce({ ...version, id: 'version-3', version: 2, definition: edited })
       .mockResolvedValueOnce('{"schemaVersion":1}')
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce([version])
@@ -94,16 +97,29 @@ describe('native plan-definition adapter', () => {
 
     await expect(nativePlans.registerFourStreamPlan()).resolves.toEqual(version);
     await expect(nativePlans.importPlanDefinitionJson('{"schemaVersion":1}')).resolves.toEqual(streamVersion);
+    await expect(nativePlans.createPlanDefinitionVersion('plan-1', edited)).resolves.toMatchObject({ version: 2, definition: edited });
     await expect(nativePlans.exportPlanDefinitionJson('version-1')).resolves.toBe('{"schemaVersion":1}');
     await expect(nativePlans.getPlanDefinitionVersion('missing-version')).resolves.toBeNull();
     await expect(nativePlans.listPlanDefinitionVersions('plan-1')).resolves.toEqual([version]);
     await expect(nativePlans.listLatestPlanDefinitionVersions()).resolves.toEqual([streamVersion]);
     expect(native.invoke).toHaveBeenNthCalledWith(1, 'register_four_stream_plan');
     expect(native.invoke).toHaveBeenNthCalledWith(2, 'import_plan_definition_json', { input: '{"schemaVersion":1}' });
-    expect(native.invoke).toHaveBeenNthCalledWith(3, 'export_plan_definition_json', { versionId: 'version-1' });
-    expect(native.invoke).toHaveBeenNthCalledWith(4, 'get_plan_definition_version', { versionId: 'missing-version' });
-    expect(native.invoke).toHaveBeenNthCalledWith(5, 'list_plan_definition_versions', { planId: 'plan-1' });
-    expect(native.invoke).toHaveBeenNthCalledWith(6, 'list_latest_plan_definition_versions');
+    expect(native.invoke).toHaveBeenNthCalledWith(3, 'create_plan_definition_version', { planId: 'plan-1', definition: edited });
+    expect(native.invoke).toHaveBeenNthCalledWith(4, 'export_plan_definition_json', { versionId: 'version-1' });
+    expect(native.invoke).toHaveBeenNthCalledWith(5, 'get_plan_definition_version', { versionId: 'missing-version' });
+    expect(native.invoke).toHaveBeenNthCalledWith(6, 'list_plan_definition_versions', { planId: 'plan-1' });
+    expect(native.invoke).toHaveBeenNthCalledWith(7, 'list_latest_plan_definition_versions');
+  });
+
+  it('propagates version-creation rejection without retrying', async () => {
+    const error = new Error('Plan not found');
+    native.invoke.mockRejectedValueOnce(error);
+    await expect(nativePlans.createPlanDefinitionVersion('missing-plan', version.definition)).rejects.toBe(error);
+    expect(native.invoke).toHaveBeenCalledTimes(1);
+    expect(native.invoke).toHaveBeenCalledWith('create_plan_definition_version', {
+      planId: 'missing-plan',
+      definition: version.definition,
+    });
   });
 
   it('propagates a native mutation error without retrying the import', async () => {

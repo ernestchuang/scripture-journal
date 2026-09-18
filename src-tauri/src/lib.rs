@@ -1,7 +1,7 @@
 use journal_core::{
     CompleteStreamRequest, Entry, ExportReport, JournalStore, PlanAssignment, PlanCompletion,
-    PlanCompletionHistoryItem, PlanDefinitionVersion, PlanEnrollment, Revision, SaveRequest,
-    StreamEnrollment,
+    PlanCompletionHistoryItem, PlanDefinition, PlanDefinitionVersion, PlanEnrollment, Revision,
+    SaveRequest, StreamEnrollment,
 };
 use std::{
     collections::HashSet,
@@ -239,6 +239,28 @@ async fn import_plan_definition_json(
     input: String,
 ) -> Result<PlanDefinitionVersion, String> {
     import_plan_definition_json_for_store(state.journal.clone(), input).await
+}
+
+async fn create_plan_definition_version_for_store(
+    store: Arc<Mutex<JournalStore>>,
+    plan_id: String,
+    definition: PlanDefinition,
+) -> Result<PlanDefinitionVersion, String> {
+    run_store(store, move |journal| {
+        journal
+            .create_plan_definition_version(&plan_id, definition)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn create_plan_definition_version(
+    state: State<'_, AppState>,
+    plan_id: String,
+    definition: PlanDefinition,
+) -> Result<PlanDefinitionVersion, String> {
+    create_plan_definition_version_for_store(state.journal.clone(), plan_id, definition).await
 }
 
 async fn export_plan_definition_json_for_store(
@@ -533,6 +555,124 @@ mod plan_command_tests {
                 .await
                 .unwrap(),
                 before_invalid
+            );
+        });
+    }
+
+    #[test]
+    fn version_creation_appends_and_preserves_retained_progress_on_rejection() {
+        tauri::async_runtime::block_on(async {
+            let (_directory, store) = test_store();
+            let portable = r#"{"schemaVersion":1,"name":"Editable streams","schedule":{"kind":"chapterStreams","streams":[{"id":"stream","name":"Stream","chapters":[{"book":43,"chapter":1},{"book":43,"chapter":2}]}]}}"#;
+            let first = import_plan_definition_json_for_store(store.clone(), portable.into())
+                .await
+                .unwrap();
+            let enrollment = enroll_in_chapter_streams_for_store(
+                store.clone(),
+                first.id.clone(),
+                vec![StreamEnrollment {
+                    stream_id: "stream".into(),
+                    starting_position: 0,
+                    loop_after_end: true,
+                }],
+            )
+            .await
+            .unwrap();
+            let assignment =
+                active_plan_assignments_for_store(store.clone(), enrollment.id.clone())
+                    .await
+                    .unwrap()
+                    .remove(0);
+            complete_plan_stream_for_store(
+                store.clone(),
+                CompleteStreamRequest {
+                    enrollment_id: enrollment.id.clone(),
+                    stream_id: assignment.stream_id.clone(),
+                    expected_assignment_id: assignment.id,
+                    expected_progress_id: assignment.progress_id,
+                },
+            )
+            .await
+            .unwrap();
+            let retained_enrollments = list_plan_enrollments_for_store(store.clone())
+                .await
+                .unwrap();
+            let retained_assignments =
+                active_plan_assignments_for_store(store.clone(), enrollment.id.clone())
+                    .await
+                    .unwrap();
+            let retained_history =
+                plan_completion_history_for_store(store.clone(), enrollment.id.clone())
+                    .await
+                    .unwrap();
+
+            let mut edited = first.definition.clone();
+            edited.name = "Edited streams".into();
+            let second = create_plan_definition_version_for_store(
+                store.clone(),
+                first.plan_id.clone(),
+                edited.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(second.plan_id, first.plan_id);
+            assert_eq!(second.version, 2);
+            assert_eq!(second.definition, edited);
+            let retained_versions = vec![first.clone(), second];
+            assert_eq!(
+                list_plan_definition_versions_for_store(store.clone(), first.plan_id.clone())
+                    .await
+                    .unwrap(),
+                retained_versions
+            );
+            assert_eq!(
+                get_plan_definition_version_for_store(store.clone(), first.id.clone())
+                    .await
+                    .unwrap(),
+                Some(first.clone())
+            );
+
+            let mut invalid = first.definition.clone();
+            invalid.name.clear();
+            assert!(create_plan_definition_version_for_store(
+                store.clone(),
+                first.plan_id.clone(),
+                invalid,
+            )
+            .await
+            .unwrap_err()
+            .contains("Invalid plan name"));
+            assert!(create_plan_definition_version_for_store(
+                store.clone(),
+                "00000000-0000-4000-a000-000000000000".into(),
+                first.definition,
+            )
+            .await
+            .unwrap_err()
+            .contains("Plan not found"));
+            assert_eq!(
+                list_plan_definition_versions_for_store(store.clone(), first.plan_id.clone())
+                    .await
+                    .unwrap(),
+                retained_versions
+            );
+            assert_eq!(
+                list_plan_enrollments_for_store(store.clone())
+                    .await
+                    .unwrap(),
+                retained_enrollments
+            );
+            assert_eq!(
+                active_plan_assignments_for_store(store.clone(), enrollment.id.clone())
+                    .await
+                    .unwrap(),
+                retained_assignments
+            );
+            assert_eq!(
+                plan_completion_history_for_store(store, enrollment.id)
+                    .await
+                    .unwrap(),
+                retained_history
             );
         });
     }
@@ -1009,6 +1149,7 @@ pub fn run() {
             save_entry,
             register_four_stream_plan,
             import_plan_definition_json,
+            create_plan_definition_version,
             export_plan_definition_json,
             get_plan_definition_version,
             list_plan_definition_versions,
