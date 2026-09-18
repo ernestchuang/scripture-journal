@@ -82,6 +82,7 @@ export interface PlanDefinitionApi {
   exportPlanDefinitionJson(versionId: string): Promise<string>;
   getPlanDefinitionVersion(versionId: string): Promise<PlanDefinitionVersion | null>;
   listPlanDefinitionVersions(planId: string): Promise<PlanDefinitionVersion[]>;
+  listPlanEnrollments(): Promise<PlanEnrollment[]>;
   enrollInChapterStreams(
     definitionVersionId: string,
     streams: StreamEnrollment[],
@@ -101,6 +102,7 @@ export const nativePlans: PlanDefinitionApi = {
     invoke<PlanDefinitionVersion | null>('get_plan_definition_version', { versionId }),
   listPlanDefinitionVersions: planId =>
     invoke<PlanDefinitionVersion[]>('list_plan_definition_versions', { planId }),
+  listPlanEnrollments: () => invoke<PlanEnrollment[]>('list_plan_enrollments'),
   enrollInChapterStreams: (definitionVersionId, streams) =>
     invoke<PlanEnrollment>('enroll_in_chapter_streams', { definitionVersionId, streams }),
   activePlanAssignments: enrollmentId =>

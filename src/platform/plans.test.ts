@@ -97,6 +97,31 @@ describe('native plan-definition adapter', () => {
     expect(native.invoke).toHaveBeenCalledWith('import_plan_definition_json', { input: '{' });
   });
 
+  it('maps retained enrollment discovery and preserves ordered results', async () => {
+    const laterEnrollment: PlanEnrollment = {
+      ...enrollment,
+      id: 'enrollment-2',
+      createdAt: '2026-09-18T00:00:01Z',
+    };
+    native.invoke.mockResolvedValueOnce([enrollment, laterEnrollment]);
+
+    await expect(nativePlans.listPlanEnrollments()).resolves.toEqual([
+      enrollment,
+      laterEnrollment,
+    ]);
+    expect(native.invoke).toHaveBeenCalledTimes(1);
+    expect(native.invoke).toHaveBeenCalledWith('list_plan_enrollments');
+  });
+
+  it('propagates enrollment discovery errors without reporting results', async () => {
+    const error = new Error('Journal is unavailable; restart the app.');
+    native.invoke.mockRejectedValueOnce(error);
+
+    await expect(nativePlans.listPlanEnrollments()).rejects.toBe(error);
+    expect(native.invoke).toHaveBeenCalledTimes(1);
+    expect(native.invoke).toHaveBeenCalledWith('list_plan_enrollments');
+  });
+
   it('maps stream progress operations with the complete stale-completion precondition', async () => {
     native.invoke
       .mockResolvedValueOnce(enrollment)

@@ -300,6 +300,20 @@ async fn list_plan_definition_versions(
     list_plan_definition_versions_for_store(state.journal.clone(), plan_id).await
 }
 
+async fn list_plan_enrollments_for_store(
+    store: Arc<Mutex<JournalStore>>,
+) -> Result<Vec<PlanEnrollment>, String> {
+    run_store(store, |journal| {
+        journal.list_plan_enrollments().map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn list_plan_enrollments(state: State<'_, AppState>) -> Result<Vec<PlanEnrollment>, String> {
+    list_plan_enrollments_for_store(state.journal.clone()).await
+}
+
 async fn enroll_in_chapter_streams_for_store(
     store: Arc<Mutex<JournalStore>>,
     definition_version_id: String,
@@ -594,6 +608,69 @@ mod plan_command_tests {
             );
         });
     }
+
+    #[test]
+    fn enrollment_discovery_returns_retained_records_in_core_order() {
+        tauri::async_runtime::block_on(async {
+            let (_directory, store) = test_store();
+            assert!(list_plan_enrollments_for_store(store.clone())
+                .await
+                .unwrap()
+                .is_empty());
+            let definition = register_four_stream_plan_for_store(store.clone())
+                .await
+                .unwrap();
+            let selections = || {
+                vec![
+                    StreamEnrollment {
+                        stream_id: "old-testament".into(),
+                        starting_position: 0,
+                        loop_after_end: true,
+                    },
+                    StreamEnrollment {
+                        stream_id: "new-testament".into(),
+                        starting_position: 0,
+                        loop_after_end: true,
+                    },
+                    StreamEnrollment {
+                        stream_id: "psalms".into(),
+                        starting_position: 0,
+                        loop_after_end: true,
+                    },
+                    StreamEnrollment {
+                        stream_id: "proverbs".into(),
+                        starting_position: 0,
+                        loop_after_end: true,
+                    },
+                ]
+            };
+            let first = enroll_in_chapter_streams_for_store(
+                store.clone(),
+                definition.id.clone(),
+                selections(),
+            )
+            .await
+            .unwrap();
+            let second =
+                enroll_in_chapter_streams_for_store(store.clone(), definition.id, selections())
+                    .await
+                    .unwrap();
+            let mut expected = vec![first, second];
+            expected
+                .sort_by_key(|enrollment| (enrollment.created_at.clone(), enrollment.id.clone()));
+            let listed = list_plan_enrollments_for_store(store).await.unwrap();
+            assert_eq!(listed, expected);
+            for enrollment in listed {
+                let serialized = serde_json::to_value(enrollment.clone()).unwrap();
+                assert_eq!(serialized["id"], enrollment.id);
+                assert_eq!(
+                    serialized["definitionVersionId"],
+                    enrollment.definition_version_id
+                );
+                assert_eq!(serialized["createdAt"], enrollment.created_at);
+            }
+        });
+    }
 }
 
 #[tauri::command]
@@ -684,6 +761,7 @@ pub fn run() {
             export_plan_definition_json,
             get_plan_definition_version,
             list_plan_definition_versions,
+            list_plan_enrollments,
             enroll_in_chapter_streams,
             active_plan_assignments,
             complete_plan_stream,
