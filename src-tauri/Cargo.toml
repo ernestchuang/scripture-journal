@@ -15,3 +15,5 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 journal-core = { path = "../crates/journal-core" }
 
+[dev-dependencies]
+tempfile = "3"

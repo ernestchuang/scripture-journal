@@ -63,24 +63,36 @@ fn appearance_color(background: &str) -> Result<tauri::window::Color, String> {
 }
 
 #[tauri::command]
-fn read_omarchy_theme() -> Result<Option<String>, String> {
-    #[cfg(target_os = "linux")]
-    {
-        let Some(home) = std::env::var_os("HOME") else {
-            return Ok(None);
-        };
-        let path = PathBuf::from(home).join(".local/state/omarchy/current/theme/colors.toml");
+async fn read_omarchy_theme(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let home = app.path().home_dir().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || read_system_palette(&home))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn read_system_palette(home: &std::path::Path) -> Result<Option<String>, String> {
+    // Detect the compatible file convention, not a distribution or OS brand.
+    // Older installations use .config; prefer the current source if both exist.
+    for relative in [
+        ".local/state/omarchy/current/theme/colors.toml",
+        ".config/omarchy/current/theme/colors.toml",
+    ] {
+        let path = home.join(relative);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Err("System palette source must be a regular file.".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        }
         match std::fs::File::open(path) {
-            Ok(file) => read_palette(file).map(Some),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.to_string()),
+            Ok(file) => return read_palette(file).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
         }
     }
-    #[cfg(not(target_os = "linux"))]
     Ok(None)
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn read_palette(reader: impl std::io::Read) -> Result<String, String> {
     use std::io::Read;
     let mut bytes = Vec::new();
@@ -97,6 +109,42 @@ fn read_palette(reader: impl std::io::Read) -> Result<String, String> {
 #[cfg(test)]
 mod appearance_tests {
     use super::*;
+
+    #[test]
+    fn system_palette_detection_is_optional_and_prefers_current_layout() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(read_system_palette(home.path()).unwrap(), None);
+        let legacy = home
+            .path()
+            .join(".config/omarchy/current/theme/colors.toml");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "legacy palette").unwrap();
+        assert_eq!(
+            read_system_palette(home.path()).unwrap().as_deref(),
+            Some("legacy palette")
+        );
+        let current = home
+            .path()
+            .join(".local/state/omarchy/current/theme/colors.toml");
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, "current palette").unwrap();
+        assert_eq!(
+            read_system_palette(home.path()).unwrap().as_deref(),
+            Some("current palette")
+        );
+        std::fs::write(&current, [255u8]).unwrap();
+        assert!(read_system_palette(home.path()).is_err());
+        std::fs::remove_file(&current).unwrap();
+        std::fs::create_dir(&current).unwrap();
+        assert!(read_system_palette(home.path()).is_err());
+        std::fs::remove_dir(current).unwrap();
+        assert_eq!(
+            read_system_palette(home.path()).unwrap().as_deref(),
+            Some("legacy palette")
+        );
+        std::fs::remove_file(legacy).unwrap();
+        assert_eq!(read_system_palette(home.path()).unwrap(), None);
+    }
 
     #[test]
     fn invalid_backgrounds_never_panic() {
