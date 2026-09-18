@@ -80,6 +80,108 @@ describe('retained plan panel', () => {
     expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
   });
 
+  it('refreshes retained definitions after confirmed registration without changing the existing selection', async () => {
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions)
+      .mockResolvedValueOnce([retainedDefinition, retainedExplicit])
+      .mockResolvedValueOnce([retainedDefinition, retainedExplicit, fourStream]);
+    render(<PlanPanel api={plans} />);
+    const select = await screen.findByLabelText('Retained plan definition') as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: retainedExplicit.id } });
+    fireEvent.click(screen.getByRole('button', { name: 'Set up four-stream plan' }));
+
+    await waitFor(() => expect(plans.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(2));
+    expect(Array.from(select.options, option => option.value)).toContain(fourStream.id);
+    expect(select.value).toBe(retainedExplicit.id);
+    expect(plans.registerFourStreamPlan).toHaveBeenCalledTimes(1);
+    expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
+  });
+
+  it('retains a confirmed import through refresh failure and retries only discovery', async () => {
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions)
+      .mockResolvedValueOnce([retainedDefinition, retainedExplicit])
+      .mockRejectedValueOnce(new Error('post-import discovery offline'))
+      .mockResolvedValueOnce([retainedDefinition, retainedExplicit, importedPlan]);
+    render(<PlanPanel api={plans} />);
+    const select = await screen.findByLabelText('Retained plan definition') as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: retainedExplicit.id } });
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"schemaVersion":1}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+
+    expect(await screen.findByText(/Retained definitions could not be refreshed after the confirmed write: Error: post-import discovery offline/)).toBeTruthy();
+    expect(Array.from(select.options, option => option.value)).toContain(importedPlan.id);
+    expect(select.value).toBe(retainedExplicit.id);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry retained definitions' }));
+    await waitFor(() => expect(plans.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(3));
+    expect(Array.from(select.options, option => option.value)).toContain(importedPlan.id);
+    expect(select.value).toBe(retainedExplicit.id);
+    expect(plans.importPlanDefinitionJson).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores an older post-import refresh after a newer write and later selection', async () => {
+    let resolveFirstRefresh!: (value: PlanDefinitionVersion[]) => void;
+    const newerImport = { ...importedPlan, id: 'newer-version', planId: 'newer-plan', definition: { ...importedPlan.definition, name: 'Newer imported plan' } };
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions)
+      .mockResolvedValueOnce([retainedDefinition, retainedExplicit])
+      .mockImplementationOnce(() => new Promise(resolve => { resolveFirstRefresh = resolve; }))
+      .mockResolvedValueOnce([retainedDefinition, retainedExplicit, newerImport]);
+    vi.mocked(plans.importPlanDefinitionJson).mockResolvedValueOnce(importedPlan).mockResolvedValueOnce(newerImport);
+    render(<PlanPanel api={plans} />);
+    const select = await screen.findByLabelText('Retained plan definition') as HTMLSelectElement;
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"first":true}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    await screen.findByText('Imported streams');
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"second":true}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    await screen.findByText('Newer imported plan');
+    fireEvent.change(select, { target: { value: retainedExplicit.id } });
+    await act(async () => { resolveFirstRefresh([retainedDefinition, importedPlan]); });
+
+    expect(select.value).toBe(retainedExplicit.id);
+    expect(Array.from(select.options, option => option.value)).toEqual([
+      retainedDefinition.id,
+      retainedExplicit.id,
+      newerImport.id,
+      importedPlan.id,
+    ]);
+    expect(plans.importPlanDefinitionJson).toHaveBeenCalledTimes(2);
+  });
+
+  it('discards post-write discovery settlement after API replacement and unmount', async () => {
+    let resolveOldRefresh!: (value: PlanDefinitionVersion[]) => void;
+    let rejectUnmountedRefresh!: (reason: unknown) => void;
+    const oldApi = api();
+    const currentApi = api();
+    vi.mocked(oldApi.listLatestPlanDefinitionVersions)
+      .mockResolvedValueOnce([retainedDefinition])
+      .mockImplementationOnce(() => new Promise(resolve => { resolveOldRefresh = resolve; }));
+    vi.mocked(currentApi.listLatestPlanDefinitionVersions).mockResolvedValueOnce([retainedExplicit]);
+    const view = render(<PlanPanel api={oldApi} />);
+    await screen.findByLabelText('Retained plan definition');
+    fireEvent.change(screen.getByLabelText('Custom plan JSON'), { target: { value: '{"old":true}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import custom plan' }));
+    await waitFor(() => expect(oldApi.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(2));
+    view.rerender(<PlanPanel api={currentApi} />);
+    expect((await screen.findByLabelText('Retained plan definition') as HTMLSelectElement).value).toBe(retainedExplicit.id);
+    await act(async () => { resolveOldRefresh([retainedDefinition, importedPlan]); });
+    expect((screen.getByLabelText('Retained plan definition') as HTMLSelectElement).value).toBe(retainedExplicit.id);
+
+    const lateApi = api();
+    vi.mocked(lateApi.listLatestPlanDefinitionVersions)
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectUnmountedRefresh = reject; }));
+    const lateView = render(<PlanPanel api={lateApi} />);
+    await screen.findByText('No retained plan definitions yet.');
+    fireEvent.change(screen.getAllByLabelText('Custom plan JSON')[1], { target: { value: '{"late":true}' } });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Import custom plan' })[1]);
+    await waitFor(() => expect(lateApi.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(2));
+    lateView.unmount();
+    await act(async () => { rejectUnmountedRefresh(new Error('late failure')); });
+    expect(lateView.container.textContent).toBe('');
+  });
+
   it('ignores obsolete retained-definition success after API replacement and rejection after unmount', async () => {
     let resolveOld!: (value: PlanDefinitionVersion[]) => void;
     let rejectLate!: (reason: unknown) => void;
@@ -244,8 +346,9 @@ describe('retained plan panel', () => {
     vi.mocked(plans.enrollInChapterStreams).mockImplementationOnce(() => new Promise(resolve => { resolveEnrollment = resolve; }));
     vi.mocked(plans.listPlanEnrollments).mockResolvedValueOnce([first, second]).mockRejectedValueOnce(new Error('retained refresh offline'));
     render(<PlanPanel api={plans} />);
-    await screen.findByRole('button', { name: 'Create retained enrollment' });
-    fireEvent.click(screen.getByRole('button', { name: 'Create retained enrollment' }));
+    const create = await screen.findByRole('button', { name: 'Create retained enrollment' }) as HTMLButtonElement;
+    await waitFor(() => expect(create.disabled).toBe(false));
+    fireEvent.click(create);
     const definitionSelect = screen.getByLabelText('Retained plan definition') as HTMLSelectElement;
     fireEvent.change(definitionSelect, { target: { value: retainedExplicit.id } });
     expect(screen.getByText('This retained calendar plan cannot be enrolled as chapter streams.')).toBeTruthy();
@@ -272,13 +375,16 @@ describe('retained plan panel', () => {
       .mockImplementationOnce(() => new Promise(resolve => { resolveReplacement = resolve; }));
     vi.mocked(currentApi.listLatestPlanDefinitionVersions).mockResolvedValue([retainedStreams]);
     const view = render(<PlanPanel api={oldApi} />);
-    await screen.findByRole('button', { name: 'Create retained enrollment' });
-    fireEvent.click(screen.getByRole('button', { name: 'Create retained enrollment' }));
+    const create = await screen.findByRole('button', { name: 'Create retained enrollment' }) as HTMLButtonElement;
+    await waitFor(() => expect(create.disabled).toBe(false));
+    fireEvent.click(create);
     fireEvent.change(screen.getByLabelText('Retained plan definition'), { target: { value: retainedExplicit.id } });
     await act(async () => { rejectSelection(new Error('stale retained rejection')); });
     expect(screen.queryByText(/stale retained rejection/)).toBeNull();
     fireEvent.change(screen.getByLabelText('Retained plan definition'), { target: { value: retainedStreams.id } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create retained enrollment' }));
+    const replacement = screen.getByRole('button', { name: 'Create retained enrollment' }) as HTMLButtonElement;
+    await waitFor(() => expect(replacement.disabled).toBe(false));
+    fireEvent.click(replacement);
     view.rerender(<PlanPanel api={currentApi} />);
     await act(async () => { resolveReplacement(retainedEnrollment); });
     expect(screen.queryByText(/Retained-plan enrollment retained-enrollment/)).toBeNull();
@@ -289,8 +395,9 @@ describe('retained plan panel', () => {
     vi.mocked(lateApi.listLatestPlanDefinitionVersions).mockResolvedValue([retainedStreams]);
     vi.mocked(lateApi.enrollInChapterStreams).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectUnmount = reject; }));
     const lateView = render(<PlanPanel api={lateApi} />);
-    await screen.findByRole('button', { name: 'Create retained enrollment' });
-    fireEvent.click(screen.getByRole('button', { name: 'Create retained enrollment' }));
+    const lateCreate = await screen.findByRole('button', { name: 'Create retained enrollment' }) as HTMLButtonElement;
+    await waitFor(() => expect(lateCreate.disabled).toBe(false));
+    fireEvent.click(lateCreate);
     lateView.unmount();
     await act(async () => { rejectUnmount(new Error('late unmount rejection')); });
     expect(lateView.container.textContent).toBe('');
@@ -910,13 +1017,13 @@ describe('retained plan panel', () => {
     await screen.findByText('Four streams');
     fireEvent.click(screen.getByRole('button', { name: 'Create enrollment' }));
     expect(await screen.findByLabelText('Current plan assignments')).toBeTruthy();
-    expect(screen.getByText('Book 1 · Chapter 1')).toBeTruthy();
+    expect(screen.getByLabelText('Current plan assignments').textContent).toContain('Book 1 · Chapter 1');
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry plans' }));
     await act(async () => { rejectRetry(new Error('retry offline')); });
     await act(async () => { rejectRefresh(new Error('stale refresh failure')); });
     expect(screen.getByLabelText('Current plan assignments')).toBeTruthy();
-    expect(screen.getByText('Book 1 · Chapter 1')).toBeTruthy();
+    expect(screen.getByLabelText('Current plan assignments').textContent).toContain('Book 1 · Chapter 1');
     expect((screen.getByLabelText('Retained enrollment') as HTMLSelectElement).value).toBe(created.id);
     expect(plans.enrollInChapterStreams).toHaveBeenCalledTimes(1);
   });
