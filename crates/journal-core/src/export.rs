@@ -47,9 +47,16 @@ impl JournalStore {
             "Export destination must be absolute"
         );
         check_components(directory)?;
-        fs::create_dir_all(directory)?;
-        check_components(directory)?;
-        let lock = open_regular(&directory.join(".scripture-journal-export.lock"), true)?;
+        #[cfg(unix)]
+        let directory_handle = super::export_directory::ExportDirectory::open(directory)?;
+        #[cfg(unix)]
+        let lock = directory_handle.open_lock()?;
+        #[cfg(not(unix))]
+        let lock = {
+            fs::create_dir_all(directory)?;
+            check_components(directory)?;
+            open_regular(&directory.join(".scripture-journal-export.lock"), true)?
+        };
         lock.try_lock_exclusive()
             .context("Another exporter is using this destination")?;
         let manifest_path = directory.join(MANIFEST);

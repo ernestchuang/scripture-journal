@@ -7,6 +7,8 @@ use std::{path::Path, time::Duration};
 use uuid::Uuid;
 
 mod export;
+#[cfg(unix)]
+mod export_directory;
 pub use export::ExportReport;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
