@@ -24,6 +24,10 @@ holds implementation status and remaining acceptance work.
 - Reading-plan, revision, and export defaults are recorded in
   [the release decision](decisions/0002-release-defaults.md). These are delegated
   implementation choices, not a claim that the whole release is already built.
+- The reading-plan storage foundation now preserves immutable versions and
+  validates chapter and verse references. Its database upgrade preserves existing
+  linked journal entries and revision history. Plan enrollment, progress, and the
+  plan editor are still being built; this foundation does not yet add a plan UI.
 
 Astra reviewed the appearance source and the draft-protection additions. Native
 visual startup and actual Apple Silicon runtime validation remain separate
