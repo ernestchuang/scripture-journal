@@ -294,7 +294,7 @@ fn schema_one_journal_data_survives_plan_migration() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        5
+        6
     );
 }
 
@@ -575,7 +575,7 @@ fn schema_three_progress_migration_preserves_history_and_adds_command_epoch() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        5
+        6
     );
 }
 
@@ -964,6 +964,139 @@ fn ambiguous_legacy_occurrence_is_retained_and_refuses_guessed_progression() {
         })
         .unwrap_err();
     assert!(error.to_string().contains("ambiguous occurrence identity"));
+}
+
+#[test]
+fn divergent_v5_suffix_is_invalidated_without_chapter_skips_or_history_rewrite() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let mut definition = repeated_chapter_definition();
+    let PlanSchedule::ChapterStreams { streams } = &mut definition.schedule else {
+        unreachable!()
+    };
+    streams[0].chapters.extend([
+        ChapterRef {
+            book: 1,
+            chapter: 1,
+        },
+        ChapterRef {
+            book: 1,
+            chapter: 4,
+        },
+    ]);
+    let version = store.create_plan_definition(definition).unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(
+            &version.id,
+            vec![StreamEnrollment {
+                stream_id: "repeated".into(),
+                starting_position: 0,
+                loop_after_end: false,
+            }],
+        )
+        .unwrap();
+    let mut completions = Vec::new();
+    for _ in 0..4 {
+        completions.push(complete_active(&mut store, &enrollment.id));
+    }
+    store.undo_plan_completion(&completions[3].id).unwrap();
+    completions[3] = complete_active(&mut store, &enrollment.id);
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER plan_assignments_immutable;
+         UPDATE plan_assignments SET passage=json_set(passage,'$.chapter',2) WHERE ordinal=4;
+         CREATE TRIGGER plan_assignments_immutable BEFORE UPDATE ON plan_assignments BEGIN SELECT RAISE(ABORT,'Plan assignments are immutable'); END;
+         PRAGMA user_version=5;",
+    )
+    .unwrap();
+    let retained_before: (String, String, String, String) = conn
+        .query_row(
+            "SELECT
+              (SELECT group_concat(id||':'||passage,'|') FROM (SELECT id,passage FROM plan_assignments ORDER BY ordinal)),
+              (SELECT group_concat(id||':'||assignment_id,'|') FROM (SELECT id,assignment_id FROM reading_completions ORDER BY rowid)),
+              (SELECT group_concat(id||':'||completion_id,'|') FROM (SELECT id,completion_id FROM reading_completion_undos ORDER BY rowid)),
+              (SELECT group_concat(id||':'||assignment_id,'|') FROM (SELECT id,assignment_id FROM plan_stream_progress_epochs ORDER BY sequence))",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    drop(conn);
+
+    let mut store = JournalStore::open(&path).unwrap();
+    let active = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        (
+            active.ordinal,
+            active.stream_position,
+            active.passage.chapter
+        ),
+        (5, None, 1)
+    );
+    let request = CompleteStreamRequest {
+        enrollment_id: enrollment.id.clone(),
+        stream_id: active.stream_id,
+        expected_assignment_id: active.id,
+        expected_progress_id: active.progress_id,
+    };
+    assert!(store
+        .complete_plan_stream(request)
+        .unwrap_err()
+        .to_string()
+        .contains("ambiguous occurrence identity"));
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let retained_after: (String, String, String, String) = conn
+        .query_row(
+            "SELECT
+              (SELECT group_concat(id||':'||passage,'|') FROM (SELECT id,passage FROM plan_assignments ORDER BY ordinal)),
+              (SELECT group_concat(id||':'||assignment_id,'|') FROM (SELECT id,assignment_id FROM reading_completions ORDER BY rowid)),
+              (SELECT group_concat(id||':'||completion_id,'|') FROM (SELECT id,completion_id FROM reading_completion_undos ORDER BY rowid)),
+              (SELECT group_concat(id||':'||assignment_id,'|') FROM (SELECT id,assignment_id FROM plan_stream_progress_epochs ORDER BY sequence))",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(retained_after, retained_before);
+    drop(conn);
+
+    let mut reopened = JournalStore::open(&path).unwrap();
+    reopened.undo_plan_completion(&completions[3].id).unwrap();
+    let divergent = reopened
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!((divergent.ordinal, divergent.stream_position), (4, None));
+    assert!(reopened
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: divergent.stream_id,
+            expected_assignment_id: divergent.id,
+            expected_progress_id: divergent.progress_id,
+        })
+        .is_err());
+    reopened.undo_plan_completion(&completions[2].id).unwrap();
+    let coherent = reopened
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!((coherent.ordinal, coherent.stream_position), (3, Some(2)));
+    assert!(reopened
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id,
+            stream_id: coherent.stream_id,
+            expected_assignment_id: coherent.id,
+            expected_progress_id: coherent.progress_id,
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("conflicts with pinned plan progress"));
 }
 
 fn export_fixture(dir: &TempDir, name: &str) -> std::path::PathBuf {

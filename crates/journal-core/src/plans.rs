@@ -378,7 +378,7 @@ pub(crate) fn migrate_assignment_positions(conn: &Connection) -> Result<()> {
             .context("Enrolled stream missing from retained definition")?;
         let assignments = {
             let mut statement = conn.prepare(
-                "SELECT id,ordinal,cycle,passage FROM plan_assignments
+                "SELECT id,ordinal,cycle,passage,stream_position FROM plan_assignments
                  WHERE enrollment_id=?1 AND stream_id=?2 ORDER BY ordinal",
             )?;
             let rows = statement
@@ -388,40 +388,52 @@ pub(crate) fn migrate_assignment_positions(conn: &Connection) -> Result<()> {
                         row.get::<_, u32>(1)?,
                         row.get::<_, u32>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, Option<u32>>(4)?,
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
-        let Some((_, _, _, first_text)) = assignments.first() else {
+        let Some((_, _, _, first_text, first_position)) = assignments.first() else {
             continue;
         };
         let first: Passage = serde_json::from_str(first_text)?;
-        let Some(start) = stream
-            .chapters
-            .iter()
-            .position(|chapter| chapter.book == first.book && chapter.chapter == first.chapter)
-        else {
-            continue;
-        };
-        for (id, ordinal, cycle, passage_text) in assignments {
+        let start = first_position
+            .and_then(|position| {
+                stream
+                    .chapters
+                    .get(position as usize)
+                    .map(|_| position as usize)
+            })
+            .or_else(|| {
+                stream.chapters.iter().position(|chapter| {
+                    chapter.book == first.book && chapter.chapter == first.chapter
+                })
+            });
+        let mut coherent = start.is_some();
+        let start = start.unwrap_or(0);
+        let mut previous_ordinal = 0;
+        for (id, ordinal, cycle, passage_text, existing_position) in assignments {
             let offset = start + (ordinal - 1) as usize;
-            if !loop_after_end && offset >= stream.chapters.len() {
-                continue;
-            }
             let position = offset % stream.chapters.len();
             let expected_cycle = 1 + (offset / stream.chapters.len()) as u32;
             let passage: Passage = serde_json::from_str(&passage_text)?;
             let chapter = &stream.chapters[position];
-            if cycle == expected_cycle
+            coherent = coherent
+                && ordinal == previous_ordinal + 1
+                && (loop_after_end || offset < stream.chapters.len())
+                && cycle == expected_cycle
                 && passage.book == chapter.book
                 && passage.chapter == chapter.chapter
-            {
+                && existing_position.is_none_or(|value| value == position as u32);
+            let repaired_position = coherent.then_some(position as u32);
+            if existing_position != repaired_position {
                 conn.execute(
                     "UPDATE plan_assignments SET stream_position=?1 WHERE id=?2",
-                    params![position as u32, id],
+                    params![repaired_position, id],
                 )?;
             }
+            previous_ordinal = ordinal;
         }
     }
     conn.execute_batch(
@@ -653,4 +665,9 @@ BEGIN SELECT RAISE(ABORT,'Progress epoch assignment must belong to its stream');
 pub(crate) const PLAN_ASSIGNMENT_POSITION_SCHEMA: &str = "
 DROP TRIGGER plan_assignments_immutable;
 ALTER TABLE plan_assignments ADD COLUMN stream_position INTEGER CHECK(stream_position>=0);
+";
+
+pub(crate) const PLAN_ASSIGNMENT_POSITION_REPAIR_SCHEMA: &str = "
+DROP TRIGGER plan_assignments_immutable;
+DROP TRIGGER plan_assignments_position_required;
 ";
