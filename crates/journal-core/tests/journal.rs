@@ -451,6 +451,96 @@ fn undo_failure_after_undo_history_write_rolls_back_exactly() {
 }
 
 #[test]
+fn progress_tables_reject_updates_and_deletes_without_changing_retained_rows() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(stream_definition("Retained progress"))
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(&version.id, stream_selections(false))
+        .unwrap();
+    let assignment = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .into_iter()
+        .find(|value| value.stream_id == "old-testament")
+        .unwrap();
+    let completion = store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id.clone(),
+            stream_id: assignment.stream_id.clone(),
+            expected_assignment_id: assignment.id.clone(),
+            expected_progress_id: assignment.progress_id.clone(),
+        })
+        .unwrap();
+    store.undo_plan_completion(&completion.id).unwrap();
+    let active_after_undo = store.active_plan_assignments(&enrollment.id).unwrap();
+    drop(store);
+
+    let retained = progress_fingerprint(&path);
+    assert!(retained.iter().all(|rows| !rows.is_empty()));
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for (statement, expected_error) in [
+        (
+            "UPDATE plan_enrollments SET created_at=created_at",
+            "Plan enrollments are immutable",
+        ),
+        (
+            "UPDATE plan_enrollment_streams SET loop_after_end=loop_after_end",
+            "Plan enrollments are immutable",
+        ),
+        (
+            "UPDATE plan_assignments SET passage=passage",
+            "Plan assignments are immutable",
+        ),
+        (
+            "UPDATE reading_completions SET completed_at=completed_at",
+            "Reading completions are immutable",
+        ),
+        (
+            "UPDATE reading_completion_undos SET undone_at=undone_at",
+            "Reading completion undos are immutable",
+        ),
+        (
+            "UPDATE plan_stream_progress_epochs SET created_at=created_at",
+            "Plan progress epochs are immutable",
+        ),
+    ] {
+        assert!(conn
+            .execute(statement, [])
+            .unwrap_err()
+            .to_string()
+            .contains(expected_error));
+        assert_eq!(progress_fingerprint(&path), retained);
+    }
+    for table in [
+        "plan_enrollments",
+        "plan_enrollment_streams",
+        "plan_assignments",
+        "reading_completions",
+        "reading_completion_undos",
+        "plan_stream_progress_epochs",
+    ] {
+        assert!(conn
+            .execute(&format!("DELETE FROM {table}"), [])
+            .unwrap_err()
+            .to_string()
+            .contains("Plan progress is retained"));
+        assert_eq!(progress_fingerprint(&path), retained);
+    }
+    drop(conn);
+
+    let reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(progress_fingerprint(&path), retained);
+    assert_eq!(
+        reopened.active_plan_assignments(&enrollment.id).unwrap(),
+        active_after_undo
+    );
+}
+
+#[test]
 fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
