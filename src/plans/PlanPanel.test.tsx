@@ -302,6 +302,23 @@ describe('retained plan panel', () => {
     expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
   });
 
+  it('keeps an export started as soon as deferred retained discovery renders its selection', async () => {
+    let resolveDefinitions!: (definitions: PlanDefinitionVersion[]) => void;
+    let resolveExport!: (json: string) => void;
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockImplementationOnce(() => new Promise(resolve => { resolveDefinitions = resolve; }));
+    vi.mocked(plans.exportPlanDefinitionJson).mockImplementationOnce(() => new Promise(resolve => { resolveExport = resolve; }));
+    render(<PlanPanel api={plans} />);
+
+    await act(async () => { resolveDefinitions([retainedDefinition]); });
+    fireEvent.click(screen.getByRole('button', { name: 'Export retained definition JSON' }));
+    expect((screen.getByRole('button', { name: 'Exporting retained definition JSON…' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { resolveExport('{"deferred":true}'); });
+
+    expect((screen.getByLabelText('Exported retained plan JSON') as HTMLTextAreaElement).value).toBe('{"deferred":true}');
+    expect(plans.exportPlanDefinitionJson).toHaveBeenCalledWith(retainedDefinition.id);
+  });
+
   it('shows a retained-definition export failure and permits a retry without changing other plan state', async () => {
     const plans = api();
     vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedExplicit]);
