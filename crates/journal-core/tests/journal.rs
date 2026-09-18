@@ -294,7 +294,7 @@ fn schema_one_journal_data_survives_plan_migration() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        4
+        5
     );
 }
 
@@ -302,18 +302,12 @@ fn stream_selections(loop_after_end: bool) -> Vec<StreamEnrollment> {
     vec![
         StreamEnrollment {
             stream_id: "old-testament".into(),
-            starting_chapter: ChapterRef {
-                book: 1,
-                chapter: 1,
-            },
+            starting_position: 0,
             loop_after_end,
         },
         StreamEnrollment {
             stream_id: "new-testament".into(),
-            starting_chapter: ChapterRef {
-                book: 40,
-                chapter: 1,
-            },
+            starting_position: 0,
             loop_after_end,
         },
     ]
@@ -328,7 +322,7 @@ fn stream_enrollment_is_pinned_survives_reopen_and_advances_independently() {
         .create_plan_definition(stream_definition("Original"))
         .unwrap();
     let mut invalid = stream_selections(false);
-    invalid[0].starting_chapter.chapter = 50;
+    invalid[0].starting_position = 50;
     assert!(store
         .enroll_in_chapter_streams(&version.id, invalid)
         .is_err());
@@ -550,8 +544,14 @@ fn schema_three_progress_migration_preserves_history_and_adds_command_epoch() {
     drop(store);
 
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute("DROP TABLE plan_stream_progress_epochs", [])
-        .unwrap();
+    conn.execute_batch(
+        "DROP TABLE plan_stream_progress_epochs;
+         DROP TRIGGER plan_assignments_immutable;
+         DROP TRIGGER plan_assignments_position_required;
+         ALTER TABLE plan_assignments DROP COLUMN stream_position;
+         CREATE TRIGGER plan_assignments_immutable BEFORE UPDATE ON plan_assignments BEGIN SELECT RAISE(ABORT,'Plan assignments are immutable'); END;",
+    )
+    .unwrap();
     conn.pragma_update(None, "user_version", 3).unwrap();
     drop(conn);
 
@@ -575,7 +575,7 @@ fn schema_three_progress_migration_preserves_history_and_adds_command_epoch() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        4
+        5
     );
 }
 
@@ -666,6 +666,304 @@ fn stale_completion_epoch_is_rejected_after_undo_reopen_and_recompletion() {
             expected_progress_id: intentional.progress_id,
         })
         .unwrap();
+}
+
+fn repeated_chapter_definition() -> PlanDefinition {
+    PlanDefinition {
+        schema_version: 1,
+        name: "Repeated chapters".into(),
+        description: None,
+        schedule: PlanSchedule::ChapterStreams {
+            streams: vec![ChapterStream {
+                id: "repeated".into(),
+                name: "Repeated".into(),
+                chapters: vec![
+                    ChapterRef {
+                        book: 1,
+                        chapter: 1,
+                    },
+                    ChapterRef {
+                        book: 1,
+                        chapter: 2,
+                    },
+                    ChapterRef {
+                        book: 1,
+                        chapter: 1,
+                    },
+                    ChapterRef {
+                        book: 1,
+                        chapter: 3,
+                    },
+                ],
+            }],
+        },
+    }
+}
+
+fn complete_active(store: &mut JournalStore, enrollment_id: &str) -> journal_core::PlanCompletion {
+    let assignment = store
+        .active_plan_assignments(enrollment_id)
+        .unwrap()
+        .remove(0);
+    store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment_id.into(),
+            stream_id: assignment.stream_id,
+            expected_assignment_id: assignment.id,
+            expected_progress_id: assignment.progress_id,
+        })
+        .unwrap()
+}
+
+#[test]
+fn repeated_chapter_occurrences_stop_loop_reopen_and_recomplete_in_order() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(repeated_chapter_definition())
+        .unwrap();
+    let stopped = store
+        .enroll_in_chapter_streams(
+            &version.id,
+            vec![StreamEnrollment {
+                stream_id: "repeated".into(),
+                starting_position: 0,
+                loop_after_end: false,
+            }],
+        )
+        .unwrap();
+    complete_active(&mut store, &stopped.id);
+    complete_active(&mut store, &stopped.id);
+    drop(store);
+
+    let mut store = JournalStore::open(&path).unwrap();
+    let repeated = store
+        .active_plan_assignments(&stopped.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        (
+            repeated.stream_position,
+            repeated.passage.chapter,
+            repeated.ordinal
+        ),
+        (Some(2), 1, 3)
+    );
+    let third = complete_active(&mut store, &stopped.id);
+    let final_assignment = store
+        .active_plan_assignments(&stopped.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        (
+            final_assignment.stream_position,
+            final_assignment.passage.chapter,
+            final_assignment.ordinal,
+        ),
+        (Some(3), 3, 4)
+    );
+    complete_active(&mut store, &stopped.id);
+    assert!(store
+        .active_plan_assignments(&stopped.id)
+        .unwrap()
+        .is_empty());
+
+    let looped = store
+        .enroll_in_chapter_streams(
+            &version.id,
+            vec![StreamEnrollment {
+                stream_id: "repeated".into(),
+                starting_position: 2,
+                loop_after_end: true,
+            }],
+        )
+        .unwrap();
+    let selected = store.active_plan_assignments(&looped.id).unwrap().remove(0);
+    assert_eq!(
+        (selected.stream_position, selected.passage.chapter),
+        (Some(2), 1)
+    );
+    complete_active(&mut store, &looped.id);
+    let last = store.active_plan_assignments(&looped.id).unwrap().remove(0);
+    assert_eq!(
+        (last.stream_position, last.passage.chapter, last.cycle),
+        (Some(3), 3, 1)
+    );
+    let last_completion = complete_active(&mut store, &looped.id);
+    let wrapped = store.active_plan_assignments(&looped.id).unwrap().remove(0);
+    assert_eq!(
+        (
+            wrapped.stream_position,
+            wrapped.passage.chapter,
+            wrapped.cycle
+        ),
+        (Some(0), 1, 2)
+    );
+    store.undo_plan_completion(&last_completion.id).unwrap();
+    let restored = store.active_plan_assignments(&looped.id).unwrap().remove(0);
+    assert_eq!(
+        (restored.stream_position, restored.passage.chapter),
+        (Some(3), 3)
+    );
+    complete_active(&mut store, &looped.id);
+    let rewrapped = store.active_plan_assignments(&looped.id).unwrap().remove(0);
+    assert_eq!(
+        (
+            rewrapped.stream_position,
+            rewrapped.passage.chapter,
+            rewrapped.cycle
+        ),
+        (Some(0), 1, 2)
+    );
+
+    store.undo_plan_completion(&third.id).unwrap_err();
+    drop(store);
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let snapshots = conn
+        .prepare("SELECT stream_position,json_extract(passage,'$.chapter') FROM plan_assignments WHERE enrollment_id=?1 ORDER BY ordinal")
+        .unwrap()
+        .query_map([stopped.id], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(snapshots, vec![(0, 1), (1, 2), (2, 1), (3, 3)]);
+}
+
+#[test]
+fn schema_four_reconstructs_repeated_occurrences_without_rewriting_snapshots() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(repeated_chapter_definition())
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(
+            &version.id,
+            vec![StreamEnrollment {
+                stream_id: "repeated".into(),
+                starting_position: 0,
+                loop_after_end: false,
+            }],
+        )
+        .unwrap();
+    complete_active(&mut store, &enrollment.id);
+    complete_active(&mut store, &enrollment.id);
+    let before = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        (before.stream_position, before.passage.chapter),
+        (Some(2), 1)
+    );
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let snapshots_before: String = conn
+        .query_row(
+            "SELECT group_concat(id||':'||passage,'|') FROM (SELECT id,passage FROM plan_assignments WHERE enrollment_id=?1 ORDER BY ordinal)",
+            [&enrollment.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER plan_assignments_immutable;
+         DROP TRIGGER plan_assignments_position_required;
+         ALTER TABLE plan_assignments DROP COLUMN stream_position;
+         CREATE TRIGGER plan_assignments_immutable BEFORE UPDATE ON plan_assignments BEGIN SELECT RAISE(ABORT,'Plan assignments are immutable'); END;
+         PRAGMA user_version=4;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut store = JournalStore::open(&path).unwrap();
+    let migrated = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        (migrated.stream_position, migrated.passage.chapter),
+        (Some(2), 1)
+    );
+    complete_active(&mut store, &enrollment.id);
+    let final_assignment = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        (
+            final_assignment.stream_position,
+            final_assignment.passage.chapter
+        ),
+        (Some(3), 3)
+    );
+    drop(store);
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let retained_prefix: String = conn
+        .query_row(
+            "SELECT group_concat(id||':'||passage,'|') FROM (SELECT id,passage FROM plan_assignments WHERE enrollment_id=?1 ORDER BY ordinal LIMIT 3)",
+            [enrollment.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained_prefix, snapshots_before);
+}
+
+#[test]
+fn ambiguous_legacy_occurrence_is_retained_and_refuses_guessed_progression() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(repeated_chapter_definition())
+        .unwrap();
+    let enrollment = store
+        .enroll_in_chapter_streams(
+            &version.id,
+            vec![StreamEnrollment {
+                stream_id: "repeated".into(),
+                starting_position: 0,
+                loop_after_end: false,
+            }],
+        )
+        .unwrap();
+    for _ in 0..3 {
+        complete_active(&mut store, &enrollment.id);
+    }
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER plan_assignments_immutable;
+         DROP TRIGGER plan_assignments_position_required;
+         UPDATE plan_assignments SET passage=json_set(passage,'$.chapter',2) WHERE ordinal=4;
+         ALTER TABLE plan_assignments DROP COLUMN stream_position;
+         CREATE TRIGGER plan_assignments_immutable BEFORE UPDATE ON plan_assignments BEGIN SELECT RAISE(ABORT,'Plan assignments are immutable'); END;
+         PRAGMA user_version=4;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut store = JournalStore::open(&path).unwrap();
+    let retained = store
+        .active_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        (retained.stream_position, retained.passage.chapter),
+        (None, 2)
+    );
+    let error = store
+        .complete_plan_stream(CompleteStreamRequest {
+            enrollment_id: enrollment.id,
+            stream_id: retained.stream_id,
+            expected_assignment_id: retained.id,
+            expected_progress_id: retained.progress_id,
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("ambiguous occurrence identity"));
 }
 
 fn export_fixture(dir: &TempDir, name: &str) -> std::path::PathBuf {

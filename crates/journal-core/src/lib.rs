@@ -84,7 +84,7 @@ impl JournalStore {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(
-            (0..=4).contains(&version),
+            (0..=5).contains(&version),
             "Unsupported journal schema version {version}"
         );
         if version == 0 {
@@ -102,25 +102,39 @@ impl JournalStore {
             tx.execute_batch(plans::PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_PROGRESS_SCHEMA)?;
             tx.execute_batch(plans::PLAN_PROGRESS_EPOCH_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 4)?;
+            tx.execute_batch(plans::PLAN_ASSIGNMENT_POSITION_SCHEMA)?;
+            plans::migrate_assignment_positions(&tx)?;
+            tx.pragma_update(None, "user_version", 5)?;
             tx.commit()?;
         } else if version == 1 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::PLAN_SCHEMA)?;
             tx.execute_batch(plans::PLAN_PROGRESS_SCHEMA)?;
             tx.execute_batch(plans::PLAN_PROGRESS_EPOCH_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 4)?;
+            tx.execute_batch(plans::PLAN_ASSIGNMENT_POSITION_SCHEMA)?;
+            plans::migrate_assignment_positions(&tx)?;
+            tx.pragma_update(None, "user_version", 5)?;
             tx.commit()?;
         } else if version == 2 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::PLAN_PROGRESS_SCHEMA)?;
             tx.execute_batch(plans::PLAN_PROGRESS_EPOCH_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 4)?;
+            tx.execute_batch(plans::PLAN_ASSIGNMENT_POSITION_SCHEMA)?;
+            plans::migrate_assignment_positions(&tx)?;
+            tx.pragma_update(None, "user_version", 5)?;
             tx.commit()?;
         } else if version == 3 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(plans::PLAN_PROGRESS_EPOCH_SCHEMA)?;
-            tx.pragma_update(None, "user_version", 4)?;
+            tx.execute_batch(plans::PLAN_ASSIGNMENT_POSITION_SCHEMA)?;
+            plans::migrate_assignment_positions(&tx)?;
+            tx.pragma_update(None, "user_version", 5)?;
+            tx.commit()?;
+        } else if version == 4 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(plans::PLAN_ASSIGNMENT_POSITION_SCHEMA)?;
+            plans::migrate_assignment_positions(&tx)?;
+            tx.pragma_update(None, "user_version", 5)?;
             tx.commit()?;
         }
         let store = Self { conn };

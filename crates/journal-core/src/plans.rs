@@ -61,7 +61,7 @@ pub struct PlanDefinitionVersion {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StreamEnrollment {
     pub stream_id: String,
-    pub starting_chapter: ChapterRef,
+    pub starting_position: u32,
     pub loop_after_end: bool,
 }
 
@@ -82,6 +82,7 @@ pub struct PlanAssignment {
     pub ordinal: u32,
     pub cycle: u32,
     pub passage: Passage,
+    pub stream_position: Option<u32>,
     pub progress_id: String,
 }
 
@@ -128,8 +129,8 @@ pub(crate) fn enroll(
             .find(|stream| stream.id == selection.stream_id)
             .context("Selected stream is not in this definition")?;
         ensure!(
-            stream.chapters.contains(&selection.starting_chapter),
-            "Starting chapter is not in the selected stream"
+            (selection.starting_position as usize) < stream.chapters.len(),
+            "Starting position is not in the selected stream"
         );
     }
     let id = Uuid::new_v4().to_string();
@@ -143,13 +144,8 @@ pub(crate) fn enroll(
             .iter()
             .find(|stream| stream.id == selection.stream_id)
             .unwrap();
-        let position = stream
-            .chapters
-            .iter()
-            .position(|chapter| chapter == &selection.starting_chapter)
-            .unwrap() as u32;
         tx.execute("INSERT INTO plan_enrollment_streams(enrollment_id,stream_id,loop_after_end) VALUES(?1,?2,?3)", params![id, selection.stream_id, selection.loop_after_end])?;
-        let assignment_id = insert_assignment(&tx, &id, stream, 1, 1, position)?;
+        let assignment_id = insert_assignment(&tx, &id, stream, 1, 1, selection.starting_position)?;
         insert_progress_epoch(&tx, &id, &stream.id, &assignment_id)?;
     }
     let result = PlanEnrollment {
@@ -166,7 +162,7 @@ pub(crate) fn active_assignments(
     enrollment_id: &str,
 ) -> Result<Vec<PlanAssignment>> {
     let mut statement = conn.prepare(
-        "SELECT a.id,a.enrollment_id,a.stream_id,a.ordinal,a.cycle,a.passage,e.id
+        "SELECT a.id,a.enrollment_id,a.stream_id,a.ordinal,a.cycle,a.passage,e.id,a.stream_position
          FROM plan_stream_progress_epochs e JOIN plan_assignments a ON a.id=e.assignment_id
          WHERE a.enrollment_id=?1
          AND e.sequence=(SELECT MAX(e2.sequence) FROM plan_stream_progress_epochs e2 WHERE e2.enrollment_id=e.enrollment_id AND e2.stream_id=e.stream_id)
@@ -219,13 +215,16 @@ pub(crate) fn complete_stream(
         .into_iter()
         .find(|stream| stream.id == request.stream_id)
         .context("Enrolled stream missing from definition")?;
-    let current = stream
-        .chapters
-        .iter()
-        .position(|chapter| {
+    let current = active
+        .stream_position
+        .context("Legacy assignment has ambiguous occurrence identity; start a new enrollment")?
+        as usize;
+    ensure!(
+        stream.chapters.get(current).is_some_and(|chapter| {
             chapter.book == active.passage.book && chapter.chapter == active.passage.chapter
-        })
-        .context("Assignment snapshot is not in its pinned definition")?;
+        }),
+        "Assignment occurrence does not match its retained passage snapshot"
+    );
     if current + 1 < stream.chapters.len() {
         let next_id = insert_assignment(
             &tx,
@@ -294,22 +293,24 @@ fn insert_assignment(
         end_verse: None,
     };
     let content = serde_json::to_string(&passage)?;
-    let existing: Option<(String, u32, String)> = conn
+    let existing: Option<(String, u32, String, Option<u32>)> = conn
         .query_row(
-            "SELECT id,cycle,passage FROM plan_assignments WHERE enrollment_id=?1 AND stream_id=?2 AND ordinal=?3",
+            "SELECT id,cycle,passage,stream_position FROM plan_assignments WHERE enrollment_id=?1 AND stream_id=?2 AND ordinal=?3",
             params![enrollment_id, stream.id, ordinal],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
-    if let Some((id, existing_cycle, existing_content)) = existing {
+    if let Some((id, existing_cycle, existing_content, existing_position)) = existing {
         ensure!(
-            existing_cycle == cycle && existing_content == content,
+            existing_cycle == cycle
+                && existing_content == content
+                && existing_position == Some(position),
             "Existing assignment conflicts with pinned plan progress"
         );
         Ok(id)
     } else {
         let id = Uuid::new_v4().to_string();
-        conn.execute("INSERT INTO plan_assignments(id,enrollment_id,stream_id,ordinal,cycle,passage) VALUES(?1,?2,?3,?4,?5,?6)", params![id, enrollment_id, stream.id, ordinal, cycle, content])?;
+        conn.execute("INSERT INTO plan_assignments(id,enrollment_id,stream_id,ordinal,cycle,passage,stream_position) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![id, enrollment_id, stream.id, ordinal, cycle, content, position])?;
         Ok(id)
     }
 }
@@ -342,7 +343,92 @@ fn assignment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanAssignment> {
         cycle: row.get(4)?,
         passage,
         progress_id: row.get(6)?,
+        stream_position: row.get(7)?,
     })
+}
+
+pub(crate) fn migrate_assignment_positions(conn: &Connection) -> Result<()> {
+    let streams = {
+        let mut statement = conn.prepare(
+            "SELECT s.enrollment_id,s.stream_id,s.loop_after_end,v.definition
+             FROM plan_enrollment_streams s
+             JOIN plan_enrollments e ON e.id=s.enrollment_id
+             JOIN plan_definition_versions v ON v.id=e.definition_version_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (enrollment_id, stream_id, loop_after_end, definition_text) in streams {
+        let definition: PlanDefinition = serde_json::from_str(&definition_text)?;
+        let PlanSchedule::ChapterStreams { streams } = definition.schedule else {
+            continue;
+        };
+        let stream = streams
+            .into_iter()
+            .find(|candidate| candidate.id == stream_id)
+            .context("Enrolled stream missing from retained definition")?;
+        let assignments = {
+            let mut statement = conn.prepare(
+                "SELECT id,ordinal,cycle,passage FROM plan_assignments
+                 WHERE enrollment_id=?1 AND stream_id=?2 ORDER BY ordinal",
+            )?;
+            let rows = statement
+                .query_map(params![enrollment_id, stream_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, u32>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let Some((_, _, _, first_text)) = assignments.first() else {
+            continue;
+        };
+        let first: Passage = serde_json::from_str(first_text)?;
+        let Some(start) = stream
+            .chapters
+            .iter()
+            .position(|chapter| chapter.book == first.book && chapter.chapter == first.chapter)
+        else {
+            continue;
+        };
+        for (id, ordinal, cycle, passage_text) in assignments {
+            let offset = start + (ordinal - 1) as usize;
+            if !loop_after_end && offset >= stream.chapters.len() {
+                continue;
+            }
+            let position = offset % stream.chapters.len();
+            let expected_cycle = 1 + (offset / stream.chapters.len()) as u32;
+            let passage: Passage = serde_json::from_str(&passage_text)?;
+            let chapter = &stream.chapters[position];
+            if cycle == expected_cycle
+                && passage.book == chapter.book
+                && passage.chapter == chapter.chapter
+            {
+                conn.execute(
+                    "UPDATE plan_assignments SET stream_position=?1 WHERE id=?2",
+                    params![position as u32, id],
+                )?;
+            }
+        }
+    }
+    conn.execute_batch(
+        "CREATE TRIGGER plan_assignments_immutable BEFORE UPDATE ON plan_assignments BEGIN SELECT RAISE(ABORT,'Plan assignments are immutable'); END;
+         CREATE TRIGGER plan_assignments_position_required BEFORE INSERT ON plan_assignments WHEN NEW.stream_position IS NULL BEGIN SELECT RAISE(ABORT,'New plan assignments require occurrence identity'); END;",
+    )?;
+    Ok(())
 }
 
 pub(crate) fn create_definition(
@@ -562,4 +648,9 @@ CREATE TRIGGER plan_stream_progress_epochs_retained BEFORE DELETE ON plan_stream
 CREATE TRIGGER plan_stream_progress_epochs_match BEFORE INSERT ON plan_stream_progress_epochs
 WHEN NOT EXISTS(SELECT 1 FROM plan_assignments a WHERE a.id=NEW.assignment_id AND a.enrollment_id=NEW.enrollment_id AND a.stream_id=NEW.stream_id)
 BEGIN SELECT RAISE(ABORT,'Progress epoch assignment must belong to its stream'); END;
+";
+
+pub(crate) const PLAN_ASSIGNMENT_POSITION_SCHEMA: &str = "
+DROP TRIGGER plan_assignments_immutable;
+ALTER TABLE plan_assignments ADD COLUMN stream_position INTEGER CHECK(stream_position>=0);
 ";
