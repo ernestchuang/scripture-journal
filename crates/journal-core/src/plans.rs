@@ -355,6 +355,7 @@ pub struct CalendarAssignmentCompletion {
     pub assignment_id: String,
     pub enrollment_id: String,
     pub completed_at: String,
+    pub undone: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,6 +565,7 @@ pub(crate) fn complete_calendar_assignment(
         assignment_id: assignment_id.to_owned(),
         enrollment_id: enrollment_id.to_owned(),
         completed_at: Utc::now().to_rfc3339(),
+        undone: false,
     };
     tx.execute(
         "INSERT INTO plan_calendar_completions(id,assignment_id,enrollment_id,completed_at) VALUES(?1,?2,?3,?4)",
@@ -578,7 +580,7 @@ pub(crate) fn calendar_completion_history(
     enrollment_id: &str,
 ) -> Result<Vec<CalendarAssignmentCompletion>> {
     let mut statement = conn.prepare(
-        "SELECT id,assignment_id,enrollment_id,completed_at FROM plan_calendar_completions WHERE enrollment_id=?1 ORDER BY completed_at,id",
+        "SELECT c.id,c.assignment_id,c.enrollment_id,c.completed_at,EXISTS(SELECT 1 FROM plan_calendar_completion_undos u WHERE u.completion_id=c.id) FROM plan_calendar_completions c WHERE c.enrollment_id=?1 ORDER BY c.completed_at,c.id",
     )?;
     let completions = statement
         .query_map([enrollment_id], |row| {
@@ -587,10 +589,35 @@ pub(crate) fn calendar_completion_history(
                 assignment_id: row.get(1)?,
                 enrollment_id: row.get(2)?,
                 completed_at: row.get(3)?,
+                undone: row.get(4)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(completions)
+}
+
+pub(crate) fn undo_calendar_completion(
+    conn: &mut Connection,
+    enrollment_id: &str,
+    assignment_id: &str,
+    completion_id: &str,
+) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let found: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM plan_calendar_completions c WHERE c.id=?1 AND c.assignment_id=?2 AND c.enrollment_id=?3 AND NOT EXISTS(SELECT 1 FROM plan_calendar_completion_undos u WHERE u.completion_id=c.id))",
+        params![completion_id, assignment_id, enrollment_id],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        found,
+        "Calendar completion is missing, stale, or owned by another assignment"
+    );
+    tx.execute(
+        "INSERT INTO plan_calendar_completion_undos(id,completion_id,enrollment_id,assignment_id,undone_at) VALUES(?1,?2,?3,?4,?5)",
+        params![Uuid::new_v4().to_string(), completion_id, enrollment_id, assignment_id, Utc::now().to_rfc3339()],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub(crate) fn calendar_enrollment(
@@ -1255,9 +1282,17 @@ CREATE TABLE IF NOT EXISTS plan_calendar_assignments(
 );
 CREATE TABLE IF NOT EXISTS plan_calendar_completions(
  id TEXT PRIMARY KEY,
- assignment_id TEXT NOT NULL UNIQUE REFERENCES plan_calendar_assignments(id),
+ assignment_id TEXT NOT NULL REFERENCES plan_calendar_assignments(id),
  enrollment_id TEXT NOT NULL REFERENCES plan_calendar_enrollments(enrollment_id),
  completed_at TEXT NOT NULL,
+ FOREIGN KEY(assignment_id,enrollment_id) REFERENCES plan_calendar_assignments(id,enrollment_id)
+);
+CREATE TABLE IF NOT EXISTS plan_calendar_completion_undos(
+ id TEXT PRIMARY KEY,
+ completion_id TEXT NOT NULL UNIQUE REFERENCES plan_calendar_completions(id),
+ enrollment_id TEXT NOT NULL,
+ assignment_id TEXT NOT NULL,
+ undone_at TEXT NOT NULL,
  FOREIGN KEY(assignment_id,enrollment_id) REFERENCES plan_calendar_assignments(id,enrollment_id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS plan_calendar_assignment_owner ON plan_calendar_assignments(id,enrollment_id);
@@ -1273,6 +1308,13 @@ CREATE TRIGGER IF NOT EXISTS plan_calendar_completions_immutable BEFORE UPDATE O
 BEGIN SELECT RAISE(ABORT,'Calendar completions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS plan_calendar_completions_retained BEFORE DELETE ON plan_calendar_completions
 BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
+CREATE TRIGGER IF NOT EXISTS plan_calendar_completion_active BEFORE INSERT ON plan_calendar_completions
+WHEN EXISTS(SELECT 1 FROM plan_calendar_completions c WHERE c.assignment_id=NEW.assignment_id AND NOT EXISTS(SELECT 1 FROM plan_calendar_completion_undos u WHERE u.completion_id=c.id))
+BEGIN SELECT RAISE(ABORT,'Calendar assignment already has an active completion'); END;
+CREATE TRIGGER IF NOT EXISTS plan_calendar_completion_undos_immutable BEFORE UPDATE ON plan_calendar_completion_undos
+BEGIN SELECT RAISE(ABORT,'Calendar completion undos are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS plan_calendar_completion_undos_retained BEFORE DELETE ON plan_calendar_completion_undos
+BEGIN SELECT RAISE(ABORT,'Plan progress is retained'); END;
 CREATE TRIGGER IF NOT EXISTS plan_calendar_assignments_match BEFORE INSERT ON plan_calendar_assignments
 WHEN NOT EXISTS(
  SELECT 1 FROM plan_enrollments e
@@ -1285,6 +1327,21 @@ WHEN NOT EXISTS(
  AND json_extract(v.definition,'$.schedule.days['||(NEW.definition_day-1)||'].passages')=json(NEW.passages)
 )
 BEGIN SELECT RAISE(ABORT,'Calendar assignment must belong to its enrollment version'); END;
+";
+
+pub(crate) const PLAN_CALENDAR_COMPLETION_V10_MIGRATION: &str = "
+DROP TRIGGER plan_calendar_completions_immutable;
+DROP TRIGGER plan_calendar_completions_retained;
+ALTER TABLE plan_calendar_completions RENAME TO plan_calendar_completions_v9;
+CREATE TABLE plan_calendar_completions(
+ id TEXT PRIMARY KEY,
+ assignment_id TEXT NOT NULL REFERENCES plan_calendar_assignments(id),
+ enrollment_id TEXT NOT NULL REFERENCES plan_calendar_enrollments(enrollment_id),
+ completed_at TEXT NOT NULL,
+ FOREIGN KEY(assignment_id,enrollment_id) REFERENCES plan_calendar_assignments(id,enrollment_id)
+);
+INSERT INTO plan_calendar_completions SELECT * FROM plan_calendar_completions_v9;
+DROP TABLE plan_calendar_completions_v9;
 ";
 
 pub(crate) const PLAN_PROGRESS_SCHEMA: &str = "

@@ -364,6 +364,96 @@ fn simultaneous_stores_create_only_one_calendar_completion() {
 }
 
 #[test]
+fn calendar_completion_undo_is_owned_durable_and_allows_recompletion() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(mcheyne_plan_definition())
+        .unwrap();
+    let first = store
+        .enroll_in_calendar(&version.id, date(2026, 1, 1), CalendarScheduleMode::DayOne)
+        .unwrap();
+    let second = store
+        .enroll_in_calendar(&version.id, date(2026, 2, 1), CalendarScheduleMode::DayOne)
+        .unwrap();
+    let assignment = store
+        .calendar_plan_assignments(&first.id)
+        .unwrap()
+        .remove(0);
+    let completion = store
+        .complete_calendar_assignment(&first.id, &assignment.id)
+        .unwrap();
+    assert!(store
+        .undo_calendar_completion(&second.id, &assignment.id, &completion.id)
+        .is_err());
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TRIGGER inject_calendar_undo_failure BEFORE INSERT ON plan_calendar_completion_undos BEGIN SELECT RAISE(ABORT,'injected undo failure'); END;").unwrap();
+    drop(conn);
+    let mut store = JournalStore::open(&path).unwrap();
+    assert!(store
+        .undo_calendar_completion(&first.id, &assignment.id, &completion.id)
+        .unwrap_err()
+        .to_string()
+        .contains("injected undo failure"));
+    assert!(!store.calendar_completion_history(&first.id).unwrap()[0].undone);
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TRIGGER inject_calendar_undo_failure;")
+        .unwrap();
+    drop(conn);
+    let mut store = JournalStore::open(&path).unwrap();
+    store
+        .undo_calendar_completion(&first.id, &assignment.id, &completion.id)
+        .unwrap();
+    assert!(store.calendar_completion_history(&first.id).unwrap()[0].undone);
+    assert!(store
+        .undo_calendar_completion(&first.id, &assignment.id, &completion.id)
+        .is_err());
+    let recompletion = store
+        .complete_calendar_assignment(&first.id, &assignment.id)
+        .unwrap();
+    drop(store);
+    let reopened = JournalStore::open(&path).unwrap();
+    let history = reopened.calendar_completion_history(&first.id).unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(history[0].undone);
+    assert_eq!(history[1], recompletion);
+    assert!(!history[1].undone);
+}
+
+#[test]
+fn simultaneous_stores_accept_only_one_calendar_undo() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut setup = JournalStore::open(&path).unwrap();
+    let version = setup
+        .create_plan_definition(mcheyne_plan_definition())
+        .unwrap();
+    let enrollment = setup
+        .enroll_in_calendar(&version.id, date(2026, 1, 1), CalendarScheduleMode::DayOne)
+        .unwrap();
+    let assignment = setup
+        .calendar_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    let completion = setup
+        .complete_calendar_assignment(&enrollment.id, &assignment.id)
+        .unwrap();
+    drop(setup);
+    let mut first = JournalStore::open(&path).unwrap();
+    let mut second = JournalStore::open(&path).unwrap();
+    first
+        .undo_calendar_completion(&enrollment.id, &assignment.id, &completion.id)
+        .unwrap();
+    assert!(second
+        .undo_calendar_completion(&enrollment.id, &assignment.id, &completion.id)
+        .is_err());
+    assert!(second.calendar_completion_history(&enrollment.id).unwrap()[0].undone);
+}
+
+#[test]
 fn schema_eight_migration_preserves_populated_calendar_rows() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("j.db");
@@ -413,7 +503,7 @@ fn schema_eight_migration_preserves_populated_calendar_rows() {
     assert_eq!(
         conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        9
+        10
     );
     assert_eq!(
         conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
@@ -426,6 +516,46 @@ fn schema_eight_migration_preserves_populated_calendar_rows() {
         })
         .unwrap(),
         0
+    );
+}
+
+#[test]
+fn schema_nine_migration_preserves_completion_and_enables_undo() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("j.db");
+    let mut store = JournalStore::open(&path).unwrap();
+    let version = store
+        .create_plan_definition(mcheyne_plan_definition())
+        .unwrap();
+    let enrollment = store
+        .enroll_in_calendar(&version.id, date(2026, 1, 1), CalendarScheduleMode::DayOne)
+        .unwrap();
+    let assignment = store
+        .calendar_plan_assignments(&enrollment.id)
+        .unwrap()
+        .remove(0);
+    let completion = store
+        .complete_calendar_assignment(&enrollment.id, &assignment.id)
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TRIGGER plan_calendar_completion_undos_immutable; DROP TRIGGER plan_calendar_completion_undos_retained; DROP TRIGGER plan_calendar_completion_active; DROP TABLE plan_calendar_completion_undos; CREATE UNIQUE INDEX v9_calendar_completion_assignment ON plan_calendar_completions(assignment_id); PRAGMA user_version=9;").unwrap();
+    drop(conn);
+    let mut reopened = JournalStore::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .calendar_completion_history(&enrollment.id)
+            .unwrap(),
+        vec![completion.clone()]
+    );
+    reopened
+        .undo_calendar_completion(&enrollment.id, &assignment.id, &completion.id)
+        .unwrap();
+    assert!(
+        reopened
+            .calendar_completion_history(&enrollment.id)
+            .unwrap()[0]
+            .undone
     );
 }
 
@@ -649,11 +779,11 @@ fn schema_seven_migration_preserves_populated_journal_plan_and_progress() {
         "plan_calendar_assignment_owner"
     ));
     drop(migrated);
-    assert_database_integrity(&path, 9);
+    assert_database_integrity(&path, 10);
 
     let mut reopened_again = JournalStore::open(&path).unwrap();
     assert_eq!(schema_seven_fingerprint(&path), retained);
-    assert_database_integrity(&path, 9);
+    assert_database_integrity(&path, 10);
     let calendar = reopened_again
         .enroll_in_calendar(
             &built_in.id,
