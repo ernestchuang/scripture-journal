@@ -556,11 +556,50 @@ describe('retained plan panel', () => {
     fireEvent.change(screen.getByLabelText('Retained calendar enrollment'), { target: { value: a.id } });
     fireEvent.click(await screen.findByRole('button', { name: `Undo calendar completion ${completion(a).id}` }));
     await act(async () => settlement === 'success' ? obsolete.resolve() : obsolete.reject(new Error('obsolete undo')));
-    expect(screen.getByRole('button', { name: 'Undoing calendar completion…' })).toBeTruthy();
+    if (settlement === 'success') expect((screen.getByRole('button', { name: 'Complete calendar assignment' }) as HTMLButtonElement).disabled).toBe(true);
+    else expect(screen.getByRole('button', { name: 'Undoing calendar completion…' })).toBeTruthy();
     expect(screen.queryByText(/obsolete undo/)).toBeNull();
     await act(async () => current.reject(new Error('current undo failed')));
-    expect(await screen.findByText(/current undo failed/)).toBeTruthy();
+    if (settlement === 'success') {
+      expect(screen.queryByText(/current undo failed/)).toBeNull();
+      expect(screen.getByText('Undone')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: `Undo calendar completion ${completion(a).id}` })).toBeNull();
+    } else {
+      expect(await screen.findByText(/current undo failed/)).toBeTruthy();
+      expect(screen.getByText('Current completion')).toBeTruthy();
+    }
     expect(plans.undoCalendarCompletion).toHaveBeenCalledTimes(2);
+  });
+
+  it('reconciles a confirmed undo completed while away through failed return history and read-only retry', async () => {
+    const pending = deferred<void>();
+    const a = { ...calendarEnrollment, id: 'calendar-undo-away-a' };
+    const b = { ...calendarEnrollment, id: 'calendar-undo-away-b', startDate: '2026-04-02' };
+    const dated = (item: typeof a): DatedPlanAssignment => ({ id: `dated-${item.id}`, enrollmentId: item.id, definitionVersionId: item.definitionVersionId, definitionDay: 1, localDate: item.startDate, passages: [{ book: 1, chapter: 1 }] });
+    const completion = (item: typeof a, undone = false) => ({ id: `completion-${item.id}`, assignmentId: dated(item).id, enrollmentId: item.id, completedAt: '2026-09-18T00:00:07Z', undone });
+    const plans = api();
+    vi.mocked(plans.listPlanEnrollments).mockResolvedValue([a, b]);
+    vi.mocked(plans.getCalendarPlanEnrollment).mockImplementation(async id => id === a.id ? a : b);
+    vi.mocked(plans.calendarPlanAssignments).mockImplementation(async id => [dated(id === a.id ? a : b)]);
+    vi.mocked(plans.calendarCompletionHistory)
+      .mockResolvedValueOnce([completion(a)])
+      .mockResolvedValueOnce([completion(b)])
+      .mockRejectedValueOnce(new Error('return history offline'))
+      .mockResolvedValueOnce([completion(a, true)]);
+    vi.mocked(plans.undoCalendarCompletion).mockReturnValue(pending.promise);
+    render(<PlanPanel api={plans} />);
+    fireEvent.click(await screen.findByRole('button', { name: `Undo calendar completion ${completion(a).id}` }));
+    fireEvent.change(screen.getByLabelText('Retained calendar enrollment'), { target: { value: b.id } });
+    await screen.findByText(b.startDate);
+    await act(async () => pending.resolve());
+    fireEvent.change(screen.getByLabelText('Retained calendar enrollment'), { target: { value: a.id } });
+    expect(await screen.findByText(/Could not load calendar completion history: Error: return history offline/)).toBeTruthy();
+    expect(screen.getByText('Undone')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: `Undo calendar completion ${completion(a).id}` })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry calendar completion history' }));
+    expect(await screen.findByRole('button', { name: 'Complete calendar assignment' })).toBeTruthy();
+    expect(plans.undoCalendarCompletion).toHaveBeenCalledTimes(1);
+    expect(plans.calendarCompletionHistory).toHaveBeenCalledTimes(4);
   });
 
   it.each(['success', 'rejection'] as const)('ignores pending calendar undo %s after API replacement and unmount', async settlement => {

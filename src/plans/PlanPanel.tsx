@@ -212,6 +212,8 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
   const readyHistory = useRef(new Map<string, ReadyPlanHistory>());
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
+  const selectedCalendarEnrollmentIdRef = useRef(selectedCalendarEnrollmentId);
+  selectedCalendarEnrollmentIdRef.current = selectedCalendarEnrollmentId;
   const streamEnrollments = useMemo(() => enrollments !== null && calendarEnrollments?.kind === 'ready'
     ? enrollments.filter(enrollment => !calendarEnrollments.items.some(calendar => calendar.id === enrollment.id))
     : null, [calendarEnrollments, enrollments]);
@@ -352,15 +354,22 @@ export function PlanPanel({ api }: { api?: PlanPanelApi }) {
       await api.undoCalendarCompletion({ enrollmentId, assignmentId: completion.assignmentId, completionId: completion.id });
       if (currentApi.current !== api) return;
       confirmedCalendarUndos.current.set(completion.id, enrollmentId);
+      const reconcile = (items: CalendarAssignmentCompletion[]) => items.map(item => item.id === completion.id ? { ...item, undone: true } : item);
+      readyCalendarHistory.current.set(enrollmentId, reconcile(readyCalendarHistory.current.get(enrollmentId) ?? []));
+      if (selectedCalendarEnrollmentIdRef.current === enrollmentId) {
+        setCalendarHistory(current => {
+          if (current?.kind === 'ready') return { kind: 'ready', items: reconcile(current.items) };
+          if (current?.kind === 'error' && current.items) return { ...current, items: reconcile(current.items) };
+          return current;
+        });
+      }
       if (epoch !== calendarUndoEpoch.current || selectedCalendarEnrollmentId !== enrollmentId) return;
       setUndoingCalendarId('');
-      setCalendarHistory(current => current?.kind === 'ready' ? { kind: 'ready', items: current.items.map(item => item.id === completion.id ? { ...item, undone: true } : item) } : current);
-      readyCalendarHistory.current.set(enrollmentId, (readyCalendarHistory.current.get(enrollmentId) ?? []).map(item => item.id === completion.id ? { ...item, undone: true } : item));
       setCalendarHistoryAttempt(value => value + 1);
     } catch (error) {
       if (epoch === calendarUndoEpoch.current && selectedCalendarEnrollmentId === enrollmentId) {
         setUndoingCalendarId('');
-        setCalendarUndoError(String(error));
+        setCalendarUndoError(confirmedCalendarUndos.current.get(completion.id) === enrollmentId ? '' : String(error));
       }
     }
   }
