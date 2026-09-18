@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import Reader from './Reader';
 import { loadChapter, type Verse } from './provider';
-vi.mock('./provider', () => ({ loadChapter: vi.fn() }));
+vi.mock('./provider', () => ({ loadChapter: vi.fn(), kjvOfflineStatus: vi.fn(async () => false), downloadKjv: vi.fn(), invalidateKjvCache: vi.fn() }));
+vi.mock('../platform/journal', () => ({ isDesktop: true }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 describe('reader isolation', () => {
   it('aborts old chapter work and ignores a late result after external navigation', async () => {
@@ -27,5 +28,13 @@ describe('reader isolation', () => {
     expect(container.querySelector('img')).toBeNull();
     expect(container.querySelector('.scripture-highlight')?.textContent).toContain('Selected fixture.');
     expect(screen.getByText('Continue reading · Genesis 2')).toBeTruthy();
+  });
+  it('refetches a mounted chapter after a successful offline install', async () => {
+    vi.mocked(loadChapter).mockResolvedValue([{ number: 1, text: 'Fixture.' }]);
+    render(<Reader selection={{ book: 1, chapter: 1 }} onSelectionChange={() => {}} onReflect={() => {}} />);
+    await screen.findByText('Fixture.');
+    fireEvent.click(screen.getByText('About translations & availability'));
+    fireEvent.click(screen.getByRole('button', { name: 'Download KJV for offline reading' }));
+    await waitFor(() => expect(loadChapter).toHaveBeenCalledTimes(2));
   });
 });

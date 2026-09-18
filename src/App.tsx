@@ -14,13 +14,19 @@ const journal = isDesktop ? nativeJournal : browserJournal;
 
 export function App() {
   const appearance = useAppearance();
-  const [selection, setSelection] = useState<Passage>({ book: 43, chapter: 1 });
+  const [selection, setSelection] = useState<Passage>(() => {
+    try {
+      const saved = JSON.parse(window.localStorage?.getItem('scripture-journal.reader-location') ?? 'null') as Passage | null;
+      return saved && Number.isInteger(saved.book) && Number.isInteger(saved.chapter) ? saved : { book: 43, chapter: 1 };
+    } catch { return { book: 43, chapter: 1 }; }
+  });
   const [reflectRequest, setReflectRequest] = useState(0);
   const [pane, setPane] = useState<'read' | 'write'>('read');
   const [notice, setNotice] = useState('');
   const [exporting, setExporting] = useState(false);
   const persistence = useRef<JournalPersistenceState | null>(null);
   const rememberPersistence = useCallback((state: JournalPersistenceState) => { persistence.current = state; }, []);
+  useEffect(() => { try { window.localStorage?.setItem('scripture-journal.reader-location', JSON.stringify(selection)); } catch { /* Reading remains usable without preference storage. */ } }, [selection]);
 
   useEffect(() => {
     if (!isDesktop) return;

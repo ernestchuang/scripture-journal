@@ -1,7 +1,10 @@
 import type { Passage } from '../domain';
 import { BOOKS, chapterKey, validPassage } from './books';
+import { invoke } from '@tauri-apps/api/core';
+import { isDesktop } from '../platform/journal';
 export interface Verse { number: number; text: string }
 const cache = new Map<string, Verse[]>();
+export type Translation = 'KJV' | 'LSB' | 'NASB1995' | 'ESV';
 
 /** External data remains plain text; callers must never render it as HTML. */
 export function parseChapter(value: unknown, passage: Passage): Verse[] {
@@ -21,11 +24,16 @@ export function parseChapter(value: unknown, passage: Passage): Verse[] {
 }
 
 /** CORS supported; no bulk prefetch. See https://bible-api.com/ for service limits. */
-export async function loadChapter(passage: Passage, signal: AbortSignal): Promise<Verse[]> {
+export async function loadChapter(passage: Passage, signal: AbortSignal, translation: Translation = 'KJV'): Promise<Verse[]> {
   if (!validPassage(passage)) throw new Error('Invalid passage.');
-  const key = chapterKey(passage);
+  const key = `${translation}:${chapterKey(passage)}`;
   const existing = cache.get(key);
   if (existing) return existing;
+  if (isDesktop) {
+    const stored = await invoke<Verse[]>('scripture_chapter', { translation, book: passage.book, chapter: passage.chapter });
+    if (stored.length) { cache.set(key, stored); return stored; }
+  }
+  if (translation !== 'KJV') throw new Error(`${translation} requires an authorized scripture pack.`);
   const url = `https://bible-api.com/${encodeURIComponent(`${BOOKS[passage.book - 1].name} ${passage.chapter}`)}?translation=kjv&single_chapter_book_matching=indifferent`;
   const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(response.status === 429 ? 'The scripture source is busy. Wait 30 seconds, then retry.' : 'Scripture could not be loaded. Check your connection and retry.');
@@ -34,3 +42,7 @@ export async function loadChapter(passage: Passage, signal: AbortSignal): Promis
   cache.set(key, verses);
   return verses;
 }
+
+export const kjvOfflineStatus = () => isDesktop ? invoke<boolean>('scripture_kjv_status') : Promise.resolve(false);
+export const downloadKjv = () => invoke<void>('download_kjv_library');
+export const invalidateKjvCache = () => { for (const key of cache.keys()) if (key.startsWith('KJV:')) cache.delete(key); };
