@@ -11,6 +11,13 @@ import { nativePlans } from './platform/plans';
 import { PlanPanel } from './plans/PlanPanel';
 
 const journal = isDesktop ? nativeJournal : browserJournal;
+const portablePreferenceKeys = [
+  'scripture-journal.appearance',
+  'scripture-journal.custom-themes',
+  'scripture-journal.reader-location',
+  'scripture-journal.translation',
+] as const;
+type RestoreOutcome = { notice?: string | null; preferences: Record<string, string> };
 
 export function App() {
   const appearance = useAppearance();
@@ -20,6 +27,7 @@ export function App() {
   const [notice, setNotice] = useState('');
   const [exporting, setExporting] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
+  const [restoredPreferences, setRestoredPreferences] = useState<Record<string, string>>({});
   const persistence = useRef<JournalPersistenceState | null>(null);
   const rememberPersistence = useCallback((state: JournalPersistenceState) => { persistence.current = state; }, []);
 
@@ -38,6 +46,15 @@ export function App() {
     }).then((stop) => { if (disposed) stop(); else unlisten = stop; })
       .catch(() => setNotice('Close protection could not start. Wait for Draft saved before closing the app.'));
     return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    void invoke<RestoreOutcome>('startup_restore_outcome').then(outcome => {
+      if (!outcome) return;
+      if (outcome.notice) setNotice(outcome.notice);
+      setRestoredPreferences(outcome.preferences ?? {});
+    }).catch(error => setNotice(`Restore status could not be read. ${String(error)}`));
   }, []);
 
   function reflect(passage: Passage) {
@@ -71,10 +88,29 @@ export function App() {
         const directory = await invoke<string | null>('choose_restore_backup');
         if (!directory || !window.confirm(`Replace the current journal from this backup after restart?\n\n${directory}\n\nA pre-restore backup will be created first.`)) return;
         result = await invoke<string>('stage_full_restore', { directory });
-      } else result = await invoke<string | null>(command);
+      } else {
+        const preferences = Object.fromEntries(portablePreferenceKeys.flatMap(key => {
+          const value = localStorage.getItem(key);
+          return value === null ? [] : [[key, value]];
+        }));
+        result = await invoke<string | null>(command, { preferences });
+      }
       if (result) setNotice(command === 'create_full_backup' ? `Full backup created: ${result}` : result);
     } catch (error) { setNotice(`Backup operation failed; the current journal was not replaced. ${String(error)}`); }
     finally { setBackupBusy(false); }
+  }
+
+  async function applyRestoredPreferences() {
+    try {
+      for (const key of portablePreferenceKeys) {
+        const value = restoredPreferences[key];
+        if (value !== undefined) localStorage.setItem(key, value);
+      }
+      await invoke('acknowledge_restored_preferences');
+      window.location.reload();
+    } catch (error) {
+      setNotice(`Restored preferences could not be applied. They remain available to retry. ${String(error)}`);
+    }
   }
 
   return (
@@ -120,7 +156,9 @@ export function App() {
       </nav>
 
       {notice && <div className="app-notice" role="status">
-        <span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss export notice">×</button>
+        <span>{notice}</span>
+        {Object.keys(restoredPreferences).length > 0 && <button onClick={() => void applyRestoredPreferences()}>Apply restored appearance/reading preferences</button>}
+        <button onClick={() => setNotice('')} aria-label="Dismiss export notice">×</button>
       </div>}
 
       <main className={`workspace show-${pane}`}>

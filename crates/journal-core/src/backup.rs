@@ -2,7 +2,15 @@ use anyhow::{bail, ensure, Context, Result};
 use rusqlite::{backup::Backup, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path};
+
+pub type PortablePreferences = BTreeMap<String, String>;
+pub const PORTABLE_PREFERENCE_KEYS: [&str; 4] = [
+    "scripture-journal.appearance",
+    "scripture-journal.custom-themes",
+    "scripture-journal.reader-location",
+    "scripture-journal.translation",
+];
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -10,9 +18,12 @@ struct Manifest {
     format_version: u32,
     database: String,
     sha256: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    preferences: PortablePreferences,
 }
 
-pub fn create(source: &Path, destination: &Path) -> Result<()> {
+pub fn create(source: &Path, destination: &Path, preferences: PortablePreferences) -> Result<()> {
+    validate_preferences(&preferences)?;
     let parent = destination
         .parent()
         .context("Backup destination needs a parent")?;
@@ -33,6 +44,7 @@ pub fn create(source: &Path, destination: &Path) -> Result<()> {
         format_version: 1,
         database: "journal.sqlite3".into(),
         sha256: checksum(&db_path)?,
+        preferences,
     };
     fs::write(
         temp.path().join("manifest.json"),
@@ -49,11 +61,12 @@ pub fn create(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn stage_restore(backup: &Path, staged: &Path) -> Result<()> {
+pub fn stage_restore(backup: &Path, staged: &Path) -> Result<PortablePreferences> {
     let manifest: Manifest = serde_json::from_slice(&fs::read(backup.join("manifest.json"))?)?;
     if manifest.format_version != 1 || manifest.database != "journal.sqlite3" {
         bail!("Unsupported backup format");
     }
+    validate_preferences(&manifest.preferences)?;
     let source = backup.join(&manifest.database);
     if checksum(&source)? != manifest.sha256 {
         bail!("Backup checksum does not match");
@@ -75,7 +88,7 @@ pub fn stage_restore(backup: &Path, staged: &Path) -> Result<()> {
     fs::rename(&temp, staged)?;
     fs::File::open(staged)?.sync_all()?;
     sync_directory(parent)?;
-    Ok(())
+    Ok(manifest.preferences)
 }
 
 pub fn activate_pending(live: &Path, staged: &Path) -> Result<bool> {
@@ -93,6 +106,7 @@ pub fn activate_pending(live: &Path, staged: &Path) -> Result<bool> {
     create(
         live,
         &live.with_extension(format!("pre-restore-{stamp}.sjbackup")),
+        PortablePreferences::new(),
     )?;
     // On supported Unix targets rename atomically replaces the live directory entry.
     // The old bytes are already durably retained in the verified pre-restore package.
@@ -131,6 +145,24 @@ fn sync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_preferences(preferences: &PortablePreferences) -> Result<()> {
+    ensure!(
+        preferences.len() <= PORTABLE_PREFERENCE_KEYS.len(),
+        "Too many portable preferences"
+    );
+    let mut total = 0usize;
+    for (key, value) in preferences {
+        ensure!(
+            PORTABLE_PREFERENCE_KEYS.contains(&key.as_str()),
+            "Unsupported portable preference"
+        );
+        ensure!(value.len() <= 48 * 1024, "Portable preference is too large");
+        total = total.saturating_add(key.len()).saturating_add(value.len());
+    }
+    ensure!(total <= 64 * 1024, "Portable preferences are too large");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,7 +176,7 @@ mod tests {
         let writer = Connection::open(&live).unwrap();
         writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE backup_probe(value TEXT); INSERT INTO backup_probe VALUES('retained');").unwrap();
         let package = root.path().join("journal.sjbackup");
-        create(&live, &package).unwrap();
+        create(&live, &package, PortablePreferences::new()).unwrap();
         let source_bytes = fs::read(package.join("journal.sqlite3")).unwrap();
         let snapshot = Connection::open(package.join("journal.sqlite3")).unwrap();
         assert_eq!(
@@ -170,7 +202,7 @@ mod tests {
         drop(JournalStore::open(&live).unwrap());
         let original = fs::read(&live).unwrap();
         let package = root.path().join("journal.sjbackup");
-        create(&live, &package).unwrap();
+        create(&live, &package, PortablePreferences::new()).unwrap();
         fs::write(package.join("journal.sqlite3"), b"corrupt").unwrap();
         let staged = root.path().join("restore-pending.sqlite3");
         assert!(stage_restore(&package, &staged).is_err());
@@ -187,7 +219,7 @@ mod tests {
         drop(JournalStore::open(&source).unwrap());
         Connection::open(&source).unwrap().execute_batch("CREATE TABLE restore_probe(value TEXT); INSERT INTO restore_probe VALUES('restored');").unwrap();
         let package = root.path().join("incoming.sjbackup");
-        create(&source, &package).unwrap();
+        create(&source, &package, PortablePreferences::new()).unwrap();
         let staged = root.path().join("restore-pending.sqlite3");
         stage_restore(&package, &staged).unwrap();
         assert!(activate_pending(&live, &staged).unwrap());
@@ -222,5 +254,27 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .contains("restore-pending.invalid-")));
+    }
+
+    #[test]
+    fn portable_preferences_round_trip_and_reject_unapproved_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("journal.sqlite3");
+        drop(JournalStore::open(&live).unwrap());
+        let package = root.path().join("journal.sjbackup");
+        let preferences = BTreeMap::from([
+            ("scripture-journal.appearance".into(), "theme:quiet".into()),
+            (
+                "scripture-journal.reader-location".into(),
+                r#"{"book":43,"chapter":3}"#.into(),
+            ),
+        ]);
+        create(&live, &package, preferences.clone()).unwrap();
+        let restored = stage_restore(&package, &root.path().join("pending.sqlite3")).unwrap();
+        assert_eq!(restored, preferences);
+
+        let unapproved =
+            BTreeMap::from([("scripture-journal.export-path".into(), "/secret".into())]);
+        assert!(create(&live, &root.path().join("invalid.sjbackup"), unapproved).is_err());
     }
 }
