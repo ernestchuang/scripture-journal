@@ -16,6 +16,7 @@ const native = vi.hoisted(() => ({
   planCompletionHistory: vi.fn(),
   registerFourStreamPlan: vi.fn(),
   importPlanDefinitionJson: vi.fn(),
+  createPlanDefinitionVersion: vi.fn(),
   exportPlanDefinitionJson: vi.fn(),
   enrollInChapterStreams: vi.fn(),
   completePlanStream: vi.fn(),
@@ -46,6 +47,7 @@ vi.mock('./platform/plans', () => ({
     planCompletionHistory: native.planCompletionHistory,
     registerFourStreamPlan: native.registerFourStreamPlan,
     importPlanDefinitionJson: native.importPlanDefinitionJson,
+    createPlanDefinitionVersion: native.createPlanDefinitionVersion,
     exportPlanDefinitionJson: native.exportPlanDefinitionJson,
     enrollInChapterStreams: native.enrollInChapterStreams,
     completePlanStream: native.completePlanStream,
@@ -91,6 +93,7 @@ beforeEach(() => {
   native.planCompletionHistory.mockReset().mockResolvedValue([]);
   native.registerFourStreamPlan.mockReset();
   native.importPlanDefinitionJson.mockReset();
+  native.createPlanDefinitionVersion.mockReset();
   native.exportPlanDefinitionJson.mockReset();
   native.enrollInChapterStreams.mockReset();
   native.completePlanStream.mockReset();
@@ -221,6 +224,30 @@ describe('native application close lifecycle', () => {
     expect(native.saveEntry).toHaveBeenCalledTimes(1);
     expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while browsing definitions' } });
     expect((editor as HTMLTextAreaElement).value).toBe('Keep this while browsing definitions');
+  });
+
+  it('preserves and autosaves dirty writing while appending a retained plan version', async () => {
+    const first = { id: 'definition-1', planId: 'plan-1', version: 1, createdAt: '2026-09-18T00:00:00Z', definition: { schemaVersion: 1, name: 'Editable retained', schedule: { kind: 'explicitSchedule' as const, days: [{ day: 1, passages: [{ book: 43, chapter: 3 }] }] } } };
+    const edited = { ...first.definition, name: 'Edited retained' };
+    const second = { ...first, id: 'definition-2', version: 2, definition: edited };
+    native.listLatestPlanDefinitionVersions.mockResolvedValueOnce([first]).mockResolvedValueOnce([second]);
+    native.createPlanDefinitionVersion.mockResolvedValue(second);
+    native.saveEntry.mockImplementation(async (request: SaveRequest) => savedEntry(request));
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'New blank entry' }));
+    const editor = await screen.findByLabelText(/Reflection Markdown/);
+    await screen.findByLabelText('Retained plan definition');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit selected as new version' }));
+    vi.useFakeTimers();
+    fireEvent.change(editor, { target: { value: 'Keep this while versioning a plan' } });
+    fireEvent.change(screen.getByLabelText('Edited plan JSON'), { target: { value: JSON.stringify(edited) } });
+    fireEvent.click(screen.getByRole('button', { name: 'Append new plan version' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(native.createPlanDefinitionVersion).toHaveBeenCalledWith(first.planId, edited);
+    expect(native.saveEntry).toHaveBeenCalledTimes(1);
+    expect(native.saveEntry.mock.calls[0][0]).toMatchObject({ finish: false, content: { body: 'Keep this while versioning a plan' } });
+    expect((editor as HTMLTextAreaElement).value).toBe('Keep this while versioning a plan');
   });
 
   it('preserves and autosaves dirty writing while enrolling in a selected retained definition', async () => {

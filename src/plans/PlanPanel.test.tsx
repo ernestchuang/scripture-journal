@@ -29,7 +29,7 @@ const importedStreams = { ...importedPlan, definition: { ...importedPlan.definit
 const customEnrollment: PlanEnrollment = { id: 'custom-enrollment', definitionVersionId: importedStreams.id, createdAt: '2026-09-18T00:00:04Z' };
 const retainedStreams = { ...importedStreams, id: retainedDefinition.id, planId: retainedDefinition.planId, definition: { ...importedStreams.definition, name: 'Duplicate name' } };
 const retainedEnrollment: PlanEnrollment = { id: 'retained-enrollment', definitionVersionId: retainedStreams.id, createdAt: '2026-09-18T00:00:05Z' };
-const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
+const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanDefinitionVersions' | 'getPlanDefinitionVersion' | 'activePlanAssignments' | 'planCompletionHistory' | 'registerFourStreamPlan' | 'importPlanDefinitionJson' | 'createPlanDefinitionVersion' | 'exportPlanDefinitionJson' | 'enrollInChapterStreams' | 'completePlanStream' | 'undoPlanCompletion'> => ({
   listPlanEnrollments: vi.fn(async () => [first, second]),
   listLatestPlanDefinitionVersions: vi.fn(async () => []),
   getPlanDefinitionVersion: vi.fn(async id => definition(id, id === second.definitionVersionId ? 'Second plan' : 'First plan')),
@@ -37,6 +37,7 @@ const api = (): Pick<PlanDefinitionApi, 'listPlanEnrollments' | 'listLatestPlanD
   planCompletionHistory: vi.fn(async () => []),
   registerFourStreamPlan: vi.fn(async () => fourStream),
   importPlanDefinitionJson: vi.fn(async () => importedPlan),
+  createPlanDefinitionVersion: vi.fn(async (_planId, definition) => ({ ...retainedDefinition, id: 'retained-version-3', version: 2, definition })),
   exportPlanDefinitionJson: vi.fn(async id => `{"versionId":"${id}"}`),
   enrollInChapterStreams: vi.fn(async () => created),
   completePlanStream: vi.fn(async request => ({ id: 'completion-1', assignmentId: request.expectedAssignmentId, completedAt: '2026-09-18T00:00:03Z' })),
@@ -293,6 +294,78 @@ describe('retained plan panel', () => {
     view.unmount();
     await act(async () => { resolveThird('{"late":"replacement"}'); });
     expect(view.container.textContent).toBe('');
+  });
+
+  it('appends the captured retained plan explicitly and preserves newer input through refresh recovery', async () => {
+    let resolveCreate!: (value: PlanDefinitionVersion) => void;
+    const editedDefinition = { ...retainedStreams.definition, name: 'Edited retained streams' };
+    const createdVersion = { ...retainedStreams, id: 'retained-version-3', version: 2, definition: editedDefinition };
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions)
+      .mockResolvedValueOnce([retainedStreams, retainedExplicit])
+      .mockRejectedValueOnce(new Error('edit refresh offline'))
+      .mockResolvedValueOnce([createdVersion, retainedExplicit]);
+    vi.mocked(plans.createPlanDefinitionVersion).mockImplementationOnce(() => new Promise(resolve => { resolveCreate = resolve; }));
+    render(<PlanPanel api={plans} />);
+    const definitionSelect = await screen.findByLabelText('Retained plan definition') as HTMLSelectElement;
+    fireEvent.click(screen.getByRole('button', { name: 'Edit selected as new version' }));
+    const editor = screen.getByLabelText('Edited plan JSON') as HTMLTextAreaElement;
+    const submitted = JSON.stringify(editedDefinition);
+    fireEvent.change(editor, { target: { value: submitted } });
+    const append = screen.getByRole('button', { name: 'Append new plan version' });
+    fireEvent.click(append); fireEvent.click(append);
+    expect(plans.createPlanDefinitionVersion).toHaveBeenCalledTimes(1);
+    expect(plans.createPlanDefinitionVersion).toHaveBeenCalledWith(retainedStreams.planId, editedDefinition);
+    fireEvent.change(definitionSelect, { target: { value: retainedExplicit.id } });
+    const newerInput = JSON.stringify({ ...editedDefinition, name: 'Newer unsent edit' });
+    fireEvent.change(editor, { target: { value: newerInput } });
+    fireEvent.change(definitionSelect, { target: { value: retainedStreams.id } });
+    await act(async () => { resolveCreate(createdVersion); });
+
+    expect(await screen.findByText(/Retained definitions could not be refreshed after the confirmed write: Error: edit refresh offline/)).toBeTruthy();
+    expect(editor.value).toBe(newerInput);
+    expect(screen.getByText(/Editing plan retained-plan-1 from definition version 1/)).toBeTruthy();
+    expect(definitionSelect.value).toBe(createdVersion.id);
+    expect(Array.from(definitionSelect.options, option => option.value)).toContain(createdVersion.id);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry retained definitions' }));
+    await waitFor(() => expect(plans.listLatestPlanDefinitionVersions).toHaveBeenCalledTimes(3));
+    expect(plans.createPlanDefinitionVersion).toHaveBeenCalledTimes(1);
+    expect(plans.enrollInChapterStreams).not.toHaveBeenCalled();
+    expect(plans.completePlanStream).not.toHaveBeenCalled();
+    expect(plans.undoPlanCompletion).not.toHaveBeenCalled();
+  });
+
+  it('preserves the edit target and input across parse and native rejection before explicit retry', async () => {
+    let rejectCreate!: (reason: unknown) => void;
+    const correctedDefinition = { ...retainedDefinition.definition, name: 'Corrected edit' };
+    const newerDefinition = { ...correctedDefinition, name: 'Newer correction' };
+    const createdVersion = { ...retainedDefinition, id: 'retained-version-3', version: 2, definition: newerDefinition };
+    const plans = api();
+    vi.mocked(plans.listLatestPlanDefinitionVersions).mockResolvedValue([retainedDefinition, retainedExplicit]);
+    vi.mocked(plans.createPlanDefinitionVersion)
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectCreate = reject; }))
+      .mockResolvedValueOnce(createdVersion);
+    render(<PlanPanel api={plans} />);
+    const definitionSelect = await screen.findByLabelText('Retained plan definition');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit selected as new version' }));
+    const editor = screen.getByLabelText('Edited plan JSON') as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: '{' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Append new plan version' }));
+    expect(await screen.findByText(/Could not parse edited plan JSON/)).toBeTruthy();
+    expect(plans.createPlanDefinitionVersion).not.toHaveBeenCalled();
+
+    fireEvent.change(editor, { target: { value: JSON.stringify(correctedDefinition) } });
+    fireEvent.click(screen.getByRole('button', { name: 'Append new plan version' }));
+    fireEvent.change(definitionSelect, { target: { value: retainedExplicit.id } });
+    fireEvent.change(editor, { target: { value: JSON.stringify(newerDefinition) } });
+    await act(async () => { rejectCreate(new Error('native validation failed')); });
+    expect(await screen.findByText(/Could not append plan version: Error: native validation failed/)).toBeTruthy();
+    expect(editor.value).toBe(JSON.stringify(newerDefinition));
+    expect(screen.getByText(/Editing plan retained-plan-1 from definition version 1/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Append new plan version' }));
+    await waitFor(() => expect(plans.createPlanDefinitionVersion).toHaveBeenCalledTimes(2));
+    expect(plans.createPlanDefinitionVersion).toHaveBeenNthCalledWith(1, retainedDefinition.planId, correctedDefinition);
+    expect(plans.createPlanDefinitionVersion).toHaveBeenNthCalledWith(2, retainedDefinition.planId, newerDefinition);
   });
 
   it('enrolls the exact selected retained version once with explicit occurrence and loop choices', async () => {
